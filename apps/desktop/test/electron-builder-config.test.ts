@@ -285,6 +285,19 @@ describe("electron-builder signing config", () => {
     });
   });
 
+  it("packages macOS installers and updater archives for arm64 and x64", async () => {
+    const configText = await readFile(
+      resolve(desktopPackageRoot, "electron-builder.config.json"),
+      "utf8",
+    );
+    const config = electronBuilderConfigSchema.parse(JSON.parse(configText));
+
+    expect(config.mac.target).toEqual([
+      { target: "dmg", arch: ["arm64", "x64"] },
+      { target: "zip", arch: ["arm64", "x64"] },
+    ]);
+  });
+
   it("disables in-place native rebuilds so the shared pnpm store is not mutated", async () => {
     // electron-builder's npmRebuild rebuilds better-sqlite3 through the
     // workspace symlink into the shared content-addressed store, flipping the

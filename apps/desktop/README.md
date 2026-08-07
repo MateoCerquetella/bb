@@ -73,7 +73,8 @@ pnpm exec turbo run smoke:packaged --filter=@bb/desktop
 ```
 
 Artifacts are written under `apps/desktop/release/`. The desktop build is
-macOS-only and Apple Silicon arm64-only. Without signing secrets, local builds
+macOS-only and produces separate Apple Silicon arm64 and Intel x64 artifacts.
+Without signing secrets, local builds
 sign with a code-signing identity auto-discovered from the keychain and skip
 notarization. A valid signature matters even for local builds: macOS
 provenance-tracks unsigned apps, forcing syspolicyd to evaluate every exec in
@@ -161,8 +162,9 @@ GitHub Actions secrets:
 | `APPLE_TEAM_ID`              | Developer Team ID from `developer.apple.com/account` membership details.                                                                                                               |
 
 Once those secrets are present, the next `Build Desktop` workflow run with
-`publish=true` and `release_channel=stable` signs the `.app`, notarizes it, and
-publishes the signed `.dmg` / `.zip` assets to `desktop-latest`. If no required
+`publish=true` and `release_channel=stable` signs and notarizes both the arm64
+and x64 `.app` bundles, then publishes their `.dmg` / `.zip` assets to
+`desktop-latest`. If no required
 signing secrets are configured, the workflow still builds unsigned artifacts, but
 the release job publishes only `desktop-version.json` and withholds unsigned
 binaries from `desktop-latest`. If only some required signing secrets are set,
