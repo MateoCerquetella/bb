@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "Publish stable desktop-version.json release assets"
+        description: 'Publish stable desktop-version.json release assets'
         required: true
         type: boolean
         default: false
       release_channel:
-        description: "Release channel. Only stable can update desktop-latest."
+        description: 'Release channel. Only stable can update desktop-latest.'
         required: true
         type: choice
         default: qa
@@ -18,9 +18,9 @@ on:
           - stable
 
 env:
-  CSC_IDENTITY_AUTO_DISCOVERY: "false"
-  NODE_VERSION: "22.x"
-  PNPM_VERSION: "9.15.0"
+  CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+  NODE_VERSION: '22.x'
+  PNPM_VERSION: '9.15.0'
 
 permissions:
   contents: write
@@ -30,8 +30,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  macos:
-    name: macOS arm64 + x64 desktop artifacts
+  macos-intel:
+    name: macOS x64 desktop artifacts
     runs-on: macos-15-intel
     timeout-minutes: 60
 
@@ -53,6 +53,67 @@ jobs:
 
       - name: Verify Intel runner
         run: test "$(uname -m)" = "x86_64"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile --prefer-offline
+
+      - name: Typecheck desktop and launcher
+        run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --output-logs=new-only
+
+      - name: Build desktop
+        run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
+
+      - name: Test desktop and launcher
+        run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --force --output-logs=new-only
+
+      - name: Package x64 desktop artifacts
+        env:
+          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+          CSC_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: pnpm exec turbo run desktop:build --filter=@bb/desktop --force --output-logs=new-only
+
+      - name: Smoke test packaged desktop app
+        run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
+
+      - name: Upload x64 staging artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: bb-desktop-macos-x64-staging
+          path: |
+            apps/desktop/release/*.dmg
+            apps/desktop/release/*.zip
+            apps/desktop/release/*.blockmap
+            apps/desktop/release/latest-mac.yml
+          if-no-files-found: error
+
+  macos:
+    name: macOS arm64 + x64 desktop artifacts
+    needs: macos-intel
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          run_install: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Verify arm64 runner
+        run: test "$(uname -m)" = "arm64"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile --prefer-offline
@@ -103,7 +164,7 @@ jobs:
             exit 1
           fi
 
-      - name: Package arm64 and x64 desktop artifacts
+      - name: Package arm64 desktop artifacts
         env:
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -115,6 +176,19 @@ jobs:
 
       - name: Smoke test packaged desktop app
         run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
+
+      - name: Download x64 staging artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: bb-desktop-macos-x64-staging
+          path: apps/desktop/release/x64
+
+      - name: Combine arm64 and x64 artifacts
+        run: |
+          mv apps/desktop/release/x64/*.dmg apps/desktop/release/
+          mv apps/desktop/release/x64/*.zip apps/desktop/release/
+          mv apps/desktop/release/x64/*.blockmap apps/desktop/release/
+          pnpm --dir apps/desktop run desktop:merge-update-metadata -- release/x64/latest-mac.yml
 
       - name: Generate desktop version feed
         run: pnpm --dir apps/desktop run desktop:version-feed

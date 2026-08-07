@@ -554,6 +554,13 @@ importers:
       zod:
         specifier: 4.3.6
         version: 4.3.6
+    optionalDependencies:
+      '@parcel/watcher-darwin-arm64':
+        specifier: 2.5.6
+        version: 2.5.6
+      '@parcel/watcher-darwin-x64':
+        specifier: 2.5.6
+        version: 2.5.6
     devDependencies:
       '@bb/config':
         specifier: workspace:*
