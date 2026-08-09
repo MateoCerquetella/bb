@@ -4,8 +4,8 @@ name: Publish bb-app
 
 on:
   schedule:
-    - cron: '0 3 * * *'
-      timezone: 'America/Los_Angeles'
+    - cron: "0 3 * * *"
+      timezone: "America/Los_Angeles"
   workflow_dispatch:
     inputs:
       npm_tag:
@@ -218,15 +218,17 @@ jobs:
             echo "- commit: \`${GITHUB_SHA}\`"
           } >> "$GITHUB_STEP_SUMMARY"
 
-  nightly-desktop-intel:
-    name: Build bb Nightly desktop x64
+  nightly-desktop:
+    name: Publish bb Nightly desktop
     if: ${{ github.event_name == 'schedule' || (inputs.npm_tag == 'nightly' && inputs.dry_run == false) }}
     needs: publish
     runs-on: macos-15-intel
-    timeout-minutes: 60
+    timeout-minutes: 45
+    permissions:
+      contents: write
     env:
       BB_DESKTOP_RELEASE_CHANNEL: nightly
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
     steps:
       - name: Checkout repository
@@ -296,7 +298,7 @@ jobs:
             exit 1
           fi
 
-      - name: Package signed x64 nightly desktop artifacts
+      - name: Package signed arm64 and x64 nightly desktop artifacts
         env:
           CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
           CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
@@ -308,124 +310,6 @@ jobs:
 
       - name: Smoke test packaged nightly desktop app
         run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
-
-      - name: Upload x64 nightly staging artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: bb-nightly-desktop-macos-x64-staging-${{ steps.nightly_version.outputs.version }}
-          retention-days: 14
-          path: |
-            apps/desktop/release/*.dmg
-            apps/desktop/release/*.zip
-            apps/desktop/release/*.blockmap
-            apps/desktop/release/nightly-mac.yml
-          if-no-files-found: error
-
-  nightly-desktop:
-    name: Publish bb Nightly desktop arm64 + x64
-    if: ${{ github.event_name == 'schedule' || (inputs.npm_tag == 'nightly' && inputs.dry_run == false) }}
-    needs: [publish, nightly-desktop-intel]
-    runs-on: macos-15
-    timeout-minutes: 60
-    permissions:
-      contents: write
-    env:
-      BB_DESKTOP_RELEASE_CHANNEL: nightly
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 9.15.0
-          run_install: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22.x
-          cache: pnpm
-
-      - name: Verify arm64 runner
-        run: test "$(uname -m)" = "arm64"
-
-      - name: Install dependencies
-        run: pnpm install --frozen-lockfile --prefer-offline
-
-      - name: Prepare nightly version
-        id: nightly_version
-        run: |
-          nightly_version="$(node scripts/prepare-nightly-version.mjs)"
-          echo "version=${nightly_version}" >> "$GITHUB_OUTPUT"
-          echo "Prepared bb-app and desktop version ${nightly_version}."
-
-      - name: Typecheck desktop and launcher
-        run: pnpm exec turbo run typecheck --filter=@bb/desktop --filter=bb-app --output-logs=new-only
-
-      - name: Build desktop
-        run: pnpm exec turbo run build --filter=@bb/desktop --output-logs=new-only
-
-      - name: Test desktop and launcher
-        run: pnpm exec turbo run test --filter=@bb/desktop --filter=bb-app --force --output-logs=new-only
-
-      - name: Require macOS signing and notarization secrets
-        env:
-          MACOS_CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          set -euo pipefail
-
-          required_secret_names=(
-            "MACOS_CERTIFICATE_P12"
-            "MACOS_CERTIFICATE_PASSWORD"
-            "APPLE_ID"
-            "APPLE_APP_PASSWORD"
-            "APPLE_TEAM_ID"
-          )
-          missing_secret_names=()
-
-          for secret_name in "${required_secret_names[@]}"; do
-            if [[ -z "${!secret_name:-}" ]]; then
-              missing_secret_names+=("$secret_name")
-            fi
-          done
-
-          if [[ "${#missing_secret_names[@]}" -gt 0 ]]; then
-            echo "::error::Nightly desktop auto-updates require signed and notarized artifacts. Missing: ${missing_secret_names[*]}."
-            exit 1
-          fi
-
-      - name: Package signed arm64 nightly desktop artifacts
-        env:
-          CSC_LINK: ${{ secrets.MACOS_CERTIFICATE_P12 }}
-          CSC_KEY_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
-          CSC_NAME: ${{ secrets.MACOS_CERTIFICATE_NAME }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: pnpm exec turbo run desktop:build --filter=@bb/desktop --force --output-logs=new-only
-
-      - name: Smoke test packaged nightly desktop app
-        run: pnpm exec turbo run smoke:packaged --filter=@bb/desktop --force --output-logs=new-only
-
-      - name: Download x64 nightly staging artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: bb-nightly-desktop-macos-x64-staging-${{ steps.nightly_version.outputs.version }}
-          path: apps/desktop/release/x64
-
-      - name: Combine arm64 and x64 nightly artifacts
-        run: |
-          mv apps/desktop/release/x64/*.dmg apps/desktop/release/
-          mv apps/desktop/release/x64/*.zip apps/desktop/release/
-          mv apps/desktop/release/x64/*.blockmap apps/desktop/release/
-          pnpm --dir apps/desktop run desktop:merge-update-metadata -- release/x64/nightly-mac.yml
 
       - name: Generate nightly desktop version feed
         run: pnpm --dir apps/desktop run desktop:version-feed
@@ -496,7 +380,6 @@ jobs:
             echo
             echo "- version: \`$VERSION\`"
             echo "- app identity: \`dev.bb.desktop.nightly\`"
-            echo "- architectures: \`arm64\`, \`x64\`"
             echo "- release: https://github.com/get-bb/bb/releases/tag/desktop-nightly"
             echo "- update feed: https://github.com/get-bb/bb/releases/download/desktop-nightly/desktop-version.json"
             echo "- retention for workflow artifacts: 14 days"

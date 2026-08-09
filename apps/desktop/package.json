@@ -11,7 +11,6 @@
     "build": "node scripts/build.mjs",
     "clean": "rimraf dist release",
     "desktop:build": "pnpm run build && node scripts/run-electron-builder.mjs --mac --publish always",
-    "desktop:merge-update-metadata": "tsx scripts/merge-update-metadata.mts",
     "desktop:version-feed": "tsx scripts/generate-version-feed.mts",
     "dev": "pnpm run prepare-runtime && pnpm run build && node --conditions=source --import tsx scripts/run-electron-dev.mjs",
     "dist": "pnpm run prepare-runtime && pnpm run desktop:build",
@@ -28,10 +27,6 @@
     "electron-updater": "^6.8.3",
     "semver": "^7.7.0",
     "zod": "^4.3.6"
-  },
-  "optionalDependencies": {
-    "@parcel/watcher-darwin-arm64": "2.5.6",
-    "@parcel/watcher-darwin-x64": "2.5.6"
   },
   "devDependencies": {
     "@bb/config": "workspace:*",

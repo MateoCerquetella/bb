@@ -125,19 +125,10 @@ async function readDesktopPackageVersion() {
 
 async function resolvePackagedAppBinary() {
   const entries = await readdir(releaseDir, { withFileTypes: true });
-  const nativeOutputDirectory = process.arch === "arm64" ? "mac-arm64" : "mac";
   const macOutputDirectories = entries
     .filter((entry) => entry.isDirectory() && entry.name.startsWith("mac"))
     .map((entry) => entry.name)
-    .sort((left, right) => {
-      if (left === nativeOutputDirectory) {
-        return -1;
-      }
-      if (right === nativeOutputDirectory) {
-        return 1;
-      }
-      return left.localeCompare(right);
-    });
+    .sort();
 
   for (const directory of macOutputDirectories) {
     const appBinary = join(releaseDir, directory, appBinaryRelativePath);

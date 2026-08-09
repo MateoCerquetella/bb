@@ -162,9 +162,8 @@ GitHub Actions secrets:
 | `APPLE_TEAM_ID`              | Developer Team ID from `developer.apple.com/account` membership details.                                                                                                               |
 
 Once those secrets are present, the next `Build Desktop` workflow run with
-`publish=true` and `release_channel=stable` signs and notarizes both the arm64
-and x64 `.app` bundles, then publishes their `.dmg` / `.zip` assets to
-`desktop-latest`. If no required
+`publish=true` and `release_channel=stable` signs the `.app`, notarizes it, and
+publishes the signed `.dmg` / `.zip` assets to `desktop-latest`. If no required
 signing secrets are configured, the workflow still builds unsigned artifacts, but
 the release job publishes only `desktop-version.json` and withholds unsigned
 binaries from `desktop-latest`. If only some required signing secrets are set,

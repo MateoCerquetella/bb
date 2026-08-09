@@ -245,21 +245,6 @@ describe("electron-builder signing config", () => {
     );
   });
 
-  it("ships native Parcel watcher packages for arm64 and x64", async () => {
-    const packageJsonText = await readFile(
-      resolve(desktopPackageRoot, "package.json"),
-      "utf8",
-    );
-    const packageJson = desktopPackageJsonSchema.parse(
-      JSON.parse(packageJsonText),
-    );
-
-    expect(packageJson.optionalDependencies).toMatchObject({
-      "@parcel/watcher-darwin-arm64": "2.5.6",
-      "@parcel/watcher-darwin-x64": "2.5.6",
-    });
-  });
-
   it("unpacks the ESM bb-app bridge with an explicit module extension", async () => {
     const configText = await readFile(
       resolve(desktopPackageRoot, "electron-builder.config.json"),
@@ -298,16 +283,6 @@ describe("electron-builder signing config", () => {
       cpu: ["arm64", "x64"],
       os: ["current"],
     });
-  });
-
-  it("packages macOS installers and updater archives for the requested architecture", async () => {
-    const configText = await readFile(
-      resolve(desktopPackageRoot, "electron-builder.config.json"),
-      "utf8",
-    );
-    const config = electronBuilderConfigSchema.parse(JSON.parse(configText));
-
-    expect(config.mac.target).toEqual(["dmg", "zip"]);
   });
 
   it("disables in-place native rebuilds so the shared pnpm store is not mutated", async () => {
