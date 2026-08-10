@@ -53,6 +53,7 @@ import {
   useIndexedAppCommandHandlers,
 } from "@/components/commands/AppCommandProvider";
 import { useRouteState } from "@/hooks/useRouteState";
+import { SidebarThreadSelectionProvider } from "./SidebarThreadSelection";
 
 const NEW_THREAD_PANE_CONTENT = { kind: "new-thread" } as const;
 
@@ -300,18 +301,20 @@ export function AppSidebar({
           splitEnabled={threadSplitsEnabled}
           toolsRoutePath={toolsRoutePath}
         />
-        <SidebarContent>
-          {threadListProvider ? (
-            <PluginThreadList
-              slot={threadListProvider}
-              builtInFallback={builtInThreadList}
-              searchQuery={threadSearch.query}
-              onNavigate={threadSearch.onExternalThreadOpen}
-            />
-          ) : (
-            builtInThreadList
-          )}
-        </SidebarContent>
+        <SidebarThreadSelectionProvider>
+          <SidebarContent>
+            {threadListProvider ? (
+              <PluginThreadList
+                slot={threadListProvider}
+                builtInFallback={builtInThreadList}
+                searchQuery={threadSearch.query}
+                onNavigate={threadSearch.onExternalThreadOpen}
+              />
+            ) : (
+              builtInThreadList
+            )}
+          </SidebarContent>
+        </SidebarThreadSelectionProvider>
         <SidebarFooter className="relative">
           <OverflowFade placement="above" tone="sidebar" size="sm" />
           {/* The footer holds a variable number of plugin action buttons, so a

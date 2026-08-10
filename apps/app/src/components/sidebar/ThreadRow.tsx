@@ -73,6 +73,7 @@ import { AppCommandShortcutPill } from "@/components/commands/AppCommandShortcut
 import { useThreadTitleDisplayText } from "@/components/thread/ThreadTitleMentions";
 import { pluginIconName } from "@/components/plugin/PluginIcon";
 import { usePluginThreadRowStatus } from "@/lib/plugin-thread-row-status";
+import { useSidebarThreadSelection } from "./SidebarThreadSelection";
 
 interface ThreadRowBaseOptions {
   depth: number;
@@ -484,7 +485,9 @@ function ThreadRowComponent({
   );
   const shortcut = useSidebarThreadShortcut(thread.id);
   const pluginThreadRowStatus = usePluginThreadRowStatus(thread.id);
-  const showActive = isActive;
+  const threadSelection = useSidebarThreadSelection();
+  const isBatchSelected = threadSelection.selectedThreadIds.has(thread.id);
+  const showActive = isActive && threadSelection.selectedThreadIds.size === 0;
   const hasPendingInteraction = thread.hasPendingInteraction;
   const threadRuntimeBusy = isRuntimeBusyThread(thread);
   const threadWorkflowActive = hasActiveWorkflowActivity(thread);
@@ -592,9 +595,11 @@ function ThreadRowComponent({
     options.isCompact
       ? COARSE_POINTER_COMPACT_ROW_HEIGHT_CLASS
       : COARSE_POINTER_ROW_HEIGHT_CLASS,
-    showActive
-      ? SIDEBAR_ROW_SELECTED_STATE_CLASS
-      : SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
+    isBatchSelected
+      ? `${SIDEBAR_ROW_SELECTED_STATE_CLASS} shadow-[inset_2px_0_0_var(--sidebar-foreground)]`
+      : showActive
+        ? SIDEBAR_ROW_SELECTED_STATE_CLASS
+        : SIDEBAR_ROW_INTERACTIVE_STATE_CLASS,
     // Subtle open-in-split tint, weaker than the active-row treatment. The
     // focused pane's thread is already the active row, so this only marks the
     // other open panes; hover still wins over it.
@@ -621,7 +626,9 @@ function ThreadRowComponent({
         to={getThreadRoutePath({ projectId, threadId: thread.id })}
         data-sidebar-thread-shortcut-target=""
         data-sidebar-thread-id={thread.id}
+        aria-label={isBatchSelected ? `${linkLabel} (selected)` : linkLabel}
         onClick={(event) => {
+          if (threadSelection.handleThreadClick(event, thread.id)) return;
           // Selecting a thread/agent row restores its conversation without
           // disturbing any other thread's collapsed conversation state.
           setConversationCollapsed(false);
@@ -635,7 +642,6 @@ function ThreadRowComponent({
           }
           onProjectSelect?.();
         }}
-        aria-label={linkLabel}
         aria-keyshortcuts={shortcut?.ariaKeyshortcuts}
         className="absolute inset-0 rounded-md outline-none ring-sidebar-ring focus-visible:ring-2"
       />

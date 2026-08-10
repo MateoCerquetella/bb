@@ -42,6 +42,10 @@ import {
   ThreadDeleteDialog,
   type ThreadDeleteDialogTarget,
 } from "@/components/dialogs/ThreadDeleteDialog";
+import {
+  ConfirmDeleteDialog,
+  ConfirmDeleteDialogContent,
+} from "@/components/dialogs/ConfirmDeleteDialog";
 import { ArchivedThreadToastTitle } from "@/components/thread/ArchivedThreadToastTitle";
 import { destroyPersistedBrowserViewsForThread } from "@/components/secondary-panel/browserViewVisibilityCoordinator";
 import { getThreadReadToggleAction } from "@/components/sidebar/threadReadState";
@@ -52,6 +56,10 @@ export interface ThreadActionsContextValue {
   archiveThreadAndChildren: (thread: Thread) => void;
   requestRename: (thread: Thread) => void;
   requestDelete: (thread: Thread) => void;
+  requestDeleteMany: (
+    threadIds: readonly string[],
+    onComplete: () => void,
+  ) => void;
   unarchiveThread: (thread: Thread) => void;
   togglePin: (thread: Thread) => void;
   toggleRead: (thread: Thread) => void;
@@ -120,13 +128,20 @@ export function ThreadActionsProvider({
   const { mutate: pinMutate } = pinThread;
   const { mutate: unpinMutate } = unpinThread;
   const { mutate: deleteMutate } = deleteThread;
+  const { mutateAsync: deleteMutateAsync } = deleteThread;
   const { mutate: updateMutate } = updateThread;
 
   const renameDialog = useDialogState<ThreadRenameDialogTarget>();
   const deleteDialog = useDialogState<ThreadDeleteDialogTarget>();
+  const bulkDeleteDialog = useDialogState<{
+    onComplete: () => void;
+    threadIds: readonly string[];
+  }>();
 
   const { onClose: closeRenameDialog, onOpen: openRenameDialog } = renameDialog;
   const { onClose: closeDeleteDialog, onOpen: openDeleteDialog } = deleteDialog;
+  const { onClose: closeBulkDeleteDialog, onOpen: openBulkDeleteDialog } =
+    bulkDeleteDialog;
 
   useEffect(() => {
     return () => {
@@ -134,17 +149,6 @@ export function ThreadActionsProvider({
       threadActionContextAbortRef.current = null;
     };
   }, []);
-
-  const navigateAwayIfViewing = useCallback(
-    (thread: Thread) => {
-      if (viewedThreadIdRef.current === thread.id) {
-        // Push (not replace) so the back button still returns the user to the
-        // archived/deleted thread's URL if they want to re-open it.
-        navigate(getRootComposeRoutePath());
-      }
-    },
-    [navigate],
-  );
 
   // Single place that reconciles the URL after archive/delete closed panes.
   // When a valid pane survives, replace-navigate to it (but only when focus
@@ -241,6 +245,24 @@ export function ThreadActionsProvider({
     };
   }
 
+  const finishThreadDeletes = useCallback(
+    (threadIds: readonly string[]) => {
+      for (const threadId of threadIds) {
+        destroyPersistedBrowserViewsForThread({
+          desktopBrowser: getDesktopBrowserApi(),
+          threadId,
+        });
+      }
+      syncNavigationAfterClose(closePanesForThreads(threadIds), () => {
+        const viewed = viewedThreadIdRef.current;
+        if (viewed && threadIds.includes(viewed)) {
+          navigate(getRootComposeRoutePath());
+        }
+      });
+    },
+    [closePanesForThreads, navigate, syncNavigationAfterClose],
+  );
+
   const performDelete = useCallback(
     ({
       childThreadsConfirmed,
@@ -251,27 +273,13 @@ export function ThreadActionsProvider({
         { id: thread.id, childThreadsConfirmed },
         {
           onSuccess: () => {
-            destroyPersistedBrowserViewsForThread({
-              desktopBrowser: getDesktopBrowserApi(),
-              threadId: thread.id,
-            });
             closeDialog();
-            // In a split, close the pane holding this thread and move the URL
-            // to the surviving focused pane; single pane falls through to the
-            // navigate-away.
-            syncNavigationAfterClose(closePanesForThreads([thread.id]), () =>
-              navigateAwayIfViewing(thread),
-            );
+            finishThreadDeletes([thread.id]);
           },
         },
       );
     },
-    [
-      closePanesForThreads,
-      deleteMutate,
-      navigateAwayIfViewing,
-      syncNavigationAfterClose,
-    ],
+    [deleteMutate, finishThreadDeletes],
   );
 
   const requestDelete = useCallback(
@@ -301,6 +309,38 @@ export function ThreadActionsProvider({
     },
     [closeDeleteDialog, performDelete],
   );
+
+  const requestDeleteMany = useCallback(
+    (threadIds: readonly string[], onComplete: () => void) =>
+      openBulkDeleteDialog({ onComplete, threadIds }),
+    [openBulkDeleteDialog],
+  );
+
+  const confirmDeleteMany = useCallback(async () => {
+    const target = bulkDeleteDialog.target;
+    if (!target) return;
+
+    const deletedThreadIds: string[] = [];
+    for (const threadId of target.threadIds) {
+      try {
+        await deleteMutateAsync({ id: threadId, childThreadsConfirmed: true });
+      } catch {
+        break;
+      }
+      deletedThreadIds.push(threadId);
+    }
+    closeBulkDeleteDialog();
+    target.onComplete();
+    finishThreadDeletes(deletedThreadIds);
+  }, [
+    bulkDeleteDialog.target,
+    closeBulkDeleteDialog,
+    deleteMutateAsync,
+    finishThreadDeletes,
+  ]);
+
+  const bulkDeleteCount = bulkDeleteDialog.target?.threadIds.length ?? 0;
+  const bulkDeleteLabel = `${bulkDeleteCount} thread${bulkDeleteCount === 1 ? "" : "s"}`;
 
   const unarchiveThreadAction = useCallback(
     (thread: Thread) => {
@@ -410,6 +450,7 @@ export function ThreadActionsProvider({
     () => ({
       requestRename,
       requestDelete,
+      requestDeleteMany,
       archiveThreadAndChildren: archiveThreadAndChildrenAction,
       unarchiveThread: unarchiveThreadAction,
       togglePin,
@@ -419,6 +460,7 @@ export function ThreadActionsProvider({
       archiveThreadAndChildrenAction,
       requestRename,
       requestDelete,
+      requestDeleteMany,
       togglePin,
       toggleRead,
       unarchiveThreadAction,
@@ -440,6 +482,21 @@ export function ThreadActionsProvider({
         onOpenChange={deleteDialog.onOpenChange}
         onDelete={confirmDelete}
       />
+      <ConfirmDeleteDialog
+        open={bulkDeleteDialog.target !== null}
+        onOpenChange={bulkDeleteDialog.onOpenChange}
+      >
+        {bulkDeleteDialog.target ? (
+          <ConfirmDeleteDialogContent
+            title={`Delete ${bulkDeleteLabel}?`}
+            description="Any child threads will be deleted too. This action cannot be undone."
+            confirmLabel={`Delete ${bulkDeleteLabel}`}
+            pending={deleteThread.isPending}
+            onConfirm={() => void confirmDeleteMany()}
+            onCancel={closeBulkDeleteDialog}
+          />
+        ) : null}
+      </ConfirmDeleteDialog>
     </ThreadActionsContext.Provider>
   );
 }
