@@ -953,6 +953,59 @@ describe("PluginDetail runtime health", () => {
 });
 
 describe("PluginDetail capability inventory", () => {
+  it("renders host-managed secret settings on the Extensions detail page", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(() =>
+        Promise.resolve(
+          new Response(
+            JSON.stringify({
+              ok: true,
+              schema: {
+                linearApiKey: {
+                  type: "string",
+                  label: "Linear personal API key",
+                  secret: true,
+                },
+              },
+              values: { linearApiKey: { set: false } },
+            }),
+            { headers: { "content-type": "application/json" } },
+          ),
+        ),
+      ),
+    );
+    const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
+    render(
+      <MemoryRouter>
+        <QueryClientWrapper>
+          <PluginDetail
+            isLoading={false}
+            plugin={{
+              ...GITHUB_PLUGIN,
+              id: "work-tracker",
+              name: "Work Tracker",
+              hasSettings: true,
+            }}
+            pending={false}
+            openSourceDisabled
+            onToggle={() => {}}
+            onEdit={() => {}}
+            onOpenSource={() => {}}
+            onDelete={() => {}}
+          />
+        </QueryClientWrapper>
+      </MemoryRouter>,
+    );
+
+    const input = (await screen.findByLabelText(
+      "Linear personal API key",
+    )) as HTMLInputElement;
+    expect(input.type).toBe("password");
+    expect(input.placeholder).toBe("[not set]");
+    expect(screen.getByRole("button", { name: /save settings/i })).toBeTruthy();
+  });
+
   it("lists each contributed capability and keeps health separate", async () => {
     const EmptySlot = () => null;
     setPluginSlotRegistrations("capability-demo", {

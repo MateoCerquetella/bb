@@ -1,0 +1,545 @@
+import type { BbPluginApi } from '@bb/plugin-sdk';
+import {
+  projectSourceConfigSchema,
+  workItemSchema,
+  type ProjectSourceConfig,
+  type WorkItem,
+  type WorkSource,
+  type WorkStateCategory
+} from './contract.js';
+
+type PluginDatabase = ReturnType<BbPluginApi['storage']['database']>;
+type SqlParameter = string | number | null;
+
+interface WorkItemRow {
+  bb_project_id: string;
+  source: string;
+  locator: string;
+  item_key: string;
+  title: string;
+  description: string;
+  url: string;
+  status: string;
+  state_category: string;
+  priority: string | null;
+  assignee: string | null;
+  project: string | null;
+  labels_json: string;
+  updated_at: string;
+}
+
+interface SyncRow {
+  bb_project_id: string;
+  source: string;
+  last_synced_at: string | null;
+  error: string | null;
+  item_count: number;
+}
+
+interface ProjectConfigRow {
+  bb_project_id: string;
+  github_enabled: number;
+  linear_enabled: number;
+  linear_team_key: string;
+  jira_enabled: number;
+  jira_base_url: string;
+  jira_email: string;
+  jira_jql: string;
+}
+
+export interface StoredSyncState {
+  lastSyncedAt: string | null;
+  error: string | null;
+  itemCount: number;
+}
+
+export interface WorkItemFilters {
+  /** Omit to search every project cache. */
+  projectId?: string;
+  /** Internal allowlist for intentional cross-project views. */
+  projectIds?: string[];
+  source?: WorkSource;
+  query?: string;
+  stateCategories?: WorkStateCategory[];
+  limit: number;
+}
+
+export type ProjectSourceConfigDefaults = Omit<
+  ProjectSourceConfig,
+  'projectId'
+>;
+
+function itemFromRow(row: WorkItemRow): WorkItem {
+  return workItemSchema.parse({
+    bbProjectId: row.bb_project_id,
+    source: row.source,
+    locator: row.locator,
+    key: row.item_key,
+    title: row.title,
+    description: row.description,
+    url: row.url,
+    status: row.status,
+    stateCategory: row.state_category,
+    priority: row.priority,
+    assignee: row.assignee,
+    project: row.project,
+    labels: JSON.parse(row.labels_json),
+    updatedAt: row.updated_at
+  });
+}
+
+function configFromRow(row: ProjectConfigRow): ProjectSourceConfig {
+  return projectSourceConfigSchema.parse({
+    projectId: row.bb_project_id,
+    githubEnabled: row.github_enabled === 1,
+    linearEnabled: row.linear_enabled === 1,
+    linearTeamKey: row.linear_team_key,
+    jiraEnabled: row.jira_enabled === 1,
+    jiraBaseUrl: row.jira_base_url,
+    jiraEmail: row.jira_email,
+    jiraJql: row.jira_jql
+  });
+}
+
+function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/gu, character => `\\${character}`);
+}
+
+export function createWorkItemStore(bb: BbPluginApi) {
+  const db = bb.storage.database();
+  bb.storage.migrate(db, [
+    `
+      CREATE TABLE work_items (
+        source TEXT NOT NULL CHECK (source IN ('linear', 'github', 'jira')),
+        locator TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL,
+        state_category TEXT NOT NULL CHECK (
+          state_category IN ('backlog', 'todo', 'in_progress', 'done', 'canceled')
+        ),
+        priority TEXT,
+        assignee TEXT,
+        project TEXT,
+        labels_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (source, locator)
+      );
+
+      CREATE TABLE source_sync (
+        source TEXT PRIMARY KEY CHECK (source IN ('linear', 'github', 'jira')),
+        last_synced_at TEXT,
+        error TEXT,
+        item_count INTEGER NOT NULL DEFAULT 0 CHECK (item_count >= 0)
+      );
+
+      CREATE INDEX idx_work_items_updated
+        ON work_items(updated_at DESC, source, locator);
+      CREATE INDEX idx_work_items_source_state_updated
+        ON work_items(source, state_category, updated_at DESC, locator);
+      CREATE INDEX idx_work_items_key
+        ON work_items(item_key COLLATE NOCASE);
+    `,
+    `
+      CREATE TABLE work_items_by_project (
+        bb_project_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('linear', 'github', 'jira')),
+        locator TEXT NOT NULL,
+        item_key TEXT NOT NULL,
+        title TEXT NOT NULL,
+        description TEXT NOT NULL,
+        url TEXT NOT NULL,
+        status TEXT NOT NULL,
+        state_category TEXT NOT NULL CHECK (
+          state_category IN ('backlog', 'todo', 'in_progress', 'done', 'canceled')
+        ),
+        priority TEXT,
+        assignee TEXT,
+        project TEXT,
+        labels_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (bb_project_id, source, locator)
+      );
+
+      CREATE TABLE source_sync_by_project (
+        bb_project_id TEXT NOT NULL,
+        source TEXT NOT NULL CHECK (source IN ('linear', 'github', 'jira')),
+        last_synced_at TEXT,
+        error TEXT,
+        item_count INTEGER NOT NULL DEFAULT 0 CHECK (item_count >= 0),
+        PRIMARY KEY (bb_project_id, source)
+      );
+
+      CREATE TABLE project_source_config (
+        bb_project_id TEXT PRIMARY KEY,
+        github_enabled INTEGER NOT NULL CHECK (github_enabled IN (0, 1)),
+        linear_team_key TEXT NOT NULL,
+        jira_jql TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX idx_project_work_items_updated
+        ON work_items_by_project(bb_project_id, updated_at DESC, source, locator);
+      CREATE INDEX idx_project_work_items_source_state_updated
+        ON work_items_by_project(
+          bb_project_id, source, state_category, updated_at DESC, locator
+        );
+      CREATE INDEX idx_project_work_items_key
+        ON work_items_by_project(bb_project_id, item_key COLLATE NOCASE);
+    `,
+    `
+      ALTER TABLE project_source_config
+        ADD COLUMN linear_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (linear_enabled IN (0, 1));
+      ALTER TABLE project_source_config
+        ADD COLUMN jira_enabled INTEGER NOT NULL DEFAULT 0
+        CHECK (jira_enabled IN (0, 1));
+
+      CREATE INDEX idx_all_project_work_items_updated
+        ON work_items_by_project(updated_at DESC, bb_project_id, source, locator);
+
+      DROP TABLE work_items;
+      DROP TABLE source_sync;
+    `,
+    `
+      ALTER TABLE project_source_config
+        ADD COLUMN jira_base_url TEXT NOT NULL DEFAULT '';
+      ALTER TABLE project_source_config
+        ADD COLUMN jira_email TEXT NOT NULL DEFAULT '';
+
+      CREATE INDEX idx_project_source_linear_enabled
+        ON project_source_config(linear_enabled, bb_project_id);
+      CREATE INDEX idx_project_source_jira_enabled
+        ON project_source_config(jira_enabled, bb_project_id);
+    `
+  ]);
+
+  const upsertItem = db.prepare<
+    [
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string,
+      string | null,
+      string | null,
+      string | null,
+      string,
+      string
+    ]
+  >(`
+    INSERT INTO work_items_by_project (
+      bb_project_id, source, locator, item_key, title, description, url,
+      status, state_category, priority, assignee, project, labels_json,
+      updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(bb_project_id, source, locator) DO UPDATE SET
+      item_key = excluded.item_key,
+      title = excluded.title,
+      description = excluded.description,
+      url = excluded.url,
+      status = excluded.status,
+      state_category = excluded.state_category,
+      priority = excluded.priority,
+      assignee = excluded.assignee,
+      project = excluded.project,
+      labels_json = excluded.labels_json,
+      updated_at = excluded.updated_at
+  `);
+
+  function writeItem(item: WorkItem): void {
+    const parsed = workItemSchema.parse(item);
+    upsertItem.run(
+      parsed.bbProjectId,
+      parsed.source,
+      parsed.locator,
+      parsed.key,
+      parsed.title,
+      parsed.description,
+      parsed.url,
+      parsed.status,
+      parsed.stateCategory,
+      parsed.priority,
+      parsed.assignee,
+      parsed.project,
+      JSON.stringify(parsed.labels),
+      parsed.updatedAt
+    );
+  }
+
+  const replaceSourceTransaction = db.transaction(
+    (
+      projectId: string,
+      source: WorkSource,
+      items: WorkItem[],
+      syncedAt: string
+    ) => {
+      db.prepare<[string, WorkSource]>(
+        'DELETE FROM work_items_by_project WHERE bb_project_id = ? AND source = ?'
+      ).run(projectId, source);
+      for (const item of items) writeItem(item);
+      db.prepare<[string, WorkSource, string, number]>(
+        `
+        INSERT INTO source_sync_by_project (
+          bb_project_id, source, last_synced_at, error, item_count
+        ) VALUES (?, ?, ?, NULL, ?)
+        ON CONFLICT(bb_project_id, source) DO UPDATE SET
+          last_synced_at = excluded.last_synced_at,
+          error = NULL,
+          item_count = excluded.item_count
+      `
+      ).run(projectId, source, syncedAt, items.length);
+    }
+  );
+
+  const readProjectConfig = db.prepare<[string], ProjectConfigRow>(`
+    SELECT
+      bb_project_id,
+      github_enabled,
+      linear_enabled,
+      linear_team_key,
+      jira_enabled,
+      jira_base_url,
+      jira_email,
+      jira_jql
+    FROM project_source_config
+    WHERE bb_project_id = ?
+  `);
+
+  const clearSourceTransaction = db.transaction(
+    (projectId: string, source: WorkSource) => {
+      db.prepare<[string, WorkSource]>(
+        'DELETE FROM work_items_by_project WHERE bb_project_id = ? AND source = ?'
+      ).run(projectId, source);
+      db.prepare<[string, WorkSource]>(
+        'DELETE FROM source_sync_by_project WHERE bb_project_id = ? AND source = ?'
+      ).run(projectId, source);
+    }
+  );
+
+  function defaultConfig(
+    projectId: string,
+    defaults: ProjectSourceConfigDefaults
+  ): ProjectSourceConfig {
+    return projectSourceConfigSchema.parse({ projectId, ...defaults });
+  }
+
+  return {
+    upsert(item: WorkItem) {
+      writeItem(item);
+    },
+    replaceSource(
+      projectId: string,
+      source: WorkSource,
+      items: WorkItem[],
+      syncedAt: string
+    ) {
+      for (const item of items) {
+        if (item.bbProjectId !== projectId || item.source !== source) {
+          throw new Error(
+            'Cannot write a work item outside its BB project and source scope'
+          );
+        }
+      }
+      replaceSourceTransaction(projectId, source, items, syncedAt);
+    },
+    setSourceError(projectId: string, source: WorkSource, message: string) {
+      const count =
+        db
+          .prepare<
+            [string, WorkSource],
+            { count: number }
+          >('SELECT COUNT(*) AS count FROM work_items_by_project WHERE bb_project_id = ? AND source = ?')
+          .get(projectId, source)?.count ?? 0;
+      db.prepare<[string, WorkSource, string, number]>(
+        `
+        INSERT INTO source_sync_by_project (
+          bb_project_id, source, last_synced_at, error, item_count
+        ) VALUES (?, ?, NULL, ?, ?)
+        ON CONFLICT(bb_project_id, source) DO UPDATE SET
+          error = excluded.error,
+          item_count = excluded.item_count
+      `
+      ).run(projectId, source, message, count);
+    },
+    syncState(projectId: string, source: WorkSource): StoredSyncState {
+      const row = db
+        .prepare<[string, WorkSource], SyncRow>(
+          `
+          SELECT *
+          FROM source_sync_by_project
+          WHERE bb_project_id = ? AND source = ?
+        `
+        )
+        .get(projectId, source);
+      return {
+        lastSyncedAt: row?.last_synced_at ?? null,
+        error: row?.error ?? null,
+        itemCount: row?.item_count ?? 0
+      };
+    },
+    clearSource(projectId: string, source: WorkSource) {
+      clearSourceTransaction(projectId, source);
+    },
+    get(
+      projectId: string,
+      source: WorkSource,
+      locator: string
+    ): WorkItem | undefined {
+      const row = db
+        .prepare<[string, WorkSource, string], WorkItemRow>(
+          `
+          SELECT *
+          FROM work_items_by_project
+          WHERE bb_project_id = ? AND source = ? AND locator = ?
+        `
+        )
+        .get(projectId, source, locator);
+      return row ? itemFromRow(row) : undefined;
+    },
+    list(filters: WorkItemFilters): WorkItem[] {
+      const query = filters.query?.trim() ?? '';
+      const states = filters.stateCategories ?? [];
+      const parameters: Record<string, SqlParameter> = {
+        projectId: filters.projectId ?? null,
+        projectIds: JSON.stringify(filters.projectIds ?? []),
+        projectIdsSpecified: filters.projectIds === undefined ? 0 : 1,
+        source: filters.source ?? null,
+        query: query ? `%${escapeLike(query)}%` : '',
+        states: JSON.stringify(states),
+        stateCount: states.length,
+        limit: filters.limit
+      };
+      return db
+        .prepare<Record<string, SqlParameter>, WorkItemRow>(
+          `
+          SELECT *
+          FROM work_items_by_project
+          WHERE (:projectId IS NULL OR bb_project_id = :projectId)
+            AND (
+              :projectIdsSpecified = 0 OR
+              bb_project_id IN (SELECT value FROM json_each(:projectIds))
+            )
+            AND (:source IS NULL OR source = :source)
+            AND (
+              :query = '' OR
+              item_key LIKE :query ESCAPE '\\' COLLATE NOCASE OR
+              title LIKE :query ESCAPE '\\' COLLATE NOCASE OR
+              description LIKE :query ESCAPE '\\' COLLATE NOCASE OR
+              project LIKE :query ESCAPE '\\' COLLATE NOCASE
+            )
+            AND (
+              :stateCount = 0 OR
+              state_category IN (SELECT value FROM json_each(:states))
+            )
+          ORDER BY updated_at DESC, bb_project_id, source, locator
+          LIMIT :limit
+        `
+        )
+        .all(parameters)
+        .map(itemFromRow);
+    },
+    projectConfig(
+      projectId: string,
+      defaults: ProjectSourceConfigDefaults
+    ): ProjectSourceConfig {
+      const row = readProjectConfig.get(projectId);
+      return row ? configFromRow(row) : defaultConfig(projectId, defaults);
+    },
+    ensureProjectConfig(
+      projectId: string,
+      defaults: ProjectSourceConfigDefaults
+    ): ProjectSourceConfig {
+      const config = defaultConfig(projectId, defaults);
+      db.prepare<
+        [string, number, number, string, number, string, string, string, string]
+      >(
+        `
+        INSERT INTO project_source_config (
+          bb_project_id, github_enabled, linear_enabled, linear_team_key,
+          jira_enabled, jira_base_url, jira_email, jira_jql, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bb_project_id) DO NOTHING
+      `
+      ).run(
+        config.projectId,
+        config.githubEnabled ? 1 : 0,
+        config.linearEnabled ? 1 : 0,
+        config.linearTeamKey,
+        config.jiraEnabled ? 1 : 0,
+        config.jiraBaseUrl,
+        config.jiraEmail,
+        config.jiraJql,
+        new Date().toISOString()
+      );
+      return configFromRow(readProjectConfig.get(projectId)!);
+    },
+    saveProjectConfig(input: ProjectSourceConfig): ProjectSourceConfig {
+      const config = projectSourceConfigSchema.parse(input);
+      db.prepare<
+        [string, number, number, string, number, string, string, string, string]
+      >(
+        `
+        INSERT INTO project_source_config (
+          bb_project_id, github_enabled, linear_enabled, linear_team_key,
+          jira_enabled, jira_base_url, jira_email, jira_jql, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(bb_project_id) DO UPDATE SET
+          github_enabled = excluded.github_enabled,
+          linear_enabled = excluded.linear_enabled,
+          linear_team_key = excluded.linear_team_key,
+          jira_enabled = excluded.jira_enabled,
+          jira_base_url = excluded.jira_base_url,
+          jira_email = excluded.jira_email,
+          jira_jql = excluded.jira_jql,
+          updated_at = excluded.updated_at
+      `
+      ).run(
+        config.projectId,
+        config.githubEnabled ? 1 : 0,
+        config.linearEnabled ? 1 : 0,
+        config.linearTeamKey,
+        config.jiraEnabled ? 1 : 0,
+        config.jiraBaseUrl,
+        config.jiraEmail,
+        config.jiraJql,
+        new Date().toISOString()
+      );
+      return configFromRow(readProjectConfig.get(config.projectId)!);
+    },
+    configuredProjectIds(): string[] {
+      return db
+        .prepare<[], { bb_project_id: string }>(
+          `
+          SELECT bb_project_id
+          FROM project_source_config
+          ORDER BY bb_project_id
+        `
+        )
+        .all()
+        .map(row => row.bb_project_id);
+    },
+    enabledProjectIds(source: 'linear' | 'jira'): string[] {
+      const column = source === 'linear' ? 'linear_enabled' : 'jira_enabled';
+      return db
+        .prepare<[], { bb_project_id: string }>(
+          `
+          SELECT bb_project_id
+          FROM project_source_config
+          WHERE ${column} = 1
+          ORDER BY bb_project_id
+        `
+        )
+        .all()
+        .map(row => row.bb_project_id);
+    }
+  };
+}
+
+export type WorkItemStore = ReturnType<typeof createWorkItemStore>;

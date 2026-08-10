@@ -460,6 +460,51 @@ add <key-or-comment-id> --file <path>` (task key = task-level; comment ID
   page). Keep the same filters and sort. A task-list mutation makes the cursor
   stale; restart without it.
 
+## Work Tracker
+
+- Work Tracker is an opt-in official plugin for external issues. Install it
+  with `bb plugin install work-tracker` before using `bb work ...`.
+- BB projects are the primary scope. Every `bb work` command uses the current
+  project or an explicit `--project <proj_id>`; it fails without either.
+- The panel opens on the current project. Use its compact List or Kanban view
+  for one project's work; **Across projects** is an explicit aggregate grouped
+  by owning BB project. Kanban lanes use provider status names and cards can be
+  moved with drag/drop or keyboard controls. A rejected provider write restores
+  the previous card state.
+- In **Work Tracker → Manage**, select a BB project and configure its sources
+  and credentials. Linear API keys and Jira Cloud account bundles are isolated
+  by BB project. Every enabled Linear project requires one team key, binding
+  that key to the team's queue rather than a user-wide assigned-issue query.
+  Jira uses an HTTPS Atlassian Cloud origin, account email, and project JQL.
+- GitHub automatically uses repositories mapped to the project by the official
+  GitHub plugin. It has no Work Tracker token field.
+- Never put a Linear key or Jira token in arguments, prompts, comments, logs,
+  or issue text. Use `bb work credentials [--project <proj_id>] [--json]` to
+  open BB's authenticated, project-bound write-only form. It requires an active
+  BB thread and connected app. The command reports configured status only;
+  credential values do not appear in output. Credential removal cannot promise
+  immediate hard erasure from retained rollback snapshots.
+- Read the current project's source rules with `bb work config --json`. Update
+  them with `--github on|off`, `--linear on|off`, `--linear-team <key>`,
+  `--jira on|off`, `--jira-url <url>`, `--jira-email <email>`, and
+  `--jira-jql <jql>`; omitted fields remain unchanged. These are nonsecret
+  fields only. Changing the Jira origin or email requires token replacement or
+  explicit removal through the credential form.
+- Check one project's sources with `bb work status --json`, then refresh them
+  with `bb work refresh --json` or refresh one with `bb work refresh
+<linear|github|jira> --json`.
+- Use `bb work list --source <linear|github|jira> --query <text> --json` for
+  project-scoped discovery and `bb work show <linear|github|jira> <locator>
+--json` before acting on one issue. Pass `--cached` to list without a network
+  refresh.
+- Before changing workflow state, run `bb work transitions
+<linear|github|jira> <locator> --json`. Then pass one returned provider status
+  ID to `bb work move <linear|github|jira> <locator> --status <id> --json`.
+  Available transitions are revalidated immediately before the external write.
+- Linear, GitHub, and Jira remain authoritative. The plugin's local database
+  is only a list/mention cache, so only a successful move response proves the
+  external mutation.
+
 ## Docs
 
 - Docs is an opt-in official plugin. Keep read-only discovery small with
@@ -653,7 +698,7 @@ them by mixing ink into canvas), the `--primary` accent, the secondary text tier
   (except `side-chat`, which is gated by the **"Side chat plugin"**
   experiment); official plugins install from the bundled store on demand.
 - **BB Official plugins** (store under `/api/v1/plugin-catalog`):
-  - BB's official plugins (GitHub, Docs, Memory, and Tasks) ship
+  - BB's official plugins (GitHub, Docs, Memory, Tasks, and Work Tracker) ship
     bundled inside the app and install from the local copy — no network. Installed official
     plugins are pinned to the bundled copy and update with BB app releases.
   - `bb plugin search <query> [--json]` — search the official plugins by id,
@@ -661,7 +706,7 @@ them by mixing ink into canvas), the `--primary` accent, the secondary text tier
     requires newer bb.
 - Commands:
   - `bb plugin install <src>` — official plugin name (github, docs, memory,
-    tasks), local path, `builtin:<name>`,
+    tasks, work-tracker), local path, `builtin:<name>`,
     `git:<url>@<ref>`, or `npm:<package>[@<version|tag|range>]` (npm on PATH
     required for `npm:`). Prefixes `path:` / `npm:` / `git:` / `builtin:` skip
     official-plugin resolution. To pin or range an npm package, install with

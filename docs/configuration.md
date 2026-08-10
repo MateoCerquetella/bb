@@ -560,13 +560,46 @@ Plugin state lives under the data dir:
                                    commands, injected into agent threads)
 ```
 
-BB's official plugins (GitHub, Docs, Memory, and Tasks) ship bundled
+BB's official plugins (GitHub, Docs, Memory, Tasks, and Work Tracker) ship bundled
 inside the app and install from the local bundled copy — no network, no remote catalog.
 Discover them with `bb plugin search` or Extensions → Plugins → Browse; users
 cannot add, remove, or configure the official plugin set. Installed official
 plugins are pinned to the bundled copy and update with BB app releases. Local
 path installs remain available directly through `bb plugin install ./path` or
 `path:...`, and direct `npm:`/`git:` installs stay supported.
+
+The Work Tracker plugin installs with `bb plugin install work-tracker`. It
+provides a BB-project-first browser for Linear, GitHub, and Jira while leaving
+each external service authoritative. It opens on the current BB project,
+offers compact List and Kanban views, and exposes the explicit **Across
+projects** aggregate grouped by owning project. Kanban preserves each
+provider's actual status names. Drag a card to an available status lane, or use
+its Space, Left/Right, and Enter keyboard controls; rejected provider writes
+restore the card to its previous status.
+
+In **Work Tracker → Manage**, select a project, enable its sources, and enter
+that project's write-only Linear or Jira credentials. Linear API keys and Jira
+Cloud account bundles are isolated by BB project. Linear requires one team key
+for each enabled project, binding the credential to that team's queue instead
+of a user-wide assigned-issue query; Jira JQL narrows the Jira issue scope.
+Jira accepts HTTPS Atlassian Cloud origins; an origin or email change requires
+a replacement token or explicit removal.
+GitHub has no Work Tracker token field: it reuses the official GitHub plugin's
+authentication and repository-to-project mapping.
+
+Agents and humans can inspect the same project-scoped cache with `bb work
+status`, `bb work config`, `bb work list`, `bb work show`, and `bb work
+refresh`, or attach an issue from the composer's Work Tracker mention results.
+Use `bb work transitions <source> <locator>` to read the currently available
+provider statuses and `bb work move <source> <locator> --status <id>` to update
+one. The server revalidates the target immediately before writing.
+Commands require the current project context or an explicit `--project
+<proj_id>`. `bb work config` reads or updates only nonsecret project source
+rules. `bb work credentials` opens BB's authenticated project credential form;
+it must run from an active BB thread with a connected app. Keys and tokens are
+neither accepted as command arguments nor returned in command output. Removing
+a live credential does not guarantee immediate hard erasure from retained BB
+rollback snapshots.
 
 ### Plugin updates
 

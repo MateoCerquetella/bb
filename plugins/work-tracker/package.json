@@ -1,0 +1,72 @@
+{
+  "name": "bb-plugin-work-tracker",
+  "version": "0.1.0",
+  "description": "Browse Linear, GitHub, and Jira work in one BB tracker and send external issues to agents.",
+  "private": true,
+  "license": "MIT",
+  "homepage": "https://github.com/get-bb/bb#readme",
+  "bugs": {
+    "url": "https://github.com/get-bb/bb/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/get-bb/bb.git",
+    "directory": "plugins/work-tracker"
+  },
+  "type": "module",
+  "files": [
+    "dist",
+    "server.ts",
+    "app.tsx",
+    "app.css",
+    "sources",
+    "store.ts",
+    "credentials.ts",
+    "contract.ts",
+    "README.md"
+  ],
+  "engines": {
+    "bb": ">=0.0",
+    "bbPluginSdk": "^0.4.1"
+  },
+  "bb": {
+    "name": "Work Tracker",
+    "description": "Browse Linear, GitHub, and Jira work in one BB tracker and send external issues to agents.",
+    "branding": {
+      "icon": "ListTodo"
+    },
+    "server": "./server.ts",
+    "app": "./app.tsx",
+    "skills": []
+  },
+  "keywords": [
+    "bb-plugin",
+    "linear",
+    "github",
+    "jira",
+    "issues"
+  ],
+  "scripts": {
+    "build": "node --conditions=source --import tsx ../../scripts/build-official-plugins.mjs work-tracker",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "devDependencies": {
+    "@bb/plugin-sdk": "workspace:*",
+    "@testing-library/react": "^16.3.2",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "jsdom": "^29.0.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-7": "npm:typescript@^7.0.2",
+    "vitest": "^4.1.1"
+  },
+  "dependencies": {
+    "@bb/secret-storage": "workspace:*",
+    "@bb/shared-ui": "workspace:*",
+    "zod": "^4.3.6"
+  }
+}

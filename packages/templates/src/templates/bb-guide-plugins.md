@@ -138,6 +138,54 @@ label-link/name change, active-thread change, or project-prefix change invalidat
 outstanding cursor; restart without `--cursor` instead of accepting a mixed
 snapshot.
 
+The Work Tracker plugin is an opt-in official plugin bundled with the app:
+`bb plugin install work-tracker`. It presents Linear, GitHub, and Jira issues
+in one project-first panel while keeping each external system authoritative.
+Lists and mentions use a refreshable project-scoped cache; opening an item
+fetches its live details. The panel opens on the current BB project and offers
+compact List and Kanban views. **Across projects** is an explicit
+aggregate grouped by owning BB project rather than a flattened ticket list.
+Kanban preserves the provider's actual status names. Drag a card to a currently
+available lane, or use Space, Left/Right, and Enter from the keyboard. Provider
+writes remain authoritative and rejected moves restore the previous card state.
+
+In **Work Tracker → Manage**, select a BB project and configure its sources and
+credentials. Each project's Linear API key and Jira Cloud account bundle is
+stored separately; connector work never falls back to another project's
+identity. Every enabled Linear project requires one team key, binding its API
+key to that team's queue instead of a user-wide assigned-issue query. Jira uses
+an HTTPS Atlassian Cloud origin, account email, and project JQL; changing the
+origin or email requires a replacement token or an explicit removal. Secret
+inputs are write-only and remain blank after load, save, and project switching.
+GitHub reuses the official GitHub plugin's authentication and automatically
+includes repositories mapped to that BB project, so Work Tracker has no GitHub
+token field.
+
+Every `bb work` command uses the current BB project or an explicit `--project
+<proj_id>`:
+
+  bb work status [--project <proj_id>] [--json]
+  bb work config [--project <proj_id>] [--github on|off] [--linear on|off]
+                 [--linear-team <key>] [--jira on|off]
+                 [--jira-url <url>] [--jira-email <email>]
+                 [--jira-jql <jql>] [--json]
+  bb work credentials [--project <proj_id>] [--json]
+  bb work refresh [linear|github|jira] [--project <proj_id>] [--json]
+  bb work list [--project <proj_id>] [--source linear|github|jira] [--query <text>] [--cached] [--json]
+  bb work show <linear|github|jira> <locator> [--project <proj_id>] [--json]
+  bb work transitions <linear|github|jira> <locator> [--project <proj_id>] [--json]
+  bb work move <linear|github|jira> <locator> --status <id> [--project <proj_id>] [--json]
+
+Type `@` or `#` plus an issue key or title in the composer to attach cached,
+project-scoped Work Tracker context to an agent turn.
+
+`bb work config` handles nonsecret project fields only. `bb work credentials`
+must run from an active BB thread and opens the connected app's authenticated,
+project-bound form. Keys and tokens are never accepted as arguments and its
+completion output contains configured status, not values. Keep secrets out of
+prompts and comments. Removing a live project credential does not guarantee
+immediate hard erasure from BB rollback snapshots retained for recovery.
+
 The builtin Secrets plugin provides a secure credential form and guarded
 dotenv reconciliation:
 
@@ -152,7 +200,7 @@ added/updated/unchanged counts.
   bb plugin search <query>       Search BB's official plugins (bundled with
                                  the app)
   bb plugin install <entry>      Install a bundled official plugin by name
-                                 (github, docs, memory, tasks), a local
+                                 (github, docs, memory, tasks, work-tracker), a local
                                  path, builtin:<name>,
                                  git:<url>@<ref>, or
                                  npm:<package>[@<version|tag|range>]
@@ -211,13 +259,14 @@ added/updated/unchanged counts.
 
 BB Official plugins
 
-BB's official plugins — GitHub, Docs, Memory, and Tasks — ship bundled inside
-the app itself. They appear in Extensions → Plugins → Browse
+BB's official plugins — GitHub, Docs, Memory, Tasks, and Work Tracker — ship
+bundled inside the app itself. They appear in Extensions → Plugins → Browse
 and install with one click from the local bundled copy: no network, no
 download, no separate release. Install from the CLI by bare name
 (`bb plugin install github`, `bb plugin install docs`, `bb plugin install
-memory`, or `bb plugin install tasks`). Installed official plugins are pinned
-to the bundled copy and update automatically when the BB app updates.
+memory`, `bb plugin install tasks`, or `bb plugin install work-tracker`).
+Installed official plugins are pinned to the bundled copy and update
+automatically when the BB app updates.
 
 For direct git:/npm: installs, updates are manual: `bb plugin outdated`
 checks tracking sources and `bb plugin update` applies compatible candidates.
@@ -448,7 +497,7 @@ in a checkout). The builtin `inline-vis` plugin renders
 path-shaped, sandboxed worktree HTML iframe preview; `height` is optional.
 Its card header includes an open-in-sidebar action for the source HTML file.
 The `plugins/` directory contains every bundled plugin: the auto-installed
-builtins and the store-only BB Official GitHub, Docs, Memory, and Tasks
-plugins. The `examples/plugins/` reference plugins cover slack-bot (webhook
-bot), agent-enrichment (agent surfaces), composer-customization (all composer
-regions), and t3sidebar (a replacement sidebar thread list).
+builtins and the store-only BB Official GitHub, Docs, Memory, Tasks, and Work
+Tracker plugins. The `examples/plugins/` reference plugins cover slack-bot
+(webhook bot), agent-enrichment (agent surfaces), composer-customization (all
+composer regions), and t3sidebar (a replacement sidebar thread list).

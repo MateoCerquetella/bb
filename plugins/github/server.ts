@@ -423,7 +423,7 @@ export default async function plugin(bb: BbPluginApi) {
 
   async function checkAuth(): Promise<void> {
     try {
-      await gh(["auth", "status"], 10_000);
+      await gh(["auth", "status", "--active", "--hostname", "github.com"], 10_000);
       ghAuthError = null;
     } catch (error) {
       ghAuthError = error instanceof Error ? error.message : String(error);

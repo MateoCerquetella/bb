@@ -98,6 +98,7 @@ describe("official plugin registry invariants", () => {
       secrets: "Developer tools",
       "side-chat": "Agent interaction",
       tasks: "Workflow management",
+      "work-tracker": "Workflow management",
       workflows: "Workflow management",
     };
 

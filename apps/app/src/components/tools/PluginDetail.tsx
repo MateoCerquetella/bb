@@ -20,6 +20,7 @@ import {
 import { formatHomePathForDisplay } from "@bb/shared-ui/lib/utils";
 import { Icon } from "@bb/shared-ui/icon";
 import { PluginIcon } from "@/components/plugin/PluginIcon";
+import { PluginSettingsDetail } from "@/components/plugin/PluginSettings";
 import {
   PluginDetailReleaseControl,
   PluginDetailReleaseStatus,
@@ -392,6 +393,7 @@ export function PluginDetail({
             {plugin.description ?? "This plugin does not describe itself."}
           </p>
         </ResourceDetailOverviewSection>
+        <PluginSettingsDetail plugin={plugin} />
         <ResourceDetailReleaseSection
           label="Release"
           actions={
