@@ -262,6 +262,69 @@ describe('Work Tracker panel', () => {
     });
   });
 
+  it('uses compact priority and assignee icons in List rows', async () => {
+    const emptyMetadataItem: WorkItem = {
+      ...betaJiraWorkItem,
+      bbProjectId: PROJECT_ALPHA,
+      locator: 'ALPHA-10',
+      key: 'ALPHA-10',
+      title: 'Keep empty metadata quiet',
+      priority: 'No priority',
+      assignee: 'Unassigned'
+    };
+    const slot = renderSlot(
+      app.navPanels[0]!,
+      { subPath: PROJECT_ALPHA },
+      {
+        rpc: seededRpc({
+          listItems: () => ({
+            items: [githubWorkItem, lowJiraWorkItem, emptyMetadataItem]
+          })
+        })
+      }
+    );
+
+    await slot.findByText('Unify external work');
+    const highRow = slot.getByRole('button', {
+      name: /^Open get-bb\/bb#314: Unify external work\./
+    });
+    expect(highRow.getAttribute('aria-label')).toContain('Priority High');
+    expect(highRow.getAttribute('aria-label')).toContain('Assigned to mateo');
+    expect(within(highRow).queryByText('High')).toBeNull();
+    expect(within(highRow).queryByText('mateo')).toBeNull();
+    const highPriority = highRow.querySelector('.wt-priority-mark');
+    expect(highPriority?.getAttribute('data-priority-tone')).toBe('high');
+    expect(highPriority?.getAttribute('data-priority-icon')).toBe('ChevronsUp');
+    const mateoMark = highRow.querySelector('.wt-assignee-mark');
+    expect(mateoMark?.textContent).toBe('M');
+    fireEvent.pointerMove(mateoMark!);
+    expect(
+      (await slot.findAllByText('Assigned to mateo')).length
+    ).toBeGreaterThan(0);
+    fireEvent.pointerMove(highPriority!);
+    expect((await slot.findAllByText('Priority: High')).length).toBeGreaterThan(
+      0
+    );
+
+    const lowRow = slot.getByRole('button', {
+      name: /^Open ALPHA-9: Document compact metadata\./
+    });
+    expect(
+      lowRow
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-icon')
+    ).toBe('ChevronsDown');
+    expect(lowRow.querySelector('.wt-assignee-mark')?.textContent).toBe('SR');
+
+    const emptyRow = slot.getByRole('button', {
+      name: /^Open ALPHA-10: Keep empty metadata quiet\./
+    });
+    expect(emptyRow.querySelector('.wt-priority-mark')).toBeNull();
+    expect(emptyRow.querySelector('.wt-assignee-mark')).toBeNull();
+    expect(emptyRow.getAttribute('aria-label')).not.toContain('No priority');
+    expect(emptyRow.getAttribute('aria-label')).not.toContain('Unassigned');
+  });
+
   it('keeps Projects first, Across projects explicit, and connector counters absent', async () => {
     const slot = renderSlot(
       app.navPanels[0]!,
@@ -454,6 +517,7 @@ describe('Work Tracker panel', () => {
     expect(within(card).queryByText('mateo')).toBeNull();
     const highPriority = card.querySelector('.wt-priority-mark');
     expect(highPriority?.getAttribute('data-priority-tone')).toBe('high');
+    expect(highPriority?.getAttribute('data-priority-icon')).toBe('ChevronsUp');
     const mateoMark = card.querySelector('.wt-assignee-mark');
     expect(mateoMark?.textContent).toBe('M');
     fireEvent.pointerMove(mateoMark!);
@@ -477,6 +541,11 @@ describe('Work Tracker panel', () => {
         .querySelector('.wt-priority-mark')
         ?.getAttribute('data-priority-tone')
     ).toBe('medium');
+    expect(
+      linearCard
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-icon')
+    ).toBe('ArrowUpDown');
     const lowJiraCard = within(board).getByRole('button', {
       name: /^ALPHA-9: Document compact metadata\./
     });
@@ -485,6 +554,11 @@ describe('Work Tracker panel', () => {
         .querySelector('.wt-priority-mark')
         ?.getAttribute('data-priority-tone')
     ).toBe('low');
+    expect(
+      lowJiraCard
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-icon')
+    ).toBe('ChevronsDown');
     expect(lowJiraCard.querySelector('.wt-assignee-mark')?.textContent).toBe(
       'SR'
     );
@@ -496,6 +570,11 @@ describe('Work Tracker panel', () => {
         .querySelector('.wt-priority-mark')
         ?.getAttribute('data-priority-tone')
     ).toBe('urgent');
+    expect(
+      urgentCard
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-icon')
+    ).toBe('AlertTriangle');
     expect(urgentCard.querySelector('.wt-assignee-mark')?.textContent).toBe(
       'AM'
     );
@@ -505,6 +584,9 @@ describe('Work Tracker panel', () => {
     const customPriority =
       customPriorityCard.querySelector('.wt-priority-mark');
     expect(customPriority?.getAttribute('data-priority-tone')).toBe('neutral');
+    expect(customPriority?.getAttribute('data-priority-icon')).toBe(
+      'ChartColumn'
+    );
     fireEvent.pointerMove(customPriority!);
     expect(
       (await slot.findAllByText('Priority: Expedite')).length

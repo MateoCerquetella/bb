@@ -995,10 +995,12 @@ function WorkItemRow({
   showProject: boolean;
   onOpen: () => void;
 }) {
+  const priority = visiblePriority(item.priority);
+  const assignee = visibleAssignee(item.assignee);
   return (
     <button
       type="button"
-      aria-label={`Open ${item.key}: ${item.title}. Source ${sourceName(item.source)}. Priority ${item.priority ?? 'none'}. Assignee ${item.assignee ?? 'unassigned'}.`}
+      aria-label={`Open ${item.key}: ${item.title}. Source ${sourceName(item.source)}.${priority ? ` Priority ${priority}.` : ''}${assignee ? ` Assigned to ${assignee}.` : ''}`}
       data-state-category={item.stateCategory}
       onClick={onOpen}
       className="wt-item-row group grid w-full grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-0.5 border-b border-border-hairline px-2.5 py-1.5 text-left transition-colors focus-visible:relative focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
@@ -1026,14 +1028,8 @@ function WorkItemRow({
             {project.name}
           </span>
         ) : null}
-        {item.priority ? (
-          <span className="shrink-0">{item.priority}</span>
-        ) : null}
-        {item.assignee ? (
-          <span className="hidden max-w-28 truncate @md:inline">
-            {item.assignee}
-          </span>
-        ) : null}
+        {priority ? <PriorityMark priority={priority} /> : null}
+        {assignee ? <AssigneeMark assignee={assignee} /> : null}
         <time className="ml-auto shrink-0 tabular-nums">
           {formatUpdatedAt(item.updatedAt)}
         </time>
@@ -1149,6 +1145,14 @@ function kanbanItemId(item: WorkItem): string {
 
 type PriorityTone = 'low' | 'medium' | 'high' | 'urgent' | 'neutral';
 
+const PRIORITY_ICONS: Readonly<Record<PriorityTone, IconName>> = {
+  low: 'ChevronsDown',
+  medium: 'ArrowUpDown',
+  high: 'ChevronsUp',
+  urgent: 'AlertTriangle',
+  neutral: 'ChartColumn'
+};
+
 function priorityTone(value: string): PriorityTone {
   const normalized = value.trim().toLocaleLowerCase();
   if (['urgent', 'critical', 'highest', 'blocker', 'p0'].includes(normalized)) {
@@ -1174,17 +1178,29 @@ function assigneeInitials(name: string): string {
     .toLocaleUpperCase();
 }
 
+function visiblePriority(priority: string | null): string | null {
+  const value = priority?.trim();
+  return value && !/^(no priority|none)$/i.test(value) ? value : null;
+}
+
+function visibleAssignee(assignee: string | null): string | null {
+  const value = assignee?.trim();
+  return value && !/^unassigned$/i.test(value) ? value : null;
+}
+
 function PriorityMark({ priority }: { priority: string }) {
   const tone = priorityTone(priority);
+  const icon = PRIORITY_ICONS[tone];
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span
           aria-hidden="true"
           className="wt-priority-mark shrink-0"
+          data-priority-icon={icon}
           data-priority-tone={tone}
         >
-          <Icon name="ChartColumn" className="size-3.5" />
+          <Icon name={icon} className="size-3.5" />
         </span>
       </TooltipTrigger>
       <TooltipContent side="top">Priority: {priority}</TooltipContent>
@@ -1196,7 +1212,7 @@ function AssigneeMark({ assignee }: { assignee: string }) {
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <span aria-hidden="true" className="wt-assignee-mark shrink-0">
+        <span aria-hidden="true" className="wt-assignee-mark shrink-0 text-xs">
           {assigneeInitials(assignee)}
         </span>
       </TooltipTrigger>
@@ -1224,12 +1240,8 @@ function KanbanCard({
   onDragEnd: () => void;
   onKeyDown: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
 }) {
-  const priority = /^(no priority|none)$/i.test(item.priority?.trim() ?? '')
-    ? null
-    : item.priority;
-  const assignee = /^unassigned$/i.test(item.assignee?.trim() ?? '')
-    ? null
-    : item.assignee;
+  const priority = visiblePriority(item.priority);
+  const assignee = visibleAssignee(item.assignee);
   const labels = item.labels
     .map(label => label.trim())
     .filter(Boolean)
@@ -1478,7 +1490,7 @@ function KanbanBoard({
   const keyboardTargets =
     pickup?.options.filter(option => !option.current) ?? [];
 
-  const board = (
+  return (
     <div
       role="region"
       aria-label="Kanban board"
@@ -1690,7 +1702,6 @@ function KanbanBoard({
       )}
     </div>
   );
-  return <TooltipProvider delayDuration={180}>{board}</TooltipProvider>;
 }
 
 function TrackerList({
@@ -1871,7 +1882,7 @@ function TrackerList({
     [rpc]
   );
 
-  return (
+  const content = (
     <div className="flex h-full min-h-0 flex-col">
       <div className="wt-frame mx-auto flex h-full min-h-0 w-full max-w-[100rem] flex-col overflow-hidden">
         <TrackerFilterBar
@@ -1977,6 +1988,7 @@ function TrackerList({
       </div>
     </div>
   );
+  return <TooltipProvider delayDuration={180}>{content}</TooltipProvider>;
 }
 
 function DetailMetadata({
