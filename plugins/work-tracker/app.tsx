@@ -40,6 +40,12 @@ import {
 import { Skeleton } from '@bb/shared-ui/skeleton';
 import { Switch } from '@bb/shared-ui/switch';
 import { Textarea } from '@bb/shared-ui/textarea';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger
+} from '@bb/shared-ui/tooltip';
 import type {
   ProjectConfigMutation,
   ProjectConfigView,
@@ -1141,6 +1147,64 @@ function kanbanItemId(item: WorkItem): string {
   return `${item.bbProjectId}:${item.source}:${item.locator}`;
 }
 
+type PriorityTone = 'low' | 'medium' | 'high' | 'urgent' | 'neutral';
+
+function priorityTone(value: string): PriorityTone {
+  const normalized = value.trim().toLocaleLowerCase();
+  if (['urgent', 'critical', 'highest', 'blocker', 'p0'].includes(normalized)) {
+    return 'urgent';
+  }
+  if (['high', 'major', 'p1'].includes(normalized)) return 'high';
+  if (['medium', 'normal', 'moderate', 'p2'].includes(normalized)) {
+    return 'medium';
+  }
+  if (['low', 'lowest', 'minor', 'trivial', 'p3', 'p4'].includes(normalized)) {
+    return 'low';
+  }
+  return 'neutral';
+}
+
+function assigneeInitials(name: string): string {
+  return name
+    .trim()
+    .split(/\s+/u)
+    .slice(0, 2)
+    .map(part => Array.from(part)[0] ?? '')
+    .join('')
+    .toLocaleUpperCase();
+}
+
+function PriorityMark({ priority }: { priority: string }) {
+  const tone = priorityTone(priority);
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span
+          aria-hidden="true"
+          className="wt-priority-mark shrink-0"
+          data-priority-tone={tone}
+        >
+          <Icon name="ChartColumn" className="size-3.5" />
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">Priority: {priority}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+function AssigneeMark({ assignee }: { assignee: string }) {
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <span aria-hidden="true" className="wt-assignee-mark shrink-0">
+          {assigneeInitials(assignee)}
+        </span>
+      </TooltipTrigger>
+      <TooltipContent side="top">Assigned to {assignee}</TooltipContent>
+    </Tooltip>
+  );
+}
+
 function KanbanCard({
   item,
   pickedUp,
@@ -1177,7 +1241,7 @@ function KanbanCard({
       draggable={!pending}
       aria-grabbed={pickedUp}
       aria-busy={pending}
-      aria-label={`${item.key}: ${item.title}. Status ${item.status}. Source ${sourceName(item.source)}. Press Space to move, or Enter to open.`}
+      aria-label={`${item.key}: ${item.title}. Status ${item.status}. Source ${sourceName(item.source)}.${priority ? ` Priority ${priority}.` : ''}${assignee ? ` Assigned to ${assignee}.` : ''} Press Space to move, or Enter to open.`}
       data-source={item.source}
       data-state-category={item.stateCategory}
       data-picked-up={pickedUp ? 'true' : 'false'}
@@ -1226,12 +1290,12 @@ function KanbanCard({
         <time className="shrink-0 tabular-nums" dateTime={item.updatedAt}>
           Updated {formatUpdatedAt(item.updatedAt)}
         </time>
-        {priority ? (
-          <span className="wt-priority-label shrink-0">{priority}</span>
-        ) : null}
-        {pending || assignee ? (
-          <span className="ml-auto min-w-0 truncate">
-            {pending ? 'Updating…' : assignee}
+        {priority ? <PriorityMark priority={priority} /> : null}
+        {pending ? (
+          <span className="ml-auto min-w-0 truncate">Updating…</span>
+        ) : assignee ? (
+          <span className="ml-auto flex shrink-0">
+            <AssigneeMark assignee={assignee} />
           </span>
         ) : null}
       </span>
@@ -1414,7 +1478,7 @@ function KanbanBoard({
   const keyboardTargets =
     pickup?.options.filter(option => !option.current) ?? [];
 
-  return (
+  const board = (
     <div
       role="region"
       aria-label="Kanban board"
@@ -1626,6 +1690,7 @@ function KanbanBoard({
       )}
     </div>
   );
+  return <TooltipProvider delayDuration={180}>{board}</TooltipProvider>;
 }
 
 function TrackerList({

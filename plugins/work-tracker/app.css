@@ -259,9 +259,45 @@
     color: var(--wt-ink-soft);
   }
 
-  .wt-priority-label,
   .wt-lane-count {
     color: var(--wt-ink-soft);
+  }
+
+  .wt-priority-mark {
+    display: inline-flex;
+    align-items: center;
+    color: var(--wt-ink-soft);
+  }
+
+  .wt-priority-mark[data-priority-tone='low'] {
+    opacity: 0.62;
+  }
+
+  .wt-priority-mark[data-priority-tone='medium'] {
+    color: var(--wt-blue);
+  }
+
+  .wt-priority-mark[data-priority-tone='high'] {
+    color: var(--wt-amber);
+  }
+
+  .wt-priority-mark[data-priority-tone='urgent'] {
+    color: var(--wt-red);
+  }
+
+  .wt-assignee-mark {
+    display: inline-flex;
+    width: 20px;
+    height: 20px;
+    align-items: center;
+    justify-content: center;
+    border: 1px solid var(--border-hairline);
+    border-radius: 999px;
+    background: color-mix(in oklch, var(--ink) 4%, var(--canvas));
+    color: var(--wt-ink-soft);
+    font-weight: 600;
+    line-height: 1;
+    letter-spacing: -0.04em;
   }
 
   .wt-status-pill[data-state-category] {

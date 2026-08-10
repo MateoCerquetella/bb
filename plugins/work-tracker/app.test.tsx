@@ -85,6 +85,35 @@ const betaJiraWorkItem: WorkItem = {
   project: 'BETA'
 };
 
+const lowJiraWorkItem: WorkItem = {
+  ...betaJiraWorkItem,
+  bbProjectId: PROJECT_ALPHA,
+  locator: 'ALPHA-9',
+  key: 'ALPHA-9',
+  title: 'Document compact metadata',
+  priority: 'Low',
+  assignee: 'Sam Rivera',
+  project: 'ALPHA'
+};
+
+const urgentGithubWorkItem: WorkItem = {
+  ...githubWorkItem,
+  locator: 'get-bb/bb#315',
+  key: 'get-bb/bb#315',
+  title: 'Resolve an urgent issue',
+  priority: 'Urgent',
+  assignee: 'Ana María'
+};
+
+const customPriorityLinearWorkItem: WorkItem = {
+  ...linearWorkItem,
+  locator: 'lin_alpha_43',
+  key: 'ALPHA-43',
+  title: 'Preserve provider priority text',
+  priority: 'Expedite',
+  assignee: 'Unassigned'
+};
+
 const githubItem: WorkItemDetail = {
   ...githubWorkItem,
   comments: [
@@ -378,6 +407,9 @@ describe('Work Tracker panel', () => {
               : [
                   githubWorkItem,
                   linearWorkItem,
+                  lowJiraWorkItem,
+                  urgentGithubWorkItem,
+                  customPriorityLinearWorkItem,
                   {
                     ...betaJiraWorkItem,
                     bbProjectId: PROJECT_ALPHA,
@@ -416,6 +448,22 @@ describe('Work Tracker panel', () => {
     expect(within(card).queryByText('third-hidden-label')).toBeNull();
     expect(within(card).getByText('Updated Aug 10')).toBeDefined();
     expect(card.querySelectorAll('.wt-state-dot')).toHaveLength(1);
+    expect(card.getAttribute('aria-label')).toContain('Priority High');
+    expect(card.getAttribute('aria-label')).toContain('Assigned to mateo');
+    expect(within(card).queryByText('High')).toBeNull();
+    expect(within(card).queryByText('mateo')).toBeNull();
+    const highPriority = card.querySelector('.wt-priority-mark');
+    expect(highPriority?.getAttribute('data-priority-tone')).toBe('high');
+    const mateoMark = card.querySelector('.wt-assignee-mark');
+    expect(mateoMark?.textContent).toBe('M');
+    fireEvent.pointerMove(mateoMark!);
+    expect(
+      (await slot.findAllByText('Assigned to mateo')).length
+    ).toBeGreaterThan(0);
+    fireEvent.pointerMove(highPriority!);
+    expect((await slot.findAllByText('Priority: High')).length).toBeGreaterThan(
+      0
+    );
     const linearCard = within(board).getByRole('button', {
       name: /^ALPHA-42: Align the shared issue hierarchy\./
     });
@@ -424,6 +472,43 @@ describe('Work Tracker panel', () => {
     expect(within(linearCard).getByText('design')).toBeDefined();
     expect(within(linearCard).getByText('cross-provider')).toBeDefined();
     expect(within(linearCard).getByText('Updated Aug 10')).toBeDefined();
+    expect(
+      linearCard
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-tone')
+    ).toBe('medium');
+    const lowJiraCard = within(board).getByRole('button', {
+      name: /^ALPHA-9: Document compact metadata\./
+    });
+    expect(
+      lowJiraCard
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-tone')
+    ).toBe('low');
+    expect(lowJiraCard.querySelector('.wt-assignee-mark')?.textContent).toBe(
+      'SR'
+    );
+    const urgentCard = within(board).getByRole('button', {
+      name: /^get-bb\/bb#315: Resolve an urgent issue\./
+    });
+    expect(
+      urgentCard
+        .querySelector('.wt-priority-mark')
+        ?.getAttribute('data-priority-tone')
+    ).toBe('urgent');
+    expect(urgentCard.querySelector('.wt-assignee-mark')?.textContent).toBe(
+      'AM'
+    );
+    const customPriorityCard = within(board).getByRole('button', {
+      name: /^ALPHA-43: Preserve provider priority text\./
+    });
+    const customPriority =
+      customPriorityCard.querySelector('.wt-priority-mark');
+    expect(customPriority?.getAttribute('data-priority-tone')).toBe('neutral');
+    fireEvent.pointerMove(customPriority!);
+    expect(
+      (await slot.findAllByText('Priority: Expedite')).length
+    ).toBeGreaterThan(0);
     const jiraCard = within(board).getByRole('button', {
       name: /^BETA-9: Beta release checklist\./
     });
@@ -432,6 +517,8 @@ describe('Work Tracker panel', () => {
     expect(within(jiraCard).queryByText('In Progress')).toBeNull();
     expect(within(jiraCard).queryByText('No priority')).toBeNull();
     expect(within(jiraCard).queryByText('Unassigned')).toBeNull();
+    expect(jiraCard.querySelector('.wt-priority-mark')).toBeNull();
+    expect(jiraCard.querySelector('.wt-assignee-mark')).toBeNull();
     expect(jiraCard.querySelectorAll('.wt-label-chip')).toHaveLength(0);
     expect(within(jiraCard).getByText('Updated Aug 10')).toBeDefined();
     fireEvent.click(card);
