@@ -294,7 +294,11 @@ describe('Work Tracker panel', () => {
     expect(within(highRow).queryByText('mateo')).toBeNull();
     const highPriority = highRow.querySelector('.wt-priority-mark');
     expect(highPriority?.getAttribute('data-priority-tone')).toBe('high');
-    expect(highPriority?.getAttribute('data-priority-icon')).toBe('ChevronsUp');
+    expect(
+      highPriority
+        ?.querySelector('[data-priority-glyph="signal"]')
+        ?.getAttribute('data-priority-bars')
+    ).toBe('3');
     const mateoMark = highRow.querySelector('.wt-assignee-mark');
     expect(mateoMark?.textContent).toBe('M');
     fireEvent.pointerMove(mateoMark!);
@@ -312,8 +316,9 @@ describe('Work Tracker panel', () => {
     expect(
       lowRow
         .querySelector('.wt-priority-mark')
-        ?.getAttribute('data-priority-icon')
-    ).toBe('ChevronsDown');
+        ?.querySelector('[data-priority-glyph="signal"]')
+        ?.getAttribute('data-priority-bars')
+    ).toBe('1');
     expect(lowRow.querySelector('.wt-assignee-mark')?.textContent).toBe('SR');
 
     const emptyRow = slot.getByRole('button', {
@@ -517,7 +522,11 @@ describe('Work Tracker panel', () => {
     expect(within(card).queryByText('mateo')).toBeNull();
     const highPriority = card.querySelector('.wt-priority-mark');
     expect(highPriority?.getAttribute('data-priority-tone')).toBe('high');
-    expect(highPriority?.getAttribute('data-priority-icon')).toBe('ChevronsUp');
+    expect(
+      highPriority
+        ?.querySelector('[data-priority-glyph="signal"]')
+        ?.getAttribute('data-priority-bars')
+    ).toBe('3');
     const mateoMark = card.querySelector('.wt-assignee-mark');
     expect(mateoMark?.textContent).toBe('M');
     fireEvent.pointerMove(mateoMark!);
@@ -544,8 +553,9 @@ describe('Work Tracker panel', () => {
     expect(
       linearCard
         .querySelector('.wt-priority-mark')
-        ?.getAttribute('data-priority-icon')
-    ).toBe('ArrowUpDown');
+        ?.querySelector('[data-priority-glyph="signal"]')
+        ?.getAttribute('data-priority-bars')
+    ).toBe('2');
     const lowJiraCard = within(board).getByRole('button', {
       name: /^ALPHA-9: Document compact metadata\./
     });
@@ -557,8 +567,9 @@ describe('Work Tracker panel', () => {
     expect(
       lowJiraCard
         .querySelector('.wt-priority-mark')
-        ?.getAttribute('data-priority-icon')
-    ).toBe('ChevronsDown');
+        ?.querySelector('[data-priority-glyph="signal"]')
+        ?.getAttribute('data-priority-bars')
+    ).toBe('1');
     expect(lowJiraCard.querySelector('.wt-assignee-mark')?.textContent).toBe(
       'SR'
     );
@@ -573,8 +584,8 @@ describe('Work Tracker panel', () => {
     expect(
       urgentCard
         .querySelector('.wt-priority-mark')
-        ?.getAttribute('data-priority-icon')
-    ).toBe('AlertTriangle');
+        ?.querySelector('[data-priority-glyph="urgent"]')
+    ).not.toBeNull();
     expect(urgentCard.querySelector('.wt-assignee-mark')?.textContent).toBe(
       'AM'
     );
@@ -584,9 +595,9 @@ describe('Work Tracker panel', () => {
     const customPriority =
       customPriorityCard.querySelector('.wt-priority-mark');
     expect(customPriority?.getAttribute('data-priority-tone')).toBe('neutral');
-    expect(customPriority?.getAttribute('data-priority-icon')).toBe(
-      'ChartColumn'
-    );
+    expect(
+      customPriority?.querySelector('[data-priority-glyph="flag"]')
+    ).not.toBeNull();
     fireEvent.pointerMove(customPriority!);
     expect(
       (await slot.findAllByText('Priority: Expedite')).length

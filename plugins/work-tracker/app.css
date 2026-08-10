@@ -269,18 +269,6 @@
     color: var(--wt-ink-soft);
   }
 
-  .wt-priority-mark[data-priority-tone='low'] {
-    opacity: 0.62;
-  }
-
-  .wt-priority-mark[data-priority-tone='medium'] {
-    color: var(--wt-blue);
-  }
-
-  .wt-priority-mark[data-priority-tone='high'] {
-    color: var(--wt-amber);
-  }
-
   .wt-priority-mark[data-priority-tone='urgent'] {
     color: var(--wt-red);
   }

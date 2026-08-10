@@ -1145,14 +1145,6 @@ function kanbanItemId(item: WorkItem): string {
 
 type PriorityTone = 'low' | 'medium' | 'high' | 'urgent' | 'neutral';
 
-const PRIORITY_ICONS: Readonly<Record<PriorityTone, IconName>> = {
-  low: 'ChevronsDown',
-  medium: 'ArrowUpDown',
-  high: 'ChevronsUp',
-  urgent: 'AlertTriangle',
-  neutral: 'ChartColumn'
-};
-
 function priorityTone(value: string): PriorityTone {
   const normalized = value.trim().toLocaleLowerCase();
   if (['urgent', 'critical', 'highest', 'blocker', 'p0'].includes(normalized)) {
@@ -1188,19 +1180,104 @@ function visibleAssignee(assignee: string | null): string | null {
   return value && !/^unassigned$/i.test(value) ? value : null;
 }
 
+function PriorityGlyph({ tone }: { tone: PriorityTone }) {
+  if (tone === 'urgent') {
+    return (
+      <svg
+        aria-hidden="true"
+        className="size-3.5"
+        data-priority-glyph="urgent"
+        viewBox="0 0 14 14"
+      >
+        <rect
+          x="0.5"
+          y="0.5"
+          width="13"
+          height="13"
+          rx="3"
+          fill="currentColor"
+        />
+        <rect
+          fill="var(--canvas)"
+          x="6.2"
+          y="3"
+          width="1.6"
+          height="5.2"
+          rx="0.8"
+        />
+        <circle fill="var(--canvas)" cx="7" cy="10.6" r="1" />
+      </svg>
+    );
+  }
+
+  if (tone === 'neutral') {
+    return (
+      <svg
+        aria-hidden="true"
+        className="size-3.5"
+        data-priority-glyph="flag"
+        viewBox="0 0 14 14"
+      >
+        <path
+          d="M3 12V2.25"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeWidth="1.4"
+        />
+        <path
+          d="M3.5 2.75h7l-1.75 2.1 1.75 2.1h-7z"
+          fill="currentColor"
+          opacity="0.72"
+          stroke="currentColor"
+          strokeLinejoin="round"
+          strokeWidth="0.7"
+        />
+      </svg>
+    );
+  }
+
+  const activeBars = tone === 'low' ? 1 : tone === 'medium' ? 2 : 3;
+  const bars = [
+    { x: 1.5, y: 8, height: 4.5 },
+    { x: 5.5, y: 5, height: 7.5 },
+    { x: 9.5, y: 2, height: 10.5 }
+  ];
+  return (
+    <svg
+      aria-hidden="true"
+      className="size-3.5"
+      data-priority-bars={activeBars}
+      data-priority-glyph="signal"
+      viewBox="0 0 14 14"
+    >
+      {bars.map((bar, index) => (
+        <rect
+          key={bar.x}
+          x={bar.x}
+          y={bar.y}
+          width="3"
+          height={bar.height}
+          rx="1"
+          fill="currentColor"
+          opacity={index < activeBars ? 1 : 0.18}
+        />
+      ))}
+    </svg>
+  );
+}
+
 function PriorityMark({ priority }: { priority: string }) {
   const tone = priorityTone(priority);
-  const icon = PRIORITY_ICONS[tone];
   return (
     <Tooltip>
       <TooltipTrigger asChild>
         <span
           aria-hidden="true"
           className="wt-priority-mark shrink-0"
-          data-priority-icon={icon}
           data-priority-tone={tone}
         >
-          <Icon name={icon} className="size-3.5" />
+          <PriorityGlyph tone={tone} />
         </span>
       </TooltipTrigger>
       <TooltipContent side="top">Priority: {priority}</TooltipContent>
