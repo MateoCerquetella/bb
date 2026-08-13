@@ -1,4 +1,5 @@
 import {
+  clipboard,
   Menu,
   type ContextMenuParams,
   type Event,
@@ -157,6 +158,16 @@ export function buildDesktopContextMenuTemplate({
         webContents.session.addWordToSpellCheckerDictionary(
           resolvedSpellcheckContext.misspelledWord,
         );
+      },
+    });
+    pushSeparatorIfNeeded(template);
+  }
+
+  if (params.linkURL.length > 0) {
+    template.push({
+      label: "Copy Link",
+      click: () => {
+        clipboard.writeText(params.linkURL);
       },
     });
     pushSeparatorIfNeeded(template);

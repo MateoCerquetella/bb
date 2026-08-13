@@ -8,8 +8,14 @@ import {
 } from "../src/desktop-context-menu.js";
 
 const popup = vi.fn();
+const { writeClipboardText } = vi.hoisted(() => ({
+  writeClipboardText: vi.fn(),
+}));
 
 vi.mock("electron", () => ({
+  clipboard: {
+    writeText: writeClipboardText,
+  },
   Menu: {
     buildFromTemplate(template: MenuItemConstructorOptions[]) {
       return { popup, template };
@@ -272,6 +278,36 @@ describe("desktop context menu", () => {
       { type: "separator" },
       { role: "selectAll", enabled: true },
     ]);
+  });
+
+  it("copies a link target while preserving selected-text actions", () => {
+    const webContents = createFakeWebContents();
+    const template = buildDesktopContextMenuTemplate({
+      webContents,
+      params: createContextMenuParams({
+        linkURL: "https://example.com/device",
+        selectionText: "device authorization",
+        editFlags: {
+          ...DEFAULT_EDIT_FLAGS,
+          canCopy: true,
+          canSelectAll: true,
+        },
+      }),
+    });
+
+    expect(template).toMatchObject([
+      { label: "Copy Link" },
+      { type: "separator" },
+      { role: "copy", enabled: true },
+      { type: "separator" },
+      { role: "selectAll", enabled: true },
+    ]);
+
+    clickMenuItem(template[0]);
+
+    expect(writeClipboardText).toHaveBeenCalledWith(
+      "https://example.com/device",
+    );
   });
 
   it("does not show an empty menu for inert content", () => {
