@@ -202,10 +202,6 @@ export function useThreadCreationOptions(
     resetKey,
     scope = "new-thread",
   } = options ?? {};
-  const { setValue: setStoredProviderId, value: storedProviderId } =
-    usePromptBoxProviderPreference();
-  const setStoredProviderModelReasoning =
-    useSetPromptBoxProviderModelReasoningPreference();
   const { setValue: setStoredServiceTier, value: storedServiceTier } =
     usePromptBoxServiceTierPreference();
   const { setValue: setStoredPermissionMode, value: storedPermissionMode } =
@@ -283,9 +279,6 @@ export function useThreadCreationOptions(
     usesLocalThreadSelections,
   ]);
 
-  const selectedProviderIdBeforeConnectedFallback = usesStoredCreateSelections
-    ? storedProviderId || renderedThreadSelections.selectedProviderId
-    : renderedThreadSelections.selectedProviderId;
   const rawServiceTier = usesStoredCreateSelections
     ? storedServiceTier || renderedThreadSelections.serviceTier
     : renderedThreadSelections.serviceTier;
@@ -306,9 +299,19 @@ export function useThreadCreationOptions(
         environmentId,
         environmentHostId,
         environmentSelectionValue: rawEnvironmentSelectionValue,
-        providerId: selectedProviderIdBeforeConnectedFallback,
+        providerId: renderedThreadSelections.selectedProviderId,
         scope,
       });
+  const preferenceHostId = usesStoredCreateSelections
+    ? executionOptionsRouting.hostId
+    : undefined;
+  const { setValue: setStoredProviderId, value: storedProviderId } =
+    usePromptBoxProviderPreference(preferenceHostId);
+  const setStoredProviderModelReasoning =
+    useSetPromptBoxProviderModelReasoningPreference(preferenceHostId);
+  const selectedProviderIdBeforeConnectedFallback = usesStoredCreateSelections
+    ? storedProviderId || renderedThreadSelections.selectedProviderId
+    : renderedThreadSelections.selectedProviderId;
   const shouldResolveConnectedProvider =
     executionOptionsQueryEnabled &&
     scope === "new-thread" &&
@@ -371,9 +374,9 @@ export function useThreadCreationOptions(
   }, [providers, rawSelectedProviderId]);
 
   const { setValue: setStoredSelectedModel, value: storedSelectedModel } =
-    usePromptBoxModelPreference(effectiveProviderId);
+    usePromptBoxModelPreference(effectiveProviderId, preferenceHostId);
   const { setValue: setStoredReasoningLevel, value: storedReasoningLevel } =
-    usePromptBoxReasoningLevelPreference(effectiveProviderId);
+    usePromptBoxReasoningLevelPreference(effectiveProviderId, preferenceHostId);
   const effectiveProviderMatchesInitialProvider =
     effectiveProviderId.length > 0 &&
     effectiveProviderId === renderedThreadSelections.selectedProviderId;
@@ -840,6 +843,9 @@ export function useThreadCreationOptions(
       touchedThreadFieldsRef.current.add("selectedModel");
       if (usesStoredCreateSelections) {
         setStoredSelectedModel(value);
+        if (effectiveProviderId.length > 0) {
+          setStoredProviderId(effectiveProviderId);
+        }
         return;
       }
       setLocalProvidersUsingDefaults((current) => {
@@ -861,6 +867,7 @@ export function useThreadCreationOptions(
     [
       effectiveProviderId,
       reasoningLevel,
+      setStoredProviderId,
       setStoredSelectedModel,
       usesStoredCreateSelections,
     ],
@@ -887,6 +894,9 @@ export function useThreadCreationOptions(
       touchedThreadFieldsRef.current.add("reasoningLevel");
       if (usesStoredCreateSelections) {
         setStoredReasoningLevel(value);
+        if (effectiveProviderId.length > 0) {
+          setStoredProviderId(effectiveProviderId);
+        }
         return;
       }
       setLocalProvidersUsingDefaults((current) => {
@@ -910,6 +920,7 @@ export function useThreadCreationOptions(
     [
       effectiveProviderId,
       selectedModel,
+      setStoredProviderId,
       setStoredReasoningLevel,
       usesStoredCreateSelections,
     ],

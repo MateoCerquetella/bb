@@ -489,6 +489,105 @@ describe("useThreadCreationOptions", () => {
     });
   });
 
+  it("restores provider, model, and reasoning per machine", async () => {
+    setProjectScopedValue("bb.promptbox.environment", "host:local-host:local");
+    vi.mocked(sdk.system.executionOptions).mockImplementation(async (args) =>
+      providerExecutionOptionsResponse(args?.providerId),
+    );
+    const mounted = renderHook(
+      () =>
+        useThreadCreationOptions({
+          scope: "new-thread",
+          preferenceProjectId: PROJECT_ID,
+        }),
+      { wrapper: createQueryClientTestHarness().wrapper },
+    );
+    const selectHost = (hostId: string) => {
+      act(() => {
+        mounted.result.current.setEnvironmentSelectionValue(
+          `host:${hostId}:local`,
+        );
+      });
+    };
+    const expectSelection = async (
+      providerId: string,
+      model: string,
+      reasoningLevel: string,
+    ) => {
+      await waitFor(() => {
+        expect(mounted.result.current.selectedProviderId).toBe(providerId);
+        expect(mounted.result.current.selectedModel).toBe(model);
+        expect(mounted.result.current.reasoningLevel).toBe(reasoningLevel);
+      });
+    };
+    const rememberSelection = async (
+      hostId: string,
+      providerId: string,
+      model: string,
+      reasoningLevel: "low" | "medium" | "high",
+    ) => {
+      selectHost(hostId);
+      await waitFor(() => {
+        expect(mounted.result.current.executionOptionsRouting).toEqual({
+          hostId,
+        });
+      });
+      act(() => {
+        mounted.result.current.setProviderModelReasoning({
+          providerId,
+          model,
+          reasoningLevel,
+        });
+      });
+    };
+
+    await rememberSelection(
+      "local-host",
+      GLOBAL_PROVIDER_ID,
+      "global-remembered",
+      "high",
+    );
+    await rememberSelection(
+      "vps-host",
+      PROJECT_PROVIDER_ID,
+      "project-remembered",
+      "medium",
+    );
+    selectHost("local-host");
+    await expectSelection(GLOBAL_PROVIDER_ID, "global-remembered", "high");
+
+    selectHost("vps-host");
+    await expectSelection(PROJECT_PROVIDER_ID, "project-remembered", "medium");
+
+    await rememberSelection(
+      "vps-host",
+      GLOBAL_PROVIDER_ID,
+      "global-default",
+      "low",
+    );
+    selectHost("local-host");
+    await expectSelection(GLOBAL_PROVIDER_ID, "global-remembered", "high");
+    selectHost("vps-host");
+    await expectSelection(GLOBAL_PROVIDER_ID, "global-default", "low");
+
+    mounted.unmount();
+    const reloaded = renderHook(
+      () =>
+        useThreadCreationOptions({
+          scope: "new-thread",
+          preferenceProjectId: PROJECT_ID,
+        }),
+      { wrapper: createQueryClientTestHarness().wrapper },
+    );
+    await waitFor(() => {
+      expect(reloaded.result.current.selectedProviderId).toBe(
+        GLOBAL_PROVIDER_ID,
+      );
+      expect(reloaded.result.current.selectedModel).toBe("global-default");
+      expect(reloaded.result.current.reasoningLevel).toBe("low");
+    });
+  });
+
   it("keeps provider selections local in component-local composers", async () => {
     vi.mocked(sdk.system.executionOptions).mockImplementation(async (args) =>
       providerExecutionOptionsResponse(args?.providerId),

@@ -17,6 +17,7 @@ const PERMISSION_MODE_STORAGE_KEY = "bb.promptbox.permission-mode";
 const ENVIRONMENT_STORAGE_KEY = "bb.promptbox.environment";
 const PROVIDER_STORAGE_KEY = "bb.promptbox.provider";
 const PROVIDER_SELECTION_STORAGE_VERSION = "1";
+const HOST_SELECTION_STORAGE_VERSION = "2";
 
 export type StoredServiceTier = "" | ServiceTier;
 export type StoredReasoningLevel = "" | ReasoningLevel;
@@ -86,14 +87,23 @@ function isStoredPermissionMode(value: string): value is StoredPermissionMode {
   return value === "" || isPermissionMode(value);
 }
 
-const providerIdAtom = atomWithStorage<string>(
-  PROVIDER_STORAGE_KEY,
-  "",
-  rawStringLocalStorage,
-  { getOnInit: true },
-);
 const emptyModelAtom = atom("");
 const emptyReasoningLevelAtom = atom<StoredReasoningLevel>("");
+
+function normalizeHostId(hostId?: string | null): string | null {
+  const normalized = hostId?.trim() ?? "";
+  return normalized.length > 0 ? normalized : null;
+}
+
+function getHostSelectionStorageKey(
+  storageKey: string,
+  hostId: string,
+  providerId?: string,
+): string {
+  const scope =
+    providerId === undefined ? [hostId.trim()] : [hostId.trim(), providerId];
+  return `${storageKey}-${encodeURIComponent(JSON.stringify(scope))}-${HOST_SELECTION_STORAGE_VERSION}`;
+}
 
 function getProviderSelectionStorageKey(
   storageKey: string,
@@ -105,30 +115,63 @@ function getProviderSelectionStorageKey(
 function getLegacyProviderSelection(
   providerId: string,
   storageKey: string,
+  includeProviderScopedValue = false,
 ): string | null {
   if (typeof window === "undefined") return null;
+  if (includeProviderScopedValue) {
+    const value = window.localStorage.getItem(
+      getProviderSelectionStorageKey(storageKey, providerId),
+    );
+    if (value !== null) return value;
+  }
   if (window.localStorage.getItem(PROVIDER_STORAGE_KEY) !== providerId) {
     return null;
   }
   return window.localStorage.getItem(storageKey);
 }
 
-function createProviderModelStorage(providerId: string) {
+function createHostProviderStorage() {
   return createLocalStorageSyncStorage<string>({
     parse: (storedValue, initialValue) =>
       storedValue ??
-      getLegacyProviderSelection(providerId, MODEL_STORAGE_KEY) ??
+      (typeof window === "undefined"
+        ? null
+        : window.localStorage.getItem(PROVIDER_STORAGE_KEY)) ??
       initialValue,
     serialize: (value) => value,
   });
 }
 
-function createProviderReasoningStorage(providerId: string) {
+function createProviderModelStorage(
+  providerId: string,
+  includeProviderScopedValue = false,
+) {
+  return createLocalStorageSyncStorage<string>({
+    parse: (storedValue, initialValue) =>
+      storedValue ??
+      getLegacyProviderSelection(
+        providerId,
+        MODEL_STORAGE_KEY,
+        includeProviderScopedValue,
+      ) ??
+      initialValue,
+    serialize: (value) => value,
+  });
+}
+
+function createProviderReasoningStorage(
+  providerId: string,
+  includeProviderScopedValue = false,
+) {
   return createLocalStorageSyncStorage<StoredReasoningLevel>({
     parse: (storedValue, initialValue) => {
       const value =
         storedValue ??
-        getLegacyProviderSelection(providerId, REASONING_STORAGE_KEY);
+        getLegacyProviderSelection(
+          providerId,
+          REASONING_STORAGE_KEY,
+          includeProviderScopedValue,
+        );
       return value !== null && isStoredReasoningLevel(value)
         ? value
         : initialValue;
@@ -137,27 +180,56 @@ function createProviderReasoningStorage(providerId: string) {
   });
 }
 
-const modelAtomFamily = atomFamily((providerId: string) =>
+const providerIdAtomFamily = atomFamily((hostId: string | null) =>
   atomWithStorage<string>(
-    getProviderSelectionStorageKey(MODEL_STORAGE_KEY, providerId),
+    hostId
+      ? getHostSelectionStorageKey(PROVIDER_STORAGE_KEY, hostId)
+      : PROVIDER_STORAGE_KEY,
     "",
-    createProviderModelStorage(providerId),
+    hostId ? createHostProviderStorage() : rawStringLocalStorage,
     { getOnInit: true },
   ),
+);
+
+type HostProviderScope = readonly [hostId: string | null, providerId: string];
+
+function isSameHostProviderScope(
+  left: HostProviderScope,
+  right: HostProviderScope,
+): boolean {
+  return left[0] === right[0] && left[1] === right[1];
+}
+
+const modelAtomFamily = atomFamily(
+  ([hostId, providerId]: HostProviderScope) =>
+    atomWithStorage<string>(
+      hostId
+        ? getHostSelectionStorageKey(MODEL_STORAGE_KEY, hostId, providerId)
+        : getProviderSelectionStorageKey(MODEL_STORAGE_KEY, providerId),
+      "",
+      createProviderModelStorage(providerId, hostId !== null),
+      { getOnInit: true },
+    ),
+  isSameHostProviderScope,
+);
+
+const reasoningLevelAtomFamily = atomFamily(
+  ([hostId, providerId]: HostProviderScope) =>
+    atomWithStorage<StoredReasoningLevel>(
+      hostId
+        ? getHostSelectionStorageKey(REASONING_STORAGE_KEY, hostId, providerId)
+        : getProviderSelectionStorageKey(REASONING_STORAGE_KEY, providerId),
+      "",
+      createProviderReasoningStorage(providerId, hostId !== null),
+      { getOnInit: true },
+    ),
+  isSameHostProviderScope,
 );
 const serviceTierAtom = atomWithStorage<StoredServiceTier>(
   SERVICE_TIER_STORAGE_KEY,
   "",
   createLocalStorageEnumStorage(isStoredServiceTier),
   { getOnInit: true },
-);
-const reasoningLevelAtomFamily = atomFamily((providerId: string) =>
-  atomWithStorage<StoredReasoningLevel>(
-    getProviderSelectionStorageKey(REASONING_STORAGE_KEY, providerId),
-    "",
-    createProviderReasoningStorage(providerId),
-    { getOnInit: true },
-  ),
 );
 // Legacy preference migration: "workspace-write" maps onto the same workspace
 // sandbox as "accept-edits", so the user's stored intent carries forward.
@@ -198,11 +270,18 @@ const projectEnvironmentSelectionAtomFamily = atomFamily((projectId: string) =>
   ),
 );
 
-export function usePromptBoxProviderPreference(): PersistedStringSelectionField {
-  const [value, setAtomValue] = useAtom(providerIdAtom);
+export function usePromptBoxProviderPreference(
+  hostId?: string | null,
+): PersistedStringSelectionField {
+  const normalizedHostId = normalizeHostId(hostId);
+  const [value, setAtomValue] = useAtom(providerIdAtomFamily(normalizedHostId));
   const setValue = useCallback(
     (nextValue: string) => {
-      if (nextValue !== value && typeof window !== "undefined") {
+      if (
+        normalizedHostId === null &&
+        nextValue !== value &&
+        typeof window !== "undefined"
+      ) {
         // Once the provider changes, the legacy unscoped values no longer have
         // a trustworthy owner. The caller saves the current pair under its
         // provider-scoped keys before changing this value.
@@ -211,17 +290,19 @@ export function usePromptBoxProviderPreference(): PersistedStringSelectionField 
       }
       setAtomValue(nextValue);
     },
-    [setAtomValue, value],
+    [normalizedHostId, setAtomValue, value],
   );
   return { setValue, value };
 }
 
 export function usePromptBoxModelPreference(
   providerId: string,
+  hostId?: string | null,
 ): PersistedStringSelectionField {
-  const selectionAtom = providerId
-    ? modelAtomFamily(providerId)
-    : emptyModelAtom;
+  const normalizedHostId = normalizeHostId(hostId);
+  const selectionAtom = !providerId
+    ? emptyModelAtom
+    : modelAtomFamily([normalizedHostId, providerId]);
   const [value, setAtomValue] = useAtom(selectionAtom);
   const setValue = useCallback(
     (nextValue: string) => {
@@ -245,10 +326,12 @@ export function usePromptBoxServiceTierPreference(): PersistedServiceTierSelecti
 
 export function usePromptBoxReasoningLevelPreference(
   providerId: string,
+  hostId?: string | null,
 ): PersistedReasoningLevelSelectionField {
-  const selectionAtom = providerId
-    ? reasoningLevelAtomFamily(providerId)
-    : emptyReasoningLevelAtom;
+  const normalizedHostId = normalizeHostId(hostId);
+  const selectionAtom = !providerId
+    ? emptyReasoningLevelAtom
+    : reasoningLevelAtomFamily([normalizedHostId, providerId]);
   const [value, setAtomValue] = useAtom(selectionAtom);
   const setValue = useCallback(
     (nextValue: StoredReasoningLevel) => {
@@ -259,17 +342,19 @@ export function usePromptBoxReasoningLevelPreference(
   return { setValue, value };
 }
 
-export function useSetPromptBoxProviderModelReasoningPreference(): (
-  preference: PromptBoxProviderModelReasoningPreference,
-) => void {
+export function useSetPromptBoxProviderModelReasoningPreference(
+  hostId?: string | null,
+): (preference: PromptBoxProviderModelReasoningPreference) => void {
   const store = useStore();
+  const normalizedHostId = normalizeHostId(hostId);
   return useCallback(
     ({ providerId, model, reasoningLevel }) => {
       if (providerId.length === 0) return;
-      store.set(modelAtomFamily(providerId), model);
-      store.set(reasoningLevelAtomFamily(providerId), reasoningLevel);
+      const scope: HostProviderScope = [normalizedHostId, providerId];
+      store.set(modelAtomFamily(scope), model);
+      store.set(reasoningLevelAtomFamily(scope), reasoningLevel);
     },
-    [store],
+    [normalizedHostId, store],
   );
 }
 
