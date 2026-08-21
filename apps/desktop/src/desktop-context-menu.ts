@@ -193,7 +193,6 @@ export function buildDesktopContextMenuTemplate({
     template.push({ role: "copy", enabled: true });
   }
   if (params.editFlags.canSelectAll) {
-    pushSeparatorIfNeeded(template);
     template.push({ role: "selectAll", enabled: true });
   }
 

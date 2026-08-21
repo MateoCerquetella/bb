@@ -300,6 +300,26 @@ describe("desktop context menu", () => {
     );
   });
 
+  it("groups selected-text actions together", () => {
+    const webContents = createFakeWebContents();
+    const template = buildDesktopContextMenuTemplate({
+      webContents,
+      params: createContextMenuParams({
+        selectionText: "device authorization",
+        editFlags: {
+          ...DEFAULT_EDIT_FLAGS,
+          canCopy: true,
+          canSelectAll: true,
+        },
+      }),
+    });
+
+    expect(template).toEqual([
+      { role: "copy", enabled: true },
+      { role: "selectAll", enabled: true },
+    ]);
+  });
+
   it("preserves selected-text actions for links", () => {
     const webContents = createFakeWebContents();
     const template = buildDesktopContextMenuTemplate({
@@ -319,7 +339,6 @@ describe("desktop context menu", () => {
       { label: "Copy Link" },
       { type: "separator" },
       { role: "copy", enabled: true },
-      { type: "separator" },
       { role: "selectAll", enabled: true },
     ]);
   });
