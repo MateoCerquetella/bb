@@ -202,6 +202,8 @@ export type OwnershipChangeOperationMetadata = z.infer<
   typeof ownershipChangeOperationMetadataSchema
 >;
 
+export const THREAD_CONTEXT_CLEAR_OPERATION = "context_clear";
+
 export const systemOperationEventDataSchema = z.object({
   operation: z.string(),
   status: z.string(),

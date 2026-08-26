@@ -3715,6 +3715,14 @@ describe("PromptBoxInternal command typeahead submit", () => {
     description: "Compact context",
     argumentHint: null,
   };
+  const clearSuggestion: ProviderCommandSuggestion = {
+    kind: "command",
+    name: "clear",
+    source: "command",
+    origin: "builtin",
+    description: "Start fresh context in this thread",
+    argumentHint: null,
+  };
   const userSkillSuggestion: ProviderCommandSuggestion = {
     kind: "command",
     name: "review",
@@ -3785,36 +3793,41 @@ describe("PromptBoxInternal command typeahead submit", () => {
     await waitFor(() => expect(screen.queryByText(name)).not.toBeNull());
   }
 
-  it("submits when a built-in command is selected with Enter", async () => {
-    const { changes, onSubmit, promptBoxRef } =
-      renderCommandPromptBox(compactSuggestion);
-    await openCommandMenu(promptBoxRef, "/compact", "compact");
+  it.each([
+    { name: "compact", suggestion: compactSuggestion },
+    { name: "clear", suggestion: clearSuggestion },
+  ])(
+    "submits built-in /$name when selected with Enter",
+    async ({ name, suggestion }) => {
+      const { changes, onSubmit, promptBoxRef } =
+        renderCommandPromptBox(suggestion);
+      await openCommandMenu(promptBoxRef, `/${name}`, name);
 
-    await act(async () => {
-      fireEvent.keyDown(getPromptEditorElement(), { key: "Enter" });
-    });
-    await act(async () => {});
+      await act(async () => {
+        fireEvent.keyDown(getPromptEditorElement(), { key: "Enter" });
+      });
+      await act(async () => {});
 
-    expect(onSubmit).toHaveBeenCalledTimes(1);
-    // The command mention is applied (and therefore submitted), not left as
-    // bare text — Codex reads the mention to trigger compaction and Claude
-    // sends the `/compact` text as-is.
-    expect(latestChange(changes)?.mentions).toEqual([
-      {
-        start: 0,
-        end: "/compact".length,
-        resource: {
-          kind: "command",
-          trigger: "/",
-          name: "compact",
-          source: "command",
-          origin: "builtin",
-          label: "compact",
-          argumentHint: null,
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      // The command mention is applied (and therefore submitted), not left as
+      // bare text.
+      expect(latestChange(changes)?.mentions).toEqual([
+        {
+          start: 0,
+          end: `/${name}`.length,
+          resource: {
+            kind: "command",
+            trigger: "/",
+            name,
+            source: "command",
+            origin: "builtin",
+            label: name,
+            argumentHint: null,
+          },
         },
-      },
-    ]);
-  });
+      ]);
+    },
+  );
 
   it("does not submit when a non-built-in command is selected with Enter", async () => {
     const { changes, onSubmit, promptBoxRef } =

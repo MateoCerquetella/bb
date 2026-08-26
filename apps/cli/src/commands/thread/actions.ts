@@ -493,6 +493,21 @@ export function registerActionsCommands(
     );
 
   parent
+    .command("clear [id]")
+    .description("Clear model context for an idle or failed thread")
+    .option("--self", "Target the current thread (from BB_THREAD_ID)")
+    .option("--json", "Print machine-readable JSON output")
+    .action(
+      action(async (id: string | undefined, opts: ThreadActionOptions) => {
+        const threadId = requireThreadIdOrSelf(id, opts);
+        const sdk = createCliBbSdk(getUrl());
+        await sdk.threads.clearContext({ threadId });
+        if (outputJson(opts, { ok: true, threadId })) return;
+        console.log(`Thread ${threadId} context cleared`);
+      }),
+    );
+
+  parent
     .command("cancel-plan [id]")
     .description("Ask the provider to exit the active Plan mode")
     .option("--self", "Target the current thread (from BB_THREAD_ID)")

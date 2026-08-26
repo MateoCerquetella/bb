@@ -4,6 +4,7 @@ import {
   LOCAL_BASH_TASK_TYPE,
   LOCAL_SUBAGENT_TASK_TYPE,
   LOCAL_WORKFLOW_TASK_TYPE,
+  THREAD_CONTEXT_CLEAR_OPERATION,
   threadScope,
   turnScope,
   type PromptInput,
@@ -2296,6 +2297,32 @@ describe("events", () => {
     appendStoredThreadEvent(db, noopNotifier, {
       threadId: thread.id,
       scope: threadScope(),
+      type: "system/operation",
+      data: {
+        operation: THREAD_CONTEXT_CLEAR_OPERATION,
+        operationId: "evt_context_clear",
+        status: "completed",
+        message: "Context cleared",
+      },
+    });
+    expect(getLastStoredProviderThreadId(db, thread.id)).toBeNull();
+
+    appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
+      type: "system/operation",
+      data: {
+        operation: THREAD_CONTEXT_CLEAR_OPERATION,
+        operationId: "evt_context_clear_again",
+        status: "completed",
+        message: "Context cleared",
+      },
+    });
+    expect(getLastStoredProviderThreadId(db, thread.id)).toBeNull();
+
+    appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
       providerThreadId: "provider_new",
       type: "thread/identity",
       data: {
@@ -2303,6 +2330,39 @@ describe("events", () => {
       },
     });
     expect(getLastStoredProviderThreadId(db, thread.id)).toBe("provider_new");
+  });
+
+  it("omits provider identities before a clear from batched interruption state", () => {
+    const { db, thread } = setup();
+
+    appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
+      providerThreadId: "provider_old",
+      type: "thread/identity",
+      data: { providerThreadId: "provider_old" },
+    });
+    appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
+      type: "system/operation",
+      data: {
+        operation: THREAD_CONTEXT_CLEAR_OPERATION,
+        operationId: "evt_context_clear",
+        status: "completed",
+        message: "Context cleared",
+      },
+    });
+
+    expect(
+      listThreadTurnInterruptionEventStates(db, { threadIds: [thread.id] }),
+    ).toEqual([
+      {
+        activeTurnId: null,
+        latestProviderThreadId: null,
+        threadId: thread.id,
+      },
+    ]);
   });
 
   it("ignores delegated child turn starts when reconstructing the active stored turn", () => {

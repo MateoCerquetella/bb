@@ -1,8 +1,9 @@
-import { getThread, listEvents } from "@bb/db";
+import { getLastStoredProviderThreadId, getThread, listEvents } from "@bb/db";
 import {
   encodeClientTurnRequestIdNumber,
   threadScope,
   turnScope,
+  type PromptInput,
 } from "@bb/domain";
 import { describe, expect, it } from "vitest";
 import { registerHostRpcResponder } from "../helpers/host-rpc.js";
@@ -24,6 +25,30 @@ interface BannerFixture {
   projectId: string;
   sessionId: string;
   threadId: string;
+}
+
+function clearCommandInput(): PromptInput[] {
+  return [
+    {
+      type: "text",
+      text: "/clear",
+      mentions: [
+        {
+          start: 0,
+          end: 6,
+          resource: {
+            kind: "command",
+            trigger: "/",
+            name: "clear",
+            source: "command",
+            origin: "builtin",
+            label: "clear",
+            argumentHint: null,
+          },
+        },
+      ],
+    },
+  ];
 }
 
 function seedBannerFixture(
@@ -163,6 +188,81 @@ async function readBannerActivity(
 }
 
 describe("public thread banner actions", () => {
+  it("routes standalone built-in /clear to a same-thread context boundary", async () => {
+    await withTestHarness(async (harness) => {
+      const fixture = seedBannerFixture(harness, { status: "idle" });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: fixture.environmentId,
+        providerThreadId: "provider-thread-1",
+        threadId: fixture.threadId,
+      });
+      const responder = registerHostRpcResponder(harness, {
+        hostId: fixture.hostId,
+        sessionId: fixture.sessionId,
+        handle: ({ command }) => {
+          expect(command).toMatchObject({
+            type: "thread.stop",
+            threadId: fixture.threadId,
+          });
+          return { ok: true, result: { providerCheckpointId: null } };
+        },
+      });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${fixture.threadId}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "start",
+            input: clearCommandInput(),
+          }),
+        },
+      );
+
+      expect(response.status).toBe(200);
+      expect(responder.requests).toHaveLength(1);
+      expect(
+        getLastStoredProviderThreadId(harness.db, fixture.threadId),
+      ).toBeNull();
+      const events = listEvents(harness.db, { threadId: fixture.threadId });
+      expect(
+        events.filter((event) => event.type === "client/turn/requested"),
+      ).toHaveLength(1);
+      expect(
+        events.filter((event) => event.type === "system/thread/interrupted"),
+      ).toHaveLength(0);
+      expect(
+        events.find((event) => event.type === "system/operation"),
+      ).toMatchObject({
+        data: expect.stringContaining('"operation":"context_clear"'),
+      });
+    });
+  });
+
+  it("rejects /clear while a thread is active", async () => {
+    await withTestHarness(async (harness) => {
+      const fixture = seedBannerFixture(harness, { status: "active" });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${fixture.threadId}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "queue-if-active",
+            input: clearCommandInput(),
+          }),
+        },
+      );
+
+      expect(response.status).toBe(409);
+      expect(
+        listEvents(harness.db, { threadId: fixture.threadId }),
+      ).toHaveLength(0);
+    });
+  });
+
   it("persists a successful Plan cancellation and returns zero after refetch", async () => {
     await withTestHarness(async (harness) => {
       const fixture = seedBannerFixture(harness, { status: "active" });

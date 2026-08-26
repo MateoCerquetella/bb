@@ -1080,6 +1080,12 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: jsonResponse<{ ok: true }>(),
     }),
+    clearContext: defineRoute({
+      path: "/threads/:id/context/clear",
+      method: "post",
+      request: noRequest<PathId>(),
+      response: jsonResponse<{ ok: true }>(),
+    }),
     cancelPlan: defineRoute({
       path: "/threads/:id/plan/cancel",
       method: "post",

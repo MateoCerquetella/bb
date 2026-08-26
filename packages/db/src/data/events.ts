@@ -32,6 +32,7 @@ import {
   LOCAL_BASH_TASK_TYPE,
   LOCAL_SUBAGENT_TASK_TYPE,
   LOCAL_WORKFLOW_TASK_TYPE,
+  THREAD_CONTEXT_CLEAR_OPERATION,
   clientTurnRequestIdSchema,
   getThreadEventScopeTurnId,
   parseStoredThreadEvent,
@@ -3284,7 +3285,14 @@ export function getLastStoredProviderThreadId(
     .from(events)
     .where(
       sql`${events.threadId} = ${threadId}
-        AND ${events.providerThreadId} IS NOT NULL`,
+        AND ${events.providerThreadId} IS NOT NULL
+        AND ${events.sequence} > COALESCE((
+          SELECT MAX(context_clear.sequence)
+          FROM events AS context_clear
+          WHERE context_clear.thread_id = ${threadId}
+            AND context_clear.type = 'system/operation'
+            AND json_extract(context_clear.data, '$.operation') = ${THREAD_CONTEXT_CLEAR_OPERATION}
+        ), 0)`,
     )
     .orderBy(sql`${events.sequence} DESC`)
     .limit(1)
@@ -3375,6 +3383,13 @@ export function listThreadTurnInterruptionEventStates(
           FROM events AS latest
           WHERE latest.thread_id = ${events.threadId}
             AND latest.provider_thread_id IS NOT NULL
+            AND latest.sequence > COALESCE((
+              SELECT MAX(context_clear.sequence)
+              FROM events AS context_clear
+              WHERE context_clear.thread_id = ${events.threadId}
+                AND context_clear.type = 'system/operation'
+                AND json_extract(context_clear.data, '$.operation') = ${THREAD_CONTEXT_CLEAR_OPERATION}
+            ), 0)
         )`,
       ),
     )

@@ -291,19 +291,18 @@ function isSelectedPromptCommandMention(
 }
 
 const BUILTIN_COMPACT_COMMAND = { trigger: "/", name: "compact" } as const;
+const BUILTIN_CLEAR_COMMAND = { trigger: "/", name: "clear" } as const;
 
-/**
- * Whether input consists solely of one selected built-in `/compact` mention.
- * Raw matching text and project/user commands intentionally do not qualify.
- */
-export function isStandaloneBuiltinCompactCommand(
+function isStandaloneBuiltinCommand(
   input: readonly PromptInput[],
+  selector: PromptCommandSelector,
+  commandText: string,
 ): boolean {
   const selected = input.flatMap((item) =>
     item.type === "text"
       ? item.mentions
           .filter((mention) =>
-            isSelectedPromptCommandMention(mention, BUILTIN_COMPACT_COMMAND),
+            isSelectedPromptCommandMention(mention, selector),
           )
           .map((mention) => ({ mention, text: item.text }))
       : [],
@@ -321,14 +320,30 @@ export function isStandaloneBuiltinCompactCommand(
     mention.resource.kind !== "command" ||
     mention.resource.source !== "command" ||
     mention.resource.origin !== "builtin" ||
-    text.slice(mention.start, mention.end) !== "/compact"
+    text.slice(mention.start, mention.end) !== commandText
   ) {
     return false;
   }
-  return removeCommandMentionsFromPromptInput(
-    input,
-    BUILTIN_COMPACT_COMMAND,
-  ).every((item) => item.type === "text" && item.text.trim() === "");
+  return removeCommandMentionsFromPromptInput(input, selector).every(
+    (item) => item.type === "text" && item.text.trim() === "",
+  );
+}
+
+/**
+ * Whether input consists solely of one selected built-in `/compact` mention.
+ * Raw matching text and project/user commands intentionally do not qualify.
+ */
+export function isStandaloneBuiltinCompactCommand(
+  input: readonly PromptInput[],
+): boolean {
+  return isStandaloneBuiltinCommand(input, BUILTIN_COMPACT_COMMAND, "/compact");
+}
+
+/** Whether input consists solely of one selected built-in `/clear` mention. */
+export function isStandaloneBuiltinClearCommand(
+  input: readonly PromptInput[],
+): boolean {
+  return isStandaloneBuiltinCommand(input, BUILTIN_CLEAR_COMMAND, "/clear");
 }
 
 /** Structured prompt input for the selected built-in `/compact` command. */

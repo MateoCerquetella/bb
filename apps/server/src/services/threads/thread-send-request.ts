@@ -8,7 +8,7 @@ import {
   listThreadIdsWithUndeliverableDeferredThreadMessages,
   type DeferredThreadMessageRow,
 } from "@bb/db";
-import type { Thread } from "@bb/domain";
+import { isStandaloneBuiltinClearCommand, type Thread } from "@bb/domain";
 import type {
   SendMessageRequest,
   SendMessageResponse,
@@ -66,7 +66,9 @@ export async function acceptThreadSendRequest(
   args: AcceptThreadSendRequestArgs,
 ): Promise<SendMessageResponse> {
   const { payload, thread } = args;
+  const isContextClear = isStandaloneBuiltinClearCommand(payload.input);
   const shouldQueue =
+    !isContextClear &&
     thread.status === "active" &&
     (payload.mode === "queue-if-active" ||
       (payload.mode !== "start" && isManualCompactionActive(deps, thread)));
@@ -78,6 +80,7 @@ export async function acceptThreadSendRequest(
     return { ok: true, delivery: "queued" };
   }
   if (
+    !isContextClear &&
     payload.mode !== "start" &&
     deps.pendingInteractions.hasPendingThreadInteraction(thread.id)
   ) {

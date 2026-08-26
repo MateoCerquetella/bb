@@ -7,15 +7,21 @@ import type { HostProviderCommand } from "@bb/host-daemon-contract";
 import type { ProviderRegistration } from "../providers/provider-registry.js";
 import type { ResolvedSkillCatalogEntry } from "../skills/injected-skills.js";
 
-const BUILT_IN_PROVIDER_COMMANDS: ProviderCommand[] = [
-  {
-    name: "compact",
-    source: "command",
-    origin: "builtin",
-    description: "Compact context",
-    argumentHint: null,
-  },
-];
+const BUILT_IN_CLEAR_COMMAND: ProviderCommand = {
+  name: "clear",
+  source: "command",
+  origin: "builtin",
+  description: "Start fresh context in this thread",
+  argumentHint: null,
+};
+
+const BUILT_IN_COMPACT_COMMAND: ProviderCommand = {
+  name: "compact",
+  source: "command",
+  origin: "builtin",
+  description: "Compact context",
+  argumentHint: null,
+};
 
 function providerComposerHasSkillsAction(
   composerActions: readonly { kind: string }[],
@@ -123,7 +129,8 @@ export function buildCommandListResponse(
 ): CommandListResponse {
   return {
     commands: dedupeBySourceAndName([
-      ...(args.includeBuiltinCompact ? BUILT_IN_PROVIDER_COMMANDS : []),
+      BUILT_IN_CLEAR_COMMAND,
+      ...(args.includeBuiltinCompact ? [BUILT_IN_COMPACT_COMMAND] : []),
       ...args.skillCatalog.map(toSkillCommand),
       ...args.commands.map(toProviderCommand),
     ]).sort(compareCommands),

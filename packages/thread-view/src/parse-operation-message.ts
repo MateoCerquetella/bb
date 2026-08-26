@@ -7,6 +7,7 @@ import type {
   UserQuestionInteractionLifecycle,
 } from "@bb/domain";
 import {
+  THREAD_CONTEXT_CLEAR_OPERATION,
   isApprovalInteractionLifecycle,
   isUserQuestionInteractionLifecycle,
   ownershipChangeOperationMetadataSchema,
@@ -200,6 +201,12 @@ function threadOperationTitle(
     case "ownership_change":
       return ownershipChangeOperationTitle(meta, threadName);
     case "other":
+      if (
+        meta.rawOperation === THREAD_CONTEXT_CLEAR_OPERATION &&
+        meta.status === "completed"
+      ) {
+        return "Context cleared";
+      }
       return `${capitalize(meta.rawOperation.replace(/_/g, " "))} ${
         meta.rawStatus
       }`;

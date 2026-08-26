@@ -519,6 +519,9 @@ For review or fix pipelines, get the environment ID from
 - `bb thread stop <id>` also releases an idle or stuck agent runtime. The
   command is idempotent and preserves thread history.
 - Use `bb thread compact <id>` to send the built-in `/compact` command to an idle or errored thread. Completion or failure appears in the timeline. Codex, Claude Code, Pi, and OpenCode ACP support it; Cursor ACP does not expose compatible compaction through ACP.
+- Use `bb thread clear <id>` on an idle or failed thread to start fresh model
+  context while keeping its BB timeline, workspace, and sticky execution
+  settings.
 - Use `bb thread cancel-plan <id>` to exit an active Plan turn without
   optimistically clearing its banner. Use `bb thread clear-goal <id>` to clear
   a Codex thread's durable active Goal. Both wait for provider confirmation.
