@@ -2794,7 +2794,7 @@ export function PromptBoxInternal({
     [],
   );
 
-  // A no-argument built-in command (such as `/compact` or `/clear`) is complete
+  // A no-argument built-in command is a complete
   // action the moment it is selected, so applying it with Enter should also
   // submit instead of leaving the pill parked for a second Enter. The submit is
   // deferred to this effect — keyed on the flag — so `onSubmit` runs after the
@@ -2963,7 +2963,7 @@ export function PromptBoxInternal({
             activeSuggestions[selectedIndex] ?? activeSuggestions[0];
           if (selected) {
             applyTrigger(selected);
-            // Built-in commands (e.g. `/compact` and `/clear`) take no arguments, so picking
+            // Built-in commands take no arguments, so picking
             // one with Enter both inserts the pill and submits. Tab still only
             // inserts, and mention suggestions are unaffected.
             if (

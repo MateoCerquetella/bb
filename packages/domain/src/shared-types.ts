@@ -290,14 +290,11 @@ function isSelectedPromptCommandMention(
   );
 }
 
-const BUILTIN_COMPACT_COMMAND = { trigger: "/", name: "compact" } as const;
-const BUILTIN_CLEAR_COMMAND = { trigger: "/", name: "clear" } as const;
-
 function isStandaloneBuiltinCommand(
   input: readonly PromptInput[],
-  selector: PromptCommandSelector,
-  commandText: string,
+  name: string,
 ): boolean {
+  const selector = { trigger: "/" as const, name };
   const selected = input.flatMap((item) =>
     item.type === "text"
       ? item.mentions
@@ -320,7 +317,7 @@ function isStandaloneBuiltinCommand(
     mention.resource.kind !== "command" ||
     mention.resource.source !== "command" ||
     mention.resource.origin !== "builtin" ||
-    text.slice(mention.start, mention.end) !== commandText
+    text.slice(mention.start, mention.end) !== `/${name}`
   ) {
     return false;
   }
@@ -336,14 +333,14 @@ function isStandaloneBuiltinCommand(
 export function isStandaloneBuiltinCompactCommand(
   input: readonly PromptInput[],
 ): boolean {
-  return isStandaloneBuiltinCommand(input, BUILTIN_COMPACT_COMMAND, "/compact");
+  return isStandaloneBuiltinCommand(input, "compact");
 }
 
 /** Whether input consists solely of one selected built-in `/clear` mention. */
 export function isStandaloneBuiltinClearCommand(
   input: readonly PromptInput[],
 ): boolean {
-  return isStandaloneBuiltinCommand(input, BUILTIN_CLEAR_COMMAND, "/clear");
+  return isStandaloneBuiltinCommand(input, "clear");
 }
 
 /** Structured prompt input for the selected built-in `/compact` command. */

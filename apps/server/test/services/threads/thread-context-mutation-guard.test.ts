@@ -1,21 +1,14 @@
+import { createDeferredPromise } from "@bb/test-helpers";
 import { describe, expect, it } from "vitest";
 import {
   withThreadContextClearGuard,
   withThreadSendGuard,
 } from "../../../src/services/threads/thread-context-mutation-guard.js";
 
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve = () => {};
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
 describe("thread context mutation guard", () => {
   it("rejects sends while a context clear owns the thread", async () => {
-    const started = deferred();
-    const release = deferred();
+    const started = createDeferredPromise<void>();
+    const release = createDeferredPromise<void>();
     const clear = withThreadContextClearGuard("thread-clear", async () => {
       started.resolve();
       await release.promise;
@@ -27,21 +20,26 @@ describe("thread context mutation guard", () => {
     ).rejects.toMatchObject({ status: 409 });
     release.resolve();
     await clear;
+    await expect(
+      withThreadSendGuard("thread-clear", async () => "sent"),
+    ).resolves.toBe("sent");
   });
 
-  it("rejects a context clear while a send owns the thread", async () => {
-    const started = deferred();
-    const release = deferred();
-    const send = withThreadSendGuard("thread-send", async () => {
-      started.resolve();
-      await release.promise;
-    });
-    await started.promise;
+  it("allows overlapping sends but excludes clear until both settle", async () => {
+    const release = createDeferredPromise<void>();
+    const send = () =>
+      withThreadSendGuard("thread-send", async () => {
+        await release.promise;
+      });
+    const sends = [send(), send()];
 
     await expect(
       withThreadContextClearGuard("thread-send", async () => {}),
     ).rejects.toMatchObject({ status: 409 });
     release.resolve();
-    await send;
+    await Promise.all(sends);
+    await expect(
+      withThreadContextClearGuard("thread-send", async () => "cleared"),
+    ).resolves.toBe("cleared");
   });
 });
