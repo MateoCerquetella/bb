@@ -3,9 +3,7 @@
 Status: **implemented**. The members below ship in `@get-bb/plugin-sdk/app`.
 
 This document specifies one exclusive slot and the data surface it needs.
-A plugin uses them to replace bb's thread list with its own. The reference
-consumer is the `t3sidebar` plugin in
-[`examples/plugins/t3sidebar`](../examples/plugins/t3sidebar).
+A plugin uses them to replace bb's thread list with its own.
 
 Every member below ships with the `experimental_` prefix and an entry in
 [api_to_audit.md](api_to_audit.md), per [AGENTS.md](../AGENTS.md).
@@ -35,8 +33,9 @@ handle carry desktop window behavior that is not a plugin concern.
 An earlier revision let a list claim the New-thread and search row too. That
 is gone: the row is shared chrome, and passing it down as a prop would mean a
 plugin could silently drop it. A list that wants its own controls puts them at
-the top of its own scroll area, and filters by the `searchQuery` prop rather
-than shipping a second search field.
+the top of its own scroll area. Thread search stays host-owned in the quick
+palette; the required `searchQuery` prop remains only for compatibility and is
+always `""`.
 
 ---
 
@@ -67,21 +66,21 @@ interface PluginThreadListProps {
   /** True on phone-width viewports and coarse pointers. */
   isCompactViewport: boolean;
   /**
-   * Call after the user opens a thread. It closes the mobile sidebar, and it
-   * clears the host search field on every viewport. Always call it, or the
-   * sidebar stays in search mode after the thread opens.
+   * Call after the user opens a thread. It closes the mobile sidebar drawer.
    */
   onNavigate: () => void;
   /**
-   * The host search field's text, or "" when the field is closed. The host
-   * owns that field, so filter by this rather than shipping a second one.
+   * Compatibility value for the former sidebar search field. BB now searches
+   * threads in the quick palette, so the host always supplies "".
+   *
+   * @deprecated The quick palette owns thread search. Ignore this value.
    */
   searchQuery: string;
   /**
    * BB's thread list bound to this sidebar instance. Render it to delegate
    * conditionally without re-entering plugin replacement resolution.
    */
-  experimental_Original: ComponentType;
+  Original: ComponentType;
 }
 ```
 
@@ -336,9 +335,8 @@ engages once the pointer leaves the sidebar.
 
 ## 7. A second slot: the thread header
 
-A replaced sidebar often hides something the old sidebar showed. The
-t3sidebar plugin hides child threads, because a flat inbox has no place to
-nest them. Those children still need a home, and the thread header is it.
+A replaced sidebar often hides something the old sidebar showed. A flat
+inbox-style list hides child threads, because it has no place to nest them. Those children still need a home, and the thread header is it.
 
 bb already has a backend version of this. `bb.ui.registerThreadAction` puts a
 host-rendered button in the thread header and runs `run` on the server. That
@@ -648,8 +646,9 @@ missing explicitly selected plugin falls back to the built-in list.
    Confirm no real sidebar needs more, and that handing the shared regions
    down as props — letting a plugin place them, at the risk of dropping them —
    stays the wrong trade.
-4. **Search ownership.** Confirm passing `searchQuery` down is right, versus
-   a callback that lets the plugin own the field.
+4. **Search compatibility.** Confirm released plugins no longer need the
+   required deprecated `searchQuery` field before removing it in a deliberate
+   breaking change. Until then, the host supplies `""`.
 5. **Accessibility.** Confirm the host can still guarantee list semantics,
    focus order, and the mobile close behavior when a plugin owns the markup.
 

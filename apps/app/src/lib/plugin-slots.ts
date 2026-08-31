@@ -1,9 +1,11 @@
 import { useSyncExternalStore } from "react";
 import type {
   ComposerCustomization,
+  PluginDiffRendererRegistration,
   PluginPendingInteractionRegistration,
   PluginFileOpenerRegistration,
   PluginHomepageSectionRegistration,
+  PluginCommandPaletteActionRegistration,
   PluginMessageActionRegistration,
   PluginMessageDirectiveRegistration,
   PluginNavPanelRegistration,
@@ -11,51 +13,36 @@ import type {
   PluginProviderIconRegistration,
   PluginSettingsSectionRegistration,
   PluginSidebarFooterActionRegistration,
+  PluginSourceCodeRendererRegistration,
   PluginThreadHeaderActionRegistration,
   PluginThreadListRegistration,
   PluginThreadPanelActionRegistration,
+  PluginTimelineRendererRegistration,
 } from "@get-bb/plugin-sdk";
-
-/**
- * Client-side slot store (plugin design §5.2): the interpreted `app.slots.*`
- * registrations of every loaded plugin frontend, keyed by plugin id and
- * replaced wholesale per plugin — never appended, so re-interpreting a
- * plugin after reload (P3.4) can never duplicate its sections. Mount sites
- * subscribe through {@link usePluginSlots}.
- */
 
 export interface PluginRegistrationSet {
   homepageSections: readonly PluginHomepageSectionRegistration[];
   settingsSections: readonly PluginSettingsSectionRegistration[];
   navPanels: readonly PluginNavPanelRegistration[];
   threadPanelActions: readonly PluginThreadPanelActionRegistration[];
-  /** Optional for bundles built before this experimental slot existed. */
   newThreadPanelActions?: readonly PluginNewThreadPanelActionRegistration[];
   composerCustomizations?: readonly ComposerCustomization[];
   pendingInteractions?: readonly PluginPendingInteractionRegistration[];
   sidebarFooterActions: readonly PluginSidebarFooterActionRegistration[];
-  /**
-   * Optional so a frontend bundle built against an older SDK — which never
-   * calls `experimental_threadList` — still satisfies the set.
-   */
   threadLists?: readonly PluginThreadListRegistration[];
-  /** Optional for the same reason as `threadLists`: bundles built earlier. */
   threadHeaderActions?: readonly PluginThreadHeaderActionRegistration[];
   fileOpeners: readonly PluginFileOpenerRegistration[];
+  sourceCodeRenderers?: readonly PluginSourceCodeRendererRegistration[];
+  diffRenderers?: readonly PluginDiffRendererRegistration[];
   messageDirectives: readonly PluginMessageDirectiveRegistration[];
   messageActions?: readonly PluginMessageActionRegistration[];
-  /** Optional for the same reason as `threadLists`: bundles built earlier. */
+  commandPaletteActions?: readonly PluginCommandPaletteActionRegistration[];
   providerIcons?: readonly PluginProviderIconRegistration[];
+  timelineRenderers?: readonly PluginTimelineRendererRegistration[];
 }
 
 interface PluginSlotBase {
   pluginId: string;
-  /**
-   * Bumped every time the plugin's registrations are replaced. Mount sites
-   * fold it into React keys so a reload (P3.4) remounts slot components —
-   * fresh error-boundary state after resetCrashedPluginSlots — instead of
-   * reusing a boundary that latched a crash from the previous bundle.
-   */
   generation: number;
 }
 
@@ -77,18 +64,25 @@ export interface PluginSidebarFooterActionSlot
   extends PluginSidebarFooterActionRegistration, PluginSlotBase {}
 export interface PluginThreadListSlot
   extends PluginThreadListRegistration, PluginSlotBase {}
-export interface PluginThreadHeaderActionSlot
+interface PluginThreadHeaderActionSlot
   extends PluginThreadHeaderActionRegistration, PluginSlotBase {}
 export interface PluginFileOpenerSlot
   extends PluginFileOpenerRegistration, PluginSlotBase {}
+export interface PluginSourceCodeRendererSlot
+  extends PluginSourceCodeRendererRegistration, PluginSlotBase {}
+export interface PluginDiffRendererSlot
+  extends PluginDiffRendererRegistration, PluginSlotBase {}
 export interface PluginMessageDirectiveSlot
   extends PluginMessageDirectiveRegistration, PluginSlotBase {}
 export interface PluginMessageActionSlot
   extends PluginMessageActionRegistration, PluginSlotBase {}
-export interface PluginProviderIconSlot
+export interface PluginCommandPaletteActionSlot
+  extends PluginCommandPaletteActionRegistration, PluginSlotBase {}
+interface PluginProviderIconSlot
   extends PluginProviderIconRegistration, PluginSlotBase {}
+export interface PluginTimelineRendererSlot
+  extends PluginTimelineRendererRegistration, PluginSlotBase {}
 
-/** Flattened view across plugins, ordered by plugin id (deterministic). */
 export interface PluginSlotSnapshot {
   homepageSections: readonly PluginHomepageSectionSlot[];
   settingsSections: readonly PluginSettingsSectionSlot[];
@@ -101,9 +95,13 @@ export interface PluginSlotSnapshot {
   threadLists: readonly PluginThreadListSlot[];
   threadHeaderActions: readonly PluginThreadHeaderActionSlot[];
   fileOpeners: readonly PluginFileOpenerSlot[];
+  sourceCodeRenderers: readonly PluginSourceCodeRendererSlot[];
+  diffRenderers: readonly PluginDiffRendererSlot[];
   messageDirectives: readonly PluginMessageDirectiveSlot[];
   messageActions: readonly PluginMessageActionSlot[];
+  commandPaletteActions: readonly PluginCommandPaletteActionSlot[];
   providerIcons: readonly PluginProviderIconSlot[];
+  timelineRenderers: readonly PluginTimelineRendererSlot[];
 }
 
 export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
@@ -118,9 +116,13 @@ export const EMPTY_PLUGIN_SLOT_SNAPSHOT: PluginSlotSnapshot = {
   threadLists: [],
   threadHeaderActions: [],
   fileOpeners: [],
+  sourceCodeRenderers: [],
+  diffRenderers: [],
   messageDirectives: [],
   messageActions: [],
+  commandPaletteActions: [],
   providerIcons: [],
+  timelineRenderers: [],
 };
 
 const registrationsByPluginId = new Map<string, PluginRegistrationSet>();
@@ -142,20 +144,15 @@ const SLOT_KINDS: readonly SlotKind[] = [
   "threadLists",
   "threadHeaderActions",
   "fileOpeners",
+  "sourceCodeRenderers",
+  "diffRenderers",
   "messageDirectives",
   "messageActions",
+  "commandPaletteActions",
   "providerIcons",
+  "timelineRenderers",
 ];
 
-/**
- * One plugin's registrations flattened into slot objects (`pluginId` +
- * `generation` baked in). Built once per `setPluginSlotRegistrations` call, so
- * slot objects keep their identity across later snapshot rebuilds. That is
- * what lets {@link buildSnapshot} hand back the previous per-kind array when
- * a different plugin's registrations change: consumers keyed on one kind
- * (`messageDirectives` -> markdown directive registry, `messageActions` ->
- * timeline static context) only re-render when their own kind changed.
- */
 type FlattenedPluginSlots = {
   readonly [K in SlotKind]: PluginSlotSnapshot[K];
 };
@@ -187,9 +184,13 @@ function flattenRegistrations(
     threadLists: stamp(set.threadLists),
     threadHeaderActions: stamp(set.threadHeaderActions),
     fileOpeners: stamp(set.fileOpeners),
+    sourceCodeRenderers: stamp(set.sourceCodeRenderers),
+    diffRenderers: stamp(set.diffRenderers),
     messageDirectives: stamp(set.messageDirectives),
     messageActions: stamp(set.messageActions),
+    commandPaletteActions: stamp(set.commandPaletteActions),
     providerIcons: stamp(set.providerIcons),
+    timelineRenderers: stamp(set.timelineRenderers),
   };
 }
 
@@ -229,10 +230,6 @@ function collectProviderIcons(
         (existing) => existing.providerId === slot.providerId,
       );
       if (claimed !== undefined) {
-        // Provider ids are a shared namespace: nothing stops a second plugin
-        // from claiming an id it does not own. Plugin ids are iterated in
-        // sorted order, so keeping the first claim makes the winner stable
-        // across reloads instead of depending on load timing.
         console.warn(
           `plugin ${pluginId}: provider icon for "${slot.providerId}" ignored — already registered by plugin ${claimed.pluginId}`,
         );
@@ -244,12 +241,26 @@ function collectProviderIcons(
   return collected;
 }
 
-/**
- * Rebuild the flattened snapshot with per-kind structural sharing: a kind
- * whose slot sequence equals the previous snapshot's keeps the previous
- * array, and a rebuild that changes no kind returns the previous snapshot
- * object so `useSyncExternalStore` readers bail out entirely.
- */
+function collectTimelineRenderers(
+  pluginIds: readonly string[],
+): PluginTimelineRendererSlot[] {
+  const collected: PluginTimelineRendererSlot[] = [];
+  for (const pluginId of pluginIds) {
+    const flattened = flattenedByPluginId.get(pluginId);
+    if (flattened === undefined) continue;
+    for (const slot of flattened.timelineRenderers) {
+      if (slot.kind !== "tool" && !slot.kind.startsWith(`${pluginId}/`)) {
+        console.warn(
+          `plugin ${pluginId}: timeline renderer for "${slot.kind}" ignored — a plugin renders only its own extension kinds ("${pluginId}/<name>") and "tool"`,
+        );
+        continue;
+      }
+      collected.push(slot);
+    }
+  }
+  return collected;
+}
+
 function buildSnapshot(previous: PluginSlotSnapshot): PluginSlotSnapshot {
   const pluginIds = [...registrationsByPluginId.keys()].sort();
   const next: { -readonly [K in SlotKind]: PluginSlotSnapshot[K] } = {
@@ -260,28 +271,19 @@ function buildSnapshot(previous: PluginSlotSnapshot): PluginSlotSnapshot {
     const collected =
       kind === "providerIcons"
         ? collectProviderIcons(pluginIds)
-        : collectKind(kind, pluginIds);
+        : kind === "timelineRenderers"
+          ? collectTimelineRenderers(pluginIds)
+          : collectKind(kind, pluginIds);
     if (sameSlotSequence(previous[kind], collected)) continue;
     changed = true;
-    // `collected` came from `collectKind(kind)`, so it has the element type
-    // of `next[kind]`; the loop variable erases that correlation for TS.
     Object.assign(next, { [kind]: collected });
   }
   return changed ? next : previous;
 }
 
-/**
- * Open batches hold listener notifications so a burst of registrations (every
- * plugin bundle resolving during boot, a multi-plugin reload) turns into a
- * few flushes instead of one app-wide re-render per plugin. Reads stay
- * consistent while a batch is open: the snapshot is rebuilt lazily on the
- * next `getPluginSlotSnapshot`. Batches nest (depth count).
- */
 let openBatchDepth = 0;
 let batchMaxHoldMs = 0;
-/** Registrations changed since `snapshot` was last built. */
 let snapshotStale = false;
-/** `snapshot` changed since listeners were last notified. */
 let notifyPending = false;
 let batchFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -311,19 +313,12 @@ function emitChange(): void {
     return;
   }
   if (batchFlushTimer !== null) return;
-  // Bound the hold: a slow plugin bundle must not keep every other plugin's
-  // UI off screen for the whole batch.
   batchFlushTimer = setTimeout(() => {
     batchFlushTimer = null;
     flushChange();
   }, batchMaxHoldMs);
 }
 
-/**
- * Hold notifications until the returned closer runs, or until `maxHoldMs`
- * passes since the first held change (whichever comes first, repeatedly).
- * The closer is idempotent.
- */
 export function beginPluginSlotBatch(options: {
   maxHoldMs: number;
 }): () => void {
@@ -336,13 +331,11 @@ export function beginPluginSlotBatch(options: {
   return () => {
     if (closed) return;
     closed = true;
-    // Never below zero: a test reset can zero the depth under an open batch.
     openBatchDepth = Math.max(0, openBatchDepth - 1);
     if (openBatchDepth === 0) flushChange();
   };
 }
 
-/** Replace one plugin's registrations wholesale (P3.4 reload reuses this). */
 export function setPluginSlotRegistrations(
   pluginId: string,
   registrations: PluginRegistrationSet,
@@ -357,7 +350,6 @@ export function setPluginSlotRegistrations(
   emitChange();
 }
 
-/** Drop one plugin's registrations (uninstall/disable/failed re-interpret). */
 export function removePluginSlotRegistrations(pluginId: string): void {
   if (!registrationsByPluginId.delete(pluginId)) return;
   flattenedByPluginId.delete(pluginId);
@@ -372,18 +364,14 @@ export function subscribePluginSlots(listener: () => void): () => void {
 }
 
 export function getPluginSlotSnapshot(): PluginSlotSnapshot {
-  // A read inside an open batch must not observe stale registrations: the
-  // batch defers the notification, not the data.
   rebuildIfStale();
   return snapshot;
 }
 
-/** All plugin slot registrations, re-rendering on store changes. */
 export function usePluginSlots(): PluginSlotSnapshot {
   return useSyncExternalStore(subscribePluginSlots, getPluginSlotSnapshot);
 }
 
-/** Test-only: reset the store to empty without notifying semantics quirks. */
 export function resetPluginSlotStoreForTest(): void {
   registrationsByPluginId.clear();
   generationByPluginId.clear();

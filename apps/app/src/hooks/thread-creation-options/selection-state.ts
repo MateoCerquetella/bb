@@ -11,7 +11,7 @@ import type {
   StoredServiceTier,
 } from "./persisted-selection-fields";
 
-export type ThreadCreationOptionsScope = "new-thread" | "component-local";
+type ThreadCreationOptionsScope = "new-thread" | "component-local";
 
 export interface ThreadPromptSelections {
   selectedProviderId: string;
@@ -31,18 +31,11 @@ export type ScopedExecutionInputSources =
 export interface UsePromptModelReasoningOptions {
   enabled?: boolean;
   environmentId?: string;
-  /**
-   * The machine the environment lives on. Component-local composers route
-   * host-scoped provider catalogs by host so threads in different
-   * environments on one machine share a single execution-options query.
-   */
   environmentHostId?: string;
   scope?: ThreadCreationOptionsScope;
   resetKey?: string | number | null;
   initialProviderId?: string;
-  /** When no project default or persisted choice exists, select the first
-   * connected provider reported by the routed machine. */
-  preferConnectedProviderWhenUnset?: boolean;
+  preferReadyProviderWhenUnset?: boolean;
   initialModel?: string;
   initialServiceTier?: ServiceTier;
   initialReasoningLevel?: ReasoningLevel;
@@ -62,7 +55,7 @@ export interface UseComponentLocalCreationOptions extends UsePromptModelReasonin
   scope: "component-local";
 }
 
-export interface StoredCreateExecutionValues {
+interface StoredCreateExecutionValues {
   selectedProviderId: string;
   selectedModel: string;
   serviceTier: StoredServiceTier;
@@ -70,7 +63,7 @@ export interface StoredCreateExecutionValues {
   permissionMode: StoredPermissionMode;
 }
 
-export interface EffectiveCreateExecutionValues {
+interface EffectiveCreateExecutionValues {
   selectedProviderId: string;
   selectedModel: string;
   serviceTier: ServiceTier | undefined;
@@ -78,7 +71,7 @@ export interface EffectiveCreateExecutionValues {
   permissionMode: PermissionMode;
 }
 
-export interface BuildExecutionInputSourcesArgs {
+interface BuildExecutionInputSourcesArgs {
   effectiveValues: EffectiveCreateExecutionValues;
   forceExplicitModel?: boolean;
   initialProviderSource?: ExecutionInputFieldSource;
@@ -87,13 +80,13 @@ export interface BuildExecutionInputSourcesArgs {
   touchedFields: ReadonlySet<ThreadPromptField>;
 }
 
-export interface SyncThreadPromptSelectionsArgs {
+interface SyncThreadPromptSelectionsArgs {
   currentSelections: ThreadPromptSelections;
   nextSelections: ThreadPromptSelections;
   touchedFields: ReadonlySet<ThreadPromptField>;
 }
 
-export interface UpdateThreadPromptSelectionsArgs {
+interface UpdateThreadPromptSelectionsArgs {
   currentSelections: ThreadPromptSelections;
   field: ThreadPromptField;
   value: ThreadPromptSelections[ThreadPromptField];
@@ -234,8 +227,6 @@ export function buildExecutionInputSources({
     touchedFields.has("serviceTier") ||
     touchedFields.has("reasoningLevel") ||
     touchedFields.has("permissionMode");
-  // Existing-thread submissions are all-or-nothing once an execution control is
-  // touched, so the server never merges stale last-run values with new UI picks.
   const forcesExplicitExecutionFields =
     scope === "component-local" && hasTouchedExecutionField;
 
@@ -309,9 +300,6 @@ export function resolvePermissionModeSelection({
   if (permissionModes.includes(rawPermissionMode)) {
     return rawPermissionMode;
   }
-  // Auto is the product default. Providers without native automatic review
-  // fall back to Full Access rather than implying that Accept Edits provides
-  // equivalent automatic approval behavior.
   if (permissionModes.includes("auto")) {
     return "auto";
   }
@@ -322,10 +310,6 @@ export function resolvePermissionModeSelection({
 }
 
 export function formatModelLabel(value: string): string {
-  // Case-normalises a raw model id into a displayable label. The brand prefix
-  // strip ("Claude " / "GPT-") is a presentation rule applied by the picker
-  // itself (see `stripModelBrandPrefix`) so stories and prod render identically
-  // without anyone having to remember to format.
   return value
     .split("-")
     .map((part) => {

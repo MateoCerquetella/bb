@@ -3,6 +3,7 @@ import {
   type FilePreviewFile,
   type TextFilePreviewKind,
 } from "./FilePreview";
+import { hashSourceContents } from "@/components/code/source-code-budget";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
 import { HttpError } from "@/lib/api";
 import { buildThreadStorageRawContentUrl } from "@/lib/file-content-urls";
@@ -11,16 +12,13 @@ import type {
   FilePreviewLineRange,
   TextFilePreview,
   WorkspaceFilePreviewStatusLabel,
-} from "@/lib/file-preview";
+} from "@bb/client-core";
 import {
   isCsvFilePreview,
   isHtmlFilePreviewPath,
   isMarkdownFilePreview,
-} from "@/lib/file-preview";
+} from "@bb/client-core";
 
-// Generic HTML comes from arbitrary worktree/storage files. Allow scripts for
-// realistic previews, but omit allow-same-origin so the frame gets an opaque
-// origin and cannot read bb app cookies, storage, or same-origin APIs.
 const GENERIC_HTML_IFRAME_SANDBOX = "allow-scripts";
 
 interface FilePreviewBaseProps {
@@ -51,15 +49,6 @@ interface BuildTextPreviewFileArgs {
   filePreview: TextFilePreview;
 }
 
-function hashStringForPreviewCache(value: string): string {
-  let hash = 0x811c9dc5;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 0x01000193);
-  }
-  return (hash >>> 0).toString(36);
-}
-
 function buildTextPreviewCacheKey({
   activePath,
   filePreview,
@@ -70,8 +59,7 @@ function buildTextPreviewCacheKey({
     filePreview.path,
     filePreview.name ?? activePath,
     filePreview.mimeType,
-    filePreview.content.length,
-    hashStringForPreviewCache(filePreview.content),
+    hashSourceContents(filePreview.content),
   ].join(":");
 }
 

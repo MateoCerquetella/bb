@@ -2,11 +2,11 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAtomValue, useSetAtom } from "jotai";
 import type { ImperativePanelHandle } from "react-resizable-panels";
 import { useResizeObserver } from "usehooks-ts";
-import { applyResizeCursor, clearResizeCursor } from "@/lib/resizeCursor";
 import {
   secondaryPanelWidthPercentAtom,
   threadSecondaryPanelResizingAtom,
 } from "./threadSecondaryPanelAtoms";
+import { usePanelResizeSnap } from "./usePanelResizeSnap";
 
 export type SecondaryPanelDraggingHandler = (isDragging: boolean) => void;
 export type SecondaryPanelWidthChangeHandler = (
@@ -33,10 +33,23 @@ export function useSecondaryPanelResize({
   const secondaryResizablePanelRef = useRef<ImperativePanelHandle | null>(null);
   const isSecondaryPanelDraggingRef = useRef(false);
   const lastSecondaryPanelSizeRef = useRef(persistedWidthPercent);
+  const handleSecondaryPanelPointerResize = useCallback(
+    (leadingFraction: number) => {
+      secondaryResizablePanelRef.current?.resize((1 - leadingFraction) * 100);
+    },
+    [],
+  );
+  const {
+    finish: finishSecondaryPanelResizeSnap,
+    onPointerDownCapture: handleSecondaryPanelResizePointerDownCapture,
+  } = usePanelResizeSnap({
+    axis: "x",
+    onResize: handleSecondaryPanelPointerResize,
+    target: { boundaryIndex: 1, childCount: 2 },
+  });
 
   const prevOpenRef = useRef(isSecondaryPanelOpen);
   useEffect(() => {
-    // Skip initial mount — Panel's defaultSize handles it.
     if (prevOpenRef.current === isSecondaryPanelOpen) {
       return;
     }
@@ -70,9 +83,7 @@ export function useSecondaryPanelResize({
     isSecondaryPanelDraggingRef.current = false;
     setIsSecondaryPanelDragging(false);
     setIsResizing(false);
-    clearResizeCursor();
 
-    // Drag finished — persist the user's chosen width.
     if (lastSecondaryPanelSizeRef.current > 0) {
       setPersistedWidthPercent(lastSecondaryPanelSizeRef.current);
     }
@@ -85,13 +96,17 @@ export function useSecondaryPanelResize({
           isSecondaryPanelDraggingRef.current = true;
           setIsSecondaryPanelDragging(true);
           setIsResizing(true);
-          applyResizeCursor("horizontal");
           return;
         }
 
+        finishSecondaryPanelResizeSnap();
         finishSecondaryPanelDragging();
       },
-      [finishSecondaryPanelDragging, setIsResizing],
+      [
+        finishSecondaryPanelDragging,
+        finishSecondaryPanelResizeSnap,
+        setIsResizing,
+      ],
     );
 
   useEffect(
@@ -101,7 +116,6 @@ export function useSecondaryPanelResize({
       }
       isSecondaryPanelDraggingRef.current = false;
       setIsResizing(false);
-      clearResizeCursor();
     },
     [setIsResizing],
   );
@@ -143,11 +157,6 @@ export function useSecondaryPanelResize({
       }
 
       lastSecondaryPanelSizeRef.current = size;
-      // Mirror the live panel size onto the content's fixed width (container-query
-      // units against the horizontal group) for swipe mode: the content holds the
-      // open width while the panel's width transition clips it, and tracks the
-      // size live during a drag-resize. Guarding size > 0 leaves the width at the
-      // last open value through a collapse, so the content swipes out cleanly.
       secondaryPanelRef.current?.style.setProperty(
         "--secondary-swipe-width",
         `${size}cqw`,
@@ -159,6 +168,7 @@ export function useSecondaryPanelResize({
   return {
     handleSecondaryPanelDragging,
     handleSecondaryPanelResize,
+    handleSecondaryPanelResizePointerDownCapture,
     persistedWidthPercent,
     secondaryPanelRef,
     secondaryResizablePanelRef,

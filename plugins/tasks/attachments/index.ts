@@ -33,7 +33,7 @@ export type AttachmentOwner =
   | { taskId: string; commentId?: never }
   | { taskId?: never; commentId: string };
 
-export type SaveAttachmentFromBytesOptions = AttachmentOwner & {
+type SaveAttachmentFromBytesOptions = AttachmentOwner & {
   fileName: string;
   mime?: string;
 };
@@ -65,7 +65,7 @@ export class AttachmentReferencedError extends Error {
   }
 }
 
-export class AttachmentCleanupError extends Error {
+class AttachmentCleanupError extends Error {
   constructor(
     readonly attachment: Attachment,
     readonly cleanupCause: unknown,
@@ -79,7 +79,7 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-export function removeAttachmentDescriptionReferences(
+function removeAttachmentDescriptionReferences(
   markdown: string,
   attachmentId: string,
 ): string {
@@ -151,13 +151,6 @@ export async function removeAttachmentBlobs(
   }
 }
 
-/**
- * RFC 6266 Content-Disposition. Header values must be ByteStrings, so the
- * legacy `filename=` parameter carries an ASCII-only fallback and the real
- * name travels percent-encoded in `filename*`. A raw name with an em dash,
- * CJK, or emoji in `filename=` makes the Response constructor throw and turns
- * every download of that attachment into a 500 (issue #1621).
- */
 function buildContentDisposition(
   disposition: "inline" | "attachment",
   fileName: string,
@@ -169,11 +162,6 @@ function buildContentDisposition(
   return `${disposition}; filename="${asciiFallback}"; filename*=UTF-8''${encodeExtValue(visibleName)}`;
 }
 
-/**
- * RFC 5987 `attr-char`: ALPHA / DIGIT / ! # $ & + - . ^ _ ` | ~. Every other
- * byte of the UTF-8 encoding is percent-encoded. `encodeURIComponent` alone
- * keeps `* ' ( )`, which strict parsers reject inside `filename*`.
- */
 function encodeExtValue(value: string): string {
   let encoded = "";
   for (const byte of Buffer.from(value, "utf8")) {
@@ -185,11 +173,6 @@ function encodeExtValue(value: string): string {
   return encoded;
 }
 
-/**
- * Unicode bidirectional controls (LRM/RLM, ALM, LRE..RLO, LRI..PDI) can make a
- * name such as `photo<RLO>gnp.exe` render as `photoexe.png` and hide the real
- * extension. They become `_` in stored names and in download headers.
- */
 const BIDI_CONTROL_PATTERN = /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 
 function sanitizeFileName(fileName: string): string {
@@ -221,7 +204,7 @@ function normalizeMime(mime: string): string {
   return normalized;
 }
 
-export function isInlineRasterMime(mime: string): boolean {
+function isInlineRasterMime(mime: string): boolean {
   return INLINE_RASTER_MIMES.has(
     mime.split(";", 1)[0]?.trim().toLowerCase() ?? "",
   );
@@ -435,14 +418,6 @@ function errorResponse(context: PluginHttpContext, error: unknown): Response {
   throw error;
 }
 
-/**
- * Removes an attachment end to end using one shared policy for HTTP, RPC, and
- * CLI callers. Saved-description references are rejected unless the caller
- * explicitly opts into removing them, blob cleanup must succeed before the
- * row is removed, and realtime is published only after every mutation
- * succeeds. A cleanup failure therefore leaves the row and blob reachable for
- * a later retry instead of reporting a false success.
- */
 export async function deleteAttachmentById(
   bb: BbPluginApi,
   store: TasksStore,
@@ -511,11 +486,6 @@ export function publishAttachmentChanged(
   });
 }
 
-/**
- * Registers exact-match attachment routes. Upload accepts a raw request body
- * and therefore uses token auth; metadata may be supplied through query
- * parameters or x-task-id/x-comment-id/x-file-name/x-mime-type headers.
- */
 export function registerAttachments(
   bb: BbPluginApi,
   store: TasksStore,

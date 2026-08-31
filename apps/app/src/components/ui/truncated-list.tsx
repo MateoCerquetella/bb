@@ -4,27 +4,18 @@ import { Icon } from "@bb/shared-ui/icon";
 
 const DEFAULT_VISIBLE_LIMIT = 5;
 
-export interface TruncatedListProps<T> {
+interface TruncatedListProps<T> {
   items: readonly T[];
   renderItem: (item: T) => ReactNode;
   getKey: (item: T) => string;
-  /** Maximum items shown before truncating. Defaults to 5. */
   limit?: number;
-  /** Class applied to the items container. */
-  className?: string;
 }
 
-/**
- * Renders a vertical list that caps at `limit` items and reveals the rest
- * behind a "Show N more" / "Show less" toggle. The toggle only appears when
- * the list exceeds the limit.
- */
 export function TruncatedList<T>({
   items,
   renderItem,
   getKey,
   limit = DEFAULT_VISIBLE_LIMIT,
-  className,
 }: TruncatedListProps<T>) {
   const [isExpanded, setIsExpanded] = useState(false);
 
@@ -36,7 +27,7 @@ export function TruncatedList<T>({
   const hiddenCount = items.length - limit;
 
   return (
-    <div className={cn("flex flex-col gap-1.5", className)}>
+    <div className="flex flex-col gap-1.5">
       {visibleItems.map((item) => (
         <div key={getKey(item)}>{renderItem(item)}</div>
       ))}

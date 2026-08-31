@@ -1,9 +1,12 @@
 import { vi } from "vitest";
-import type {
-  Environment,
-  PendingInteractionApprovalDecision,
-  ProviderPendingInteraction,
-  Thread,
+import {
+  isApprovalPendingInteractionResolution,
+  isPluginExtensionInteractionResolution,
+  isUserQuestionPendingInteractionResolution,
+  type Environment,
+  type PendingInteractionApprovalDecision,
+  type ProviderPendingInteraction,
+  type Thread,
 } from "@bb/domain";
 import type {
   ThreadTimelineResponse,
@@ -32,11 +35,15 @@ interface MakeEnvironmentArgs extends Partial<Environment> {
   hostId: string;
 }
 
-interface MakePendingInteractionArgs extends Partial<ProviderPendingInteraction> {
+type MakePendingInteractionArgs = Partial<
+  Omit<ProviderPendingInteraction, "payload" | "resolution">
+> & {
   id: string;
   providerId: string;
   threadId: string;
-}
+  payload?: ProviderPendingInteraction["payload"];
+  resolution?: ProviderPendingInteraction["resolution"];
+};
 
 export function makeTimelineBase(args: TimelineBaseArgs): TimelineRowBase {
   return {
@@ -50,12 +57,6 @@ export function makeTimelineBase(args: TimelineBaseArgs): TimelineRowBase {
   };
 }
 
-/**
- * Mock for the `GET /threads/:id/timeline` endpoint used by `bb thread show`
- * and `bb status` to read `pendingTodos`. Tests should add this alongside
- * their `:id.$get` mock so contract drift on the timeline lane fails loudly
- * instead of silently degrading to `pendingTodos: null`.
- */
 export function makeEmptyTimelineGetMock() {
   return vi.fn(async () => makeTimelineResponse([]));
 }
@@ -147,36 +148,61 @@ export function makeEnvironment(overrides: MakeEnvironmentArgs): Environment {
 export function makePendingInteraction(
   overrides: MakePendingInteractionArgs,
 ): ProviderPendingInteraction {
-  // The provider request/thread/turn ids are incidental to every assertion, so
-  // derive them from the interaction id suffix (`int-foo` -> `request-foo`,
-  // `provider-thread-foo`, `turn-foo`) instead of repeating them per call.
   const suffix = overrides.id.startsWith("int-")
     ? overrides.id.slice("int-".length)
     : overrides.id;
-  return {
+  const { payload, resolution = null, ...rest } = overrides;
+  const base = {
     createdAt: Date.now(),
     providerRequestId: `request-${suffix}`,
     providerThreadId: `provider-thread-${suffix}`,
     turnId: `turn-${suffix}`,
-    payload: {
-      kind: "approval",
-      subject: {
-        kind: "command",
-        itemId: "item-1",
-        command: "git push",
-        cwd: "/tmp/project",
-        actions: [],
-        sessionGrant: null,
-      },
-      reason: "Approve command",
-      availableDecisions: ["allow_once", "allow_for_session", "deny"],
-    },
-    resolution: null,
     resolvedAt: null,
-    status: "pending",
+    status: "pending" as const,
     statusReason: null,
-    ...overrides,
+    ...rest,
   };
+  if (payload === undefined || payload.kind === "approval") {
+    if (
+      resolution !== null &&
+      !isApprovalPendingInteractionResolution(resolution)
+    ) {
+      throw new Error("An approval fixture takes an approval resolution");
+    }
+    return {
+      ...base,
+      payload: payload ?? {
+        kind: "approval",
+        subject: {
+          kind: "command",
+          itemId: "item-1",
+          command: "git push",
+          cwd: "/tmp/project",
+          actions: [],
+          sessionGrant: null,
+        },
+        reason: "Approve command",
+        availableDecisions: ["allow_once", "allow_for_session", "deny"],
+      },
+      resolution,
+    };
+  }
+  if (payload.kind === "user_question") {
+    if (
+      resolution !== null &&
+      !isUserQuestionPendingInteractionResolution(resolution)
+    ) {
+      throw new Error("A user-question fixture takes a user answer");
+    }
+    return { ...base, payload, resolution };
+  }
+  if (
+    resolution !== null &&
+    !isPluginExtensionInteractionResolution(resolution)
+  ) {
+    throw new Error("A plugin request fixture takes a request answer");
+  }
+  return { ...base, payload, resolution };
 }
 
 export function makeCommandApprovalPayload(

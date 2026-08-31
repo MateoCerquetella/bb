@@ -3,6 +3,7 @@ import {
   countProjectSources,
   findOrCreateProjectByLocalPathSource,
   getPersonalProject,
+  getProjectExecutionDefaults,
   getPublicProjectByLocalPathSource,
   createProjectSource,
   deleteProjectSource,
@@ -47,7 +48,6 @@ import {
 } from "../services/lib/entity-lookup.js";
 import { PROMPT_HISTORY_ENTRY_LIMIT } from "@bb/domain";
 import { resolveCreateThreadExecutionDefaults } from "../services/threads/thread-default-policy.js";
-import { resolveProjectCreateDefaultExecutionPlan } from "../services/threads/thread-execution-plan.js";
 import { toThreadListEntryResponses } from "../services/threads/thread-runtime-display.js";
 import { callHostRetryableOnlineRpc } from "../services/hosts/online-rpc.js";
 import { runLiveHostCommand } from "../services/hosts/live-command.js";
@@ -84,22 +84,22 @@ import { parseSafeRelativeRoutePath } from "./relative-route-path.js";
 import { resolveSkillCatalog } from "../services/skills/skill-catalog.js";
 import { resolveWorkspaceProjectSkills } from "../services/skills/workspace-skills.js";
 import { resolveSharedSkills } from "../services/skills/shared-skills.js";
+import {
+  providerHasNativeRootSurface,
+  scanProviderNativeRoots,
+} from "../services/providers/native-roots.js";
 import { assertUsableHostId } from "../services/hosts/primary-host.js";
-import { resolveAcpLaunchSpecForProviderId } from "../services/system/acp-launch-spec.js";
 import {
   resolveProjectCommandWorkspace,
   resolveProjectWorkspaceTarget,
 } from "../services/projects/project-workspace.js";
 
 type ProjectResponseProjectFields = Omit<ProjectResponse, "sources">;
-type ProjectResponseRow = ProjectResponseProjectFields;
 const PROJECT_CLONE_TIMEOUT_MS = 20 * 60 * 1000;
-// Stored attachment names embed a timestamp and a random suffix, so the bytes
-// behind a name never change: cache for a year but keep it private.
 const ATTACHMENT_CONTENT_CACHE_CONTROL = "private, immutable, max-age=31536000";
 
 function toProjectResponseProjectFields(
-  project: ProjectResponseRow,
+  project: ProjectResponseProjectFields,
 ): ProjectResponseProjectFields {
   return {
     id: project.id,
@@ -113,7 +113,7 @@ function toProjectResponseProjectFields(
 
 function buildProjectResponsesFromRows(
   deps: AppDeps,
-  projects: ProjectResponseRow[],
+  projects: ProjectResponseProjectFields[],
 ): ProjectResponse[] {
   if (projects.length === 0) {
     return [];
@@ -154,7 +154,7 @@ interface ProjectListOptions {
 function listDiscoverableProjects(
   deps: AppDeps,
   options: ProjectListOptions,
-): ProjectResponseRow[] {
+): ProjectResponseProjectFields[] {
   const projects = listPublicProjects(deps.db);
   if (!options.includePersonal) {
     return projects;
@@ -212,7 +212,7 @@ function buildProjectsWithThreadsResponse(
 
 function buildProjectsWithThreadsResponseFromRows(
   deps: AppDeps,
-  projectRows: ProjectResponseRow[],
+  projectRows: ProjectResponseProjectFields[],
 ): ProjectWithThreadsResponse[] {
   const projects = buildProjectResponsesFromRows(deps, projectRows);
   const projectIds = projects.map((project) => project.id);
@@ -339,8 +339,6 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
 
   get(routes.list, (context, query) => {
     const includes = parseProjectListIncludes(query);
-    // Compatibility is resolved once at the HTTP boundary: ordinary projects
-    // remain the default, and all internal list paths receive an explicit flag.
     const options: ProjectListOptions = {
       includePersonal: query.includePersonal === "true",
     };
@@ -399,10 +397,12 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
   get(routes.defaultExecutionOptions, (context, query) => {
     const projectId = context.req.param("id");
     requirePublicProject(deps.db, projectId);
-    const plan = resolveProjectCreateDefaultExecutionPlan(deps, {
-      projectId,
-    });
-    return context.json(plan.defaultView);
+    const storedDefaults = getProjectExecutionDefaults(deps.db, { projectId });
+    return context.json(
+      resolveCreateThreadExecutionDefaults(deps.providerRegistry, {
+        storedDefaults,
+      }).executionDefaults,
+    );
   });
 
   get(routes.promptHistory, (context, query) => {
@@ -514,8 +514,6 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
         path: resolved.path,
       });
     } catch (error) {
-      // A clone can be orphaned only if another request wins this race after
-      // the up-front check; the database constraint remains the backstop.
       if (
         error instanceof Error &&
         isSqliteUniqueConstraintOnColumns(error, {
@@ -602,9 +600,6 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
 
     const limit = parseFileListLimit(query.limit);
 
-    // Environment routing narrows to that workspace. Pre-environment routing
-    // uses the explicit host's project source or the documented primary-host
-    // fallback.
     const target = resolveProjectWorkspaceTarget(deps, {
       projectId,
       ...(query.environmentId !== undefined
@@ -692,9 +687,8 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     const projectId = context.req.param("id");
     requirePublicProject(deps.db, projectId);
 
-    // Providers without a skills composer action have no typeahead entries,
-    // so skip the daemon roundtrip entirely.
-    if (!providerHasCommandSurface(deps.providerRegistry, query.provider)) {
+    const registration = deps.providerRegistry.get(query.provider);
+    if (registration === null || !providerHasCommandSurface(registration)) {
       return context.json({ commands: [] });
     }
 
@@ -705,23 +699,19 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
         : {}),
       ...(query.hostId !== undefined ? { hostId: query.hostId } : {}),
     });
-    const acpLaunchSpec = resolveAcpLaunchSpecForProviderId(
-      deps,
-      query.provider,
-    );
-    const [result, projectSkillSources, sharedSkills] = await Promise.all([
-      callHostRetryableOnlineRpc(deps, {
+    const listProviderCommands = async () => {
+      if (!providerHasNativeRootSurface(registration)) {
+        return { commands: [] };
+      }
+      return scanProviderNativeRoots(deps, {
+        type: "host.list_commands",
+        registration,
         hostId: workspace.hostId,
-        timeoutMs: COMMAND_TIMEOUT_MS,
-        command: {
-          type: "host.list_commands",
-          providerId: query.provider,
-          cwd: workspace.cwd,
-          ...(acpLaunchSpec?.nativeSkillRoots !== undefined
-            ? { nativeSkillRoots: acpLaunchSpec.nativeSkillRoots }
-            : {}),
-        },
-      }),
+        cwd: workspace.cwd,
+      });
+    };
+    const [result, projectSkillSources, sharedSkills] = await Promise.all([
+      listProviderCommands(),
       workspace.cwd === null
         ? Promise.resolve([])
         : resolveWorkspaceProjectSkills(deps, {
@@ -844,17 +834,38 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
     });
     const branchQuery = normalizeBranchQuery(query.query);
     const selectedBranch = normalizeBranchQuery(query.selectedBranch);
-    const result = await callHostRetryableOnlineRpc(deps, {
+    const remoteRefresh = query.refresh ?? "background";
+    const inspectionPromise = callHostRetryableOnlineRpc(deps, {
       hostId: source.hostId,
       timeoutMs: COMMAND_TIMEOUT_MS,
       command: {
-        type: "host.list_branches",
+        type: "host.inspect_git_source",
         path: source.path,
-        ...(branchQuery ? { query: branchQuery } : {}),
-        ...(selectedBranch ? { selectedBranch } : {}),
-        limit: parseBranchListLimit(query.limit),
+        remoteRefresh,
       },
     });
+    const readBranchOptions = () =>
+      callHostRetryableOnlineRpc(deps, {
+        hostId: source.hostId,
+        timeoutMs: COMMAND_TIMEOUT_MS,
+        command: {
+          type: "host.list_branch_options",
+          path: source.path,
+          ...(branchQuery ? { query: branchQuery } : {}),
+          ...(selectedBranch ? { selectedBranch } : {}),
+          limit: parseBranchListLimit(query.limit),
+          remoteRefresh: "none",
+        },
+      });
+    const branchOptionsPromise =
+      remoteRefresh === "background"
+        ? readBranchOptions()
+        : inspectionPromise.then(readBranchOptions);
+    const [inspection, branchOptions] = await Promise.all([
+      inspectionPromise,
+      branchOptionsPromise,
+    ]);
+    const result = { ...inspection, ...branchOptions };
     return context.json({
       ...result,
       defaultWorktreeBaseBranch: resolveDefaultWorktreeBaseBranch(result),
@@ -914,10 +925,6 @@ export function registerProjectRoutes(app: Hono, deps: AppDeps): void {
       query.path,
     );
     const headers = new Headers({
-      // Stored attachment names are unique per upload (timestamp + random
-      // suffix) and the bytes never change, so the browser may keep them for
-      // a year: PWA relaunches and timeline scroll-back reuse the cached
-      // image instead of refetching multi-megabyte screenshots.
       "cache-control": ATTACHMENT_CONTENT_CACHE_CONTROL,
       "content-type": attachment.mimeType ?? "application/octet-stream",
       etag: attachment.etag,

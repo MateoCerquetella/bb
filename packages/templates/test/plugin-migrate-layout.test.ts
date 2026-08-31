@@ -15,14 +15,10 @@ import {
   resolvePluginSdkLayout,
   setPluginSdkPin,
 } from "../src/plugin-scaffold.js";
+import { PLUGIN_SHIMMED_TYPE_DEPENDENCIES } from "../src/generated/plugin-starter-files.generated.js";
 
 const SDK_VERSION = "0.4.3";
 
-/**
- * The vendored layout every plugin scaffolded before the npm switch carries:
- * declarations on disk, a tsconfig path map pointing at them, and no
- * `@get-bb/plugin-sdk` dependency at all.
- */
 async function writeVendoredPlugin(
   rootDir: string,
   overrides: {
@@ -87,13 +83,6 @@ async function exists(path: string): Promise<boolean> {
     .catch(() => false);
 }
 
-/**
- * `bb plugin migrate` is the one-shot conversion off the pre-npm layout. The
- * legacy layout keeps working, so the transform is only ever reached through
- * an explicit consent gate — what these guard is that when it does run, it
- * lands the plugin on the package layout exactly once and never destroys
- * anything the author owns.
- */
 describe("migratePluginToPackageLayout", () => {
   let rootDir: string;
 
@@ -123,15 +112,12 @@ describe("migratePluginToPackageLayout", () => {
 
     const manifest = await readJson(join(rootDir, "package.json"));
     const devDependencies = manifest.devDependencies as Record<string, string>;
-    // Exact, not a caret: the declarations must describe the bb loading it.
     expect(devDependencies["@get-bb/plugin-sdk"]).toBe(SDK_VERSION);
-    // Everything else the manifest declared survives untouched.
     expect(devDependencies.typescript).toBe("^5.7.0");
     expect(manifest.dependencies).toEqual({ zod: "^4.3.6" });
 
     const tsconfig = await readJson(join(rootDir, "tsconfig.json"));
     const compilerOptions = tsconfig.compilerOptions as Record<string, unknown>;
-    // The SDK maps are gone; the shadcn alias the author owns is not.
     expect(compilerOptions.paths).toEqual({ "@/*": ["./*"] });
     expect(compilerOptions.strict).toBe(true);
     expect(tsconfig.include).toEqual(["server.ts", "app.tsx"]);
@@ -148,13 +134,13 @@ describe("migratePluginToPackageLayout", () => {
     });
     expect(raised.enginesFloor).toEqual({ from: ">=0.2.0", to: ">=0.4.3" });
     expect(
-      ((await readJson(join(rootDir, "package.json"))).engines as
-        | Record<string, string>
-        | undefined)?.bbPluginSdk,
+      (
+        (await readJson(join(rootDir, "package.json"))).engines as
+          | Record<string, string>
+          | undefined
+      )?.bbPluginSdk,
     ).toBe(">=0.4.3");
 
-    // A plugin that already demands more of the host keeps that requirement:
-    // migrating the type layout says nothing about what its source needs.
     const newer = await mkdtemp(join(tmpdir(), "bb-plugin-migrate-newer-"));
     try {
       await writeVendoredPlugin(newer, {
@@ -170,10 +156,12 @@ describe("migratePluginToPackageLayout", () => {
       });
       expect(result.enginesFloor).toBeNull();
       expect(
-        ((await readJson(join(newer, "package.json"))).engines as Record<
-          string,
-          string
-        >).bbPluginSdk,
+        (
+          (await readJson(join(newer, "package.json"))).engines as Record<
+            string,
+            string
+          >
+        ).bbPluginSdk,
       ).toBe(">=9.1.0");
     } finally {
       await rm(newer, { recursive: true, force: true });
@@ -217,8 +205,6 @@ describe("migratePluginToPackageLayout", () => {
   });
 
   it("converges a half-migrated plugin instead of rejecting it", async () => {
-    // An author who added the pin by hand but never deleted types/ still has
-    // a path map shadowing the installed package — the worst of both layouts.
     await writeVendoredPlugin(rootDir, {
       manifest: {
         name: "bb-plugin-half",
@@ -234,7 +220,6 @@ describe("migratePluginToPackageLayout", () => {
     });
 
     expect(result.changed).toBe(true);
-    // Nothing left to do in the manifest; the leftovers on disk are the work.
     expect(result.pin).toBeNull();
     expect(result.enginesFloor).toBeNull();
     expect(result.removedPathMaps).toEqual([
@@ -259,18 +244,11 @@ describe("migratePluginToPackageLayout", () => {
     expect(await exists(join(rootDir, "types", "bb-plugin-sdk.d.ts"))).toBe(
       false,
     );
-    // The surviving declaration has to stay in the program: dropping the
-    // include would leave custom.d.ts on disk but silently untypechecked.
     expect(result.removedIncludes).toEqual([]);
     const tsconfig = await readJson(join(rootDir, "tsconfig.json"));
     expect(tsconfig.include).toEqual(["server.ts", "app.tsx", "types"]);
   });
 
-  /**
-   * Plugins scaffolded before the SDK package rename map `@bb/plugin-sdk`.
-   * resolvePluginSdkLayout counts that map as vendored, so a migration that
-   * left it behind would report success and leave the plugin vendored.
-   */
   it("removes the pre-rename @bb/plugin-sdk path maps too", async () => {
     await writeVendoredPlugin(rootDir, {
       tsconfig: {
@@ -295,9 +273,9 @@ describe("migratePluginToPackageLayout", () => {
       "@bb/plugin-sdk/app",
     ]);
     const tsconfig = await readJson(join(rootDir, "tsconfig.json"));
-    expect(
-      (tsconfig.compilerOptions as Record<string, unknown>).paths,
-    ).toEqual({ "@/*": ["./*"] });
+    expect((tsconfig.compilerOptions as Record<string, unknown>).paths).toEqual(
+      { "@/*": ["./*"] },
+    );
     expect((await resolvePluginSdkLayout(rootDir)).kind).toBe("package");
   });
 
@@ -308,7 +286,6 @@ describe("migratePluginToPackageLayout", () => {
         name: "bb-plugin-runtime-pin",
         engines: { bbPluginSdk: `>=${SDK_VERSION}` },
         bb: { server: "./server.ts" },
-        // Already the right version, in the wrong section — and declared twice.
         dependencies: { "@get-bb/plugin-sdk": SDK_VERSION, zod: "^4.3.6" },
         devDependencies: { "@get-bb/plugin-sdk": "0.2.0" },
       },
@@ -329,10 +306,6 @@ describe("migratePluginToPackageLayout", () => {
     });
   });
 
-  /**
-   * The half-migrated plugin the CLI's layout probe reads as `package`: no
-   * types/, no path maps, and no pin. The manifest steps are the whole job.
-   */
   it("adds the pin and floor to a plugin with no vendored artifacts left", async () => {
     await writeVendoredPlugin(rootDir, {
       declarations: [],
@@ -360,13 +333,6 @@ describe("migratePluginToPackageLayout", () => {
     ).toBe(SDK_VERSION);
   });
 
-  /**
-   * The path map is the only thing that made `@bb/plugin-sdk` resolve, so
-   * removing it and leaving the specifiers behind is what broke a reviewer's
-   * migrated plugin at `bb plugin build` ("Could not resolve"). The rewrite is
-   * part of the same transform, and covers the whole source tree rather than
-   * just the two entry files.
-   */
   it("rewrites pre-rename SDK imports across the plugin's sources", async () => {
     await writeVendoredPlugin(rootDir);
     await writeFile(
@@ -374,7 +340,6 @@ describe("migratePluginToPackageLayout", () => {
       [
         'import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";',
         "import type { Something } from '@bb/plugin-sdk/testing';",
-        // Not the SDK: a different package that merely shares the prefix.
         'import { helper } from "@bb/plugin-sdk-extras";',
         "// The @bb/plugin-sdk types are unquoted prose and stay as written.",
         "export const contract = defineRpcContract({});",
@@ -389,8 +354,6 @@ describe("migratePluginToPackageLayout", () => {
       join(rootDir, "lib", "rpc.ts"),
       'export type { RpcContract } from "@bb/plugin-sdk";\n',
     );
-    // Neither of these is the author's source, and rewriting a built bundle or
-    // an installed package would be a change nobody asked for.
     await mkdir(join(rootDir, "dist"), { recursive: true });
     await writeFile(
       join(rootDir, "dist", "server.ts"),
@@ -417,7 +380,6 @@ describe("migratePluginToPackageLayout", () => {
       'import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";',
     );
     expect(server).toContain("from '@get-bb/plugin-sdk/testing';");
-    // A neighbouring package name and unquoted prose are untouched.
     expect(server).toContain('from "@bb/plugin-sdk-extras";');
     expect(server).toContain("// The @bb/plugin-sdk types are unquoted prose");
     expect(await readFile(join(rootDir, "app.tsx"), "utf8")).toBe(
@@ -433,7 +395,6 @@ describe("migratePluginToPackageLayout", () => {
       await readFile(join(rootDir, "node_modules", "dep", "index.ts"), "utf8"),
     ).toBe('import "@bb/plugin-sdk";\n');
 
-    // Second run: nothing left to rewrite, and nothing left to do at all.
     const second = await migratePluginToPackageLayout({
       rootDir,
       sdkVersion: SDK_VERSION,
@@ -457,12 +418,6 @@ describe("migratePluginToPackageLayout", () => {
     expect(await readFile(join(rootDir, "server.ts"), "utf8")).toBe(source);
   });
 
-  /**
-   * A plugin whose only remaining work is its imports: the manifest and
-   * tsconfig are already on the package layout, so `changed` has to come from
-   * the sources or the migration would report "already migrated" and leave the
-   * dead name in place.
-   */
   it("migrates a plugin whose only legacy artifact is its imports", async () => {
     await writeVendoredPlugin(rootDir, {
       declarations: [],
@@ -508,11 +463,6 @@ describe("migratePluginToPackageLayout", () => {
     );
   });
 
-  /**
-   * Same threat as syncPluginTypes: a plugin can ship `types/` as a link, and
-   * migrating must never delete through it. Planning happens before any write,
-   * so the refusal leaves the manifest unedited too.
-   */
   it("refuses a symlinked types/ and changes nothing at all", async () => {
     await writeVendoredPlugin(rootDir, { declarations: [] });
     const outside = await mkdtemp(join(tmpdir(), "bb-plugin-outside-"));
@@ -541,13 +491,14 @@ describe("migratePluginToPackageLayout", () => {
 
   it("refuses a tsconfig it cannot parse rather than rewriting it", async () => {
     await writeVendoredPlugin(rootDir);
-    // Comments are legal in a real tsconfig and would be destroyed by a
-    // parse-and-reserialize rewrite.
     await writeFile(
       join(rootDir, "tsconfig.json"),
       '{\n  // paths\n  "compilerOptions": { "paths": {} }\n}\n',
     );
-    const manifestBefore = await readFile(join(rootDir, "package.json"), "utf8");
+    const manifestBefore = await readFile(
+      join(rootDir, "package.json"),
+      "utf8",
+    );
 
     await expect(
       migratePluginToPackageLayout({ rootDir, sdkVersion: SDK_VERSION }),
@@ -562,10 +513,6 @@ describe("migratePluginToPackageLayout", () => {
   });
 });
 
-/**
- * `bb plugin types` on a package-layout plugin manages the pin — the package
- * equivalent of rewriting a vendored `types/`.
- */
 describe("setPluginSdkPin", () => {
   let rootDir: string;
 
@@ -595,11 +542,16 @@ describe("setPluginSdkPin", () => {
       )}\n`,
     );
 
-    const result = await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION });
+    const result = await setPluginSdkPin({
+      rootDir,
+      sdkVersion: SDK_VERSION,
+      app: false,
+    });
 
     expect(result).toEqual({
       pin: { from: "0.2.0", to: SDK_VERSION },
       movedFromDependencies: false,
+      shimmedTypePins: [],
     });
     const manifest = await readJson(join(rootDir, "package.json"));
     expect(
@@ -607,11 +559,12 @@ describe("setPluginSdkPin", () => {
         "@get-bb/plugin-sdk"
       ],
     ).toBe(SDK_VERSION);
-    // Reading newer declarations does not change what the source requires.
     expect((manifest.engines as Record<string, string>).bbPluginSdk).toBe(
       ">=0.2.0",
     );
-    expect(await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION })).toBeNull();
+    expect(
+      await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION, app: false }),
+    ).toBeNull();
   });
 
   it("moves a runtime-declared SDK into devDependencies rather than duplicating it", async () => {
@@ -628,7 +581,11 @@ describe("setPluginSdkPin", () => {
       )}\n`,
     );
 
-    const result = await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION });
+    const result = await setPluginSdkPin({
+      rootDir,
+      sdkVersion: SDK_VERSION,
+      app: false,
+    });
 
     expect(result?.movedFromDependencies).toBe(true);
     const manifest = await readJson(join(rootDir, "package.json"));
@@ -640,10 +597,6 @@ describe("setPluginSdkPin", () => {
     ).toBe(SDK_VERSION);
   });
 
-  /**
-   * "Right version, wrong section" is still wrong: npm installs a second copy
-   * from dependencies that shadows the pinned devDependency.
-   */
   it("moves an already-exact pin out of dependencies", async () => {
     await writeFile(
       join(rootDir, "package.json"),
@@ -658,15 +611,123 @@ describe("setPluginSdkPin", () => {
       )}\n`,
     );
 
-    const result = await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION });
+    const result = await setPluginSdkPin({
+      rootDir,
+      sdkVersion: SDK_VERSION,
+      app: false,
+    });
 
-    expect(result).toEqual({ pin: null, movedFromDependencies: true });
+    expect(result).toEqual({
+      pin: null,
+      movedFromDependencies: true,
+      shimmedTypePins: [],
+    });
     const manifest = await readJson(join(rootDir, "package.json"));
     expect(manifest.dependencies).toBeUndefined();
     expect(manifest.devDependencies).toEqual({
       "@get-bb/plugin-sdk": SDK_VERSION,
     });
-    // And now it really is a no-op.
-    expect(await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION })).toBeNull();
+    expect(
+      await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION, app: false }),
+    ).toBeNull();
+  });
+
+  it("brings an app plugin's shimmed packages to the host's versions in devDependencies", async () => {
+    const hostSonner = PLUGIN_SHIMMED_TYPE_DEPENDENCIES.sonner!;
+    const hostVaul = PLUGIN_SHIMMED_TYPE_DEPENDENCIES.vaul!;
+    await writeFile(
+      join(rootDir, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "bb-plugin-toasty",
+          bb: { server: "./server.ts", app: "./app.tsx" },
+          dependencies: { vaul: "^0.9.0", zod: "^4.3.6" },
+          devDependencies: {
+            "@get-bb/plugin-sdk": SDK_VERSION,
+            sonner: "^0.3.0",
+            typescript: "^5.7.0",
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await setPluginSdkPin({
+      rootDir,
+      sdkVersion: SDK_VERSION,
+      app: true,
+    });
+
+    expect(result?.pin).toBeNull();
+    expect(result?.shimmedTypePins).toContainEqual({
+      name: "sonner",
+      from: "^0.3.0",
+      to: hostSonner,
+      movedFromDependencies: false,
+    });
+    expect(result?.shimmedTypePins).toContainEqual({
+      name: "vaul",
+      from: "^0.9.0",
+      to: hostVaul,
+      movedFromDependencies: true,
+    });
+    expect(result?.shimmedTypePins).toContainEqual({
+      name: "@radix-ui/react-popover",
+      from: null,
+      to: PLUGIN_SHIMMED_TYPE_DEPENDENCIES["@radix-ui/react-popover"],
+      movedFromDependencies: false,
+    });
+    const manifest = await readJson(join(rootDir, "package.json"));
+    expect(manifest.dependencies).toEqual({ zod: "^4.3.6" });
+    const devDependencies = manifest.devDependencies as Record<string, string>;
+    for (const [name, version] of Object.entries(
+      PLUGIN_SHIMMED_TYPE_DEPENDENCIES,
+    )) {
+      expect(devDependencies[name], name).toBe(version);
+    }
+    expect(devDependencies["@get-bb/plugin-sdk"]).toBe(SDK_VERSION);
+    expect(devDependencies.typescript).toBe("^5.7.0");
+    expect(
+      await setPluginSdkPin({ rootDir, sdkVersion: SDK_VERSION, app: true }),
+    ).toBeNull();
+  });
+
+  it("only repins the shimmed packages a headless plugin already declares", async () => {
+    await writeFile(
+      join(rootDir, "package.json"),
+      `${JSON.stringify(
+        {
+          name: "bb-plugin-headless",
+          bb: { server: "./server.ts" },
+          devDependencies: {
+            "@get-bb/plugin-sdk": SDK_VERSION,
+            clsx: "^1.0.0",
+          },
+        },
+        null,
+        2,
+      )}\n`,
+    );
+
+    const result = await setPluginSdkPin({
+      rootDir,
+      sdkVersion: SDK_VERSION,
+      app: false,
+    });
+
+    expect(result?.shimmedTypePins).toEqual([
+      {
+        name: "clsx",
+        from: "^1.0.0",
+        to: PLUGIN_SHIMMED_TYPE_DEPENDENCIES.clsx,
+        movedFromDependencies: false,
+      },
+    ]);
+    const manifest = await readJson(join(rootDir, "package.json"));
+    expect(manifest.devDependencies).toEqual({
+      "@get-bb/plugin-sdk": SDK_VERSION,
+      clsx: PLUGIN_SHIMMED_TYPE_DEPENDENCIES.clsx,
+    });
   });
 });

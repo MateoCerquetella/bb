@@ -6,31 +6,16 @@ import { ApiError } from "../../errors.js";
 
 export type ThreadTimelinePageKind = "latest" | "older";
 
-/**
- * Marks a window that had to start at an event sequence rather than on a user
- * message because an event-count or byte budget cut the selected segment.
- *
- * A window is normally identified by the user message it begins at, and the
- * pagination cursor names that anchor. Inside a turn there is no anchor to
- * name, so the cursor names the event sequence the window was cut at instead —
- * and the row-derived cursor cannot be used, because the projection backfills a
- * turn's `turn/started` row from far below the cut and the first row's
- * `sourceSeqStart` would send the next page past everything in between.
- */
 export interface TimelineSequenceWindowStart {
-  /** Why this page starts inside a segment. */
   kind: "byte" | "event";
-  /** First event sequence this window covers. */
   sequenceStart: number;
   threadId: string;
 }
 
-// Keep the old opaque cursor value for event-budget cuts. A distinct value lets
-// older pages preserve byte-window projection and parent-read limits.
 const SEQUENCE_CURSOR_ANCHOR_ID_SEPARATOR = ":in-turn:";
 const BYTE_CURSOR_ANCHOR_ID_SEPARATOR = ":byte-window:";
 
-export function buildSequenceCursorAnchorId(
+function buildSequenceCursorAnchorId(
   args: TimelineSequenceWindowStart,
 ): string {
   const separator =
@@ -40,12 +25,6 @@ export function buildSequenceCursorAnchorId(
   return `${args.threadId}${separator}${args.sequenceStart}`;
 }
 
-/**
- * The sequence a sequence cursor points at, or null when the cursor names a
- * user-message anchor instead. Rejects a cursor whose id and sequence disagree,
- * which is the only self-consistency check available for a cursor that names no
- * stored row.
- */
 export function readSequenceCursor(
   cursor: TimelinePaginationCursor,
   threadId: string,
@@ -70,12 +49,12 @@ export function readSequenceCursor(
   return { kind, sequenceStart: cursor.anchorSeq };
 }
 
-export interface LatestThreadTimelinePageRequest {
+interface LatestThreadTimelinePageRequest {
   kind: "latest";
   segmentLimit: number;
 }
 
-export interface OlderThreadTimelinePageRequest {
+interface OlderThreadTimelinePageRequest {
   beforeCursor: TimelinePaginationCursor;
   kind: "older";
   segmentLimit: number;
@@ -90,13 +69,11 @@ interface TimelineLogicalSegment {
   rows: TimelineRow[];
 }
 
-export interface PaginatedTimelineRowsResult {
+interface PaginatedTimelineRowsResult {
   hasOlderRows: boolean;
-  kind: ThreadTimelinePageKind;
   olderCursor: TimelinePaginationCursor | null;
   returnedSegmentCount: number;
   rows: TimelineRow[];
-  segmentLimit: number;
 }
 
 function isTimelineSegmentAnchorRow(row: TimelineRow): boolean {
@@ -151,20 +128,8 @@ function buildTimelineLogicalSegments(
   return segments;
 }
 
-export interface PaginateTimelineRowsArgs {
-  /**
-   * Non-null only for a sequence-budgeted window. Such a window is already
-   * bounded by event sequence, so segment trimming would discard selected
-   * rows. The older cursor must name the cut rather than the oldest row.
-   */
+interface PaginateTimelineRowsArgs {
   sequenceWindowStart: TimelineSequenceWindowStart | null;
-  /**
-   * `hasOlderRows` is normally inferred by over-reading one segment past the
-   * page and noticing it was dropped. An event-budgeted window cannot afford
-   * that sentinel segment — it is unbounded work purely to answer a boolean —
-   * so the caller that already knows the answer from the anchor list passes it
-   * here. `null` keeps the sentinel inference.
-   */
   knownHasOlderSegments: boolean | null;
   page: ThreadTimelinePageRequest;
   rows: readonly TimelineRow[];
@@ -178,18 +143,14 @@ export function paginateTimelineRows(
   if (sequenceWindowStart !== null) {
     return {
       hasOlderRows: true,
-      kind: page.kind,
       olderCursor: {
         anchorSeq: sequenceWindowStart.sequenceStart,
         anchorId: buildSequenceCursorAnchorId(sequenceWindowStart),
       },
       returnedSegmentCount: segments.length,
       rows: [...rows],
-      segmentLimit: page.segmentLimit,
     };
   }
-  // Every window ends strictly before its cursor, so no segment at or past the
-  // cursor was read and none has to be trimmed off here.
   const selectedSegments = segments.slice(-page.segmentLimit);
   const hasOlderRows =
     knownHasOlderSegments ?? segments.length > selectedSegments.length;
@@ -197,13 +158,11 @@ export function paginateTimelineRows(
 
   return {
     hasOlderRows,
-    kind: page.kind,
     olderCursor:
       hasOlderRows && oldestSelectedSegment
         ? oldestSelectedSegment.cursor
         : null,
     returnedSegmentCount: selectedSegments.length,
     rows: selectedSegments.flatMap((segment) => segment.rows),
-    segmentLimit: page.segmentLimit,
   };
 }

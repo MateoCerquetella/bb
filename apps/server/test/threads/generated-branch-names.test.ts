@@ -27,7 +27,7 @@ import {
   seedTurnStarted,
 } from "../helpers/seed.js";
 import { createTestAppHarness, withTestHarness } from "../helpers/test-app.js";
-import { ApiError } from "../../src/errors.js";
+import { AiServiceCallError } from "../../src/services/ai/ai-service-call.js";
 import { InferenceTimeoutError } from "../../src/services/ai/inference.js";
 import { runEnvironmentProvisioningSweep } from "../../src/services/system/periodic-sweeps.js";
 import { createThreadFromRequest } from "../../src/services/threads/thread-create.js";
@@ -65,6 +65,7 @@ vi.mock("@earendil-works/pi-ai/providers/all", () => ({
   builtinModels: () => ({
     complete: piAiMocks.complete,
     getModel: piAiMocks.getModel,
+    getProviders: () => [],
   }),
 }));
 
@@ -783,11 +784,10 @@ describe("generated managed branch names", () => {
     piAiMocks.getModel.mockReturnValue({ provider: "test" });
     piAiMocks.complete
       .mockRejectedValueOnce(
-        new ApiError(
-          502,
-          "codex_service_unavailable",
+        new AiServiceCallError(
+          "codex",
+          "service_unavailable",
           "Our servers are currently overloaded. Please try again later.",
-          false,
         ),
       )
       .mockImplementationOnce(
@@ -823,9 +823,6 @@ describe("generated managed branch names", () => {
         titleFallback: "Idle late title rename",
       });
 
-      // Drive the non-managed provisioning path. The title is generated
-      // fire-and-forget (deferred mock), so provisioning continues and starts
-      // the thread before the title lands.
       const context = requestThreadProvision(harness.deps, {
         environmentIntent: {
           type: "reuse",
@@ -843,7 +840,6 @@ describe("generated managed branch names", () => {
         threadId: thread.id,
       });
 
-      // The thread starts while its title is still pending.
       const start = await waitForQueuedCommand(
         harness,
         ({ command }) =>
@@ -858,7 +854,6 @@ describe("generated managed branch names", () => {
       expect(getThread(harness.db, thread.id)?.status).toBe("active");
       expect(getThread(harness.db, thread.id)?.title).toBeNull();
 
-      // Finish the turn so the thread is idle by the time the title lands.
       const eventsResponse = await harness.app.request(
         "/internal/session/events",
         {
@@ -897,7 +892,6 @@ describe("generated managed branch names", () => {
         expect(piAiMocks.complete).toHaveBeenCalledTimes(2);
       });
 
-      // The fallback title lands only now, while the thread is idle.
       resolveMetadata({ title: "Late Idle Title" });
 
       const rename = await waitForQueuedCommandAfter(
@@ -985,9 +979,6 @@ describe("generated managed branch names", () => {
         ({ command }) =>
           command.type === "thread.start" && command.threadId === thread.id,
       );
-      // The thread start fails, moving the thread to `error` before the title
-      // lands: the guard must drop the provider rename for a non-renamable
-      // thread.
       await reportQueuedCommandError(
         harness,
         start,
@@ -1279,11 +1270,10 @@ describe("generated managed branch names", () => {
     piAiMocks.getModel.mockReturnValue({ provider: "test" });
     piAiMocks.complete
       .mockRejectedValueOnce(
-        new ApiError(
-          502,
-          "codex_service_unavailable",
+        new AiServiceCallError(
+          "codex",
+          "service_unavailable",
           "Our servers are currently overloaded. Please try again later.",
-          false,
         ),
       )
       .mockResolvedValueOnce(

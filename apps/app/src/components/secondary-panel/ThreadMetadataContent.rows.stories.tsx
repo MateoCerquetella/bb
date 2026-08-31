@@ -44,10 +44,6 @@ function RowStage({ children }: { children: ReactNode }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Parent selector row.
-// ---------------------------------------------------------------------------
-
 export function ParentSelector() {
   return (
     <StoryCard>
@@ -132,10 +128,6 @@ export function ParentSelector() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Environment — the "Environment" row.
-// ---------------------------------------------------------------------------
-
 export function Environment() {
   return (
     <StoryCard>
@@ -189,10 +181,6 @@ export function Environment() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Directory row.
-// ---------------------------------------------------------------------------
-
 export function WorkspacePath() {
   return (
     <StoryCard>
@@ -240,25 +228,17 @@ export function WorkspacePath() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Branch + merge base.
-// ---------------------------------------------------------------------------
-
 export function Branch() {
   return (
     <StoryCard>
       <StoryRow label="feature branch">
         <RowStage>
-          <BranchRow
-            thread={makeThread()}
-            workspaceStatus={makeWorkspaceStatus()}
-          />
+          <BranchRow workspaceStatus={makeWorkspaceStatus()} />
         </RowStage>
       </StoryRow>
       <StoryRow label="long branch">
         <RowStage>
           <BranchRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus({
               checkout: {
                 kind: "branch",
@@ -278,7 +258,6 @@ export function Branch() {
       <StoryRow label="detached checkout">
         <RowStage>
           <BranchRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus({
               checkout: {
                 kind: "detached",
@@ -302,7 +281,6 @@ export function MergeBase() {
       <StoryRow label="feature branch">
         <RowStage>
           <MergeBaseRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus()}
             selectedMergeBaseBranch={undefined}
             mergeBaseBranchOptions={["main", "develop", "release/2026-04"]}
@@ -314,7 +292,6 @@ export function MergeBase() {
       <StoryRow label="loading candidates">
         <RowStage>
           <MergeBaseRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus()}
             selectedMergeBaseBranch={undefined}
             mergeBaseBranchOptions={undefined}
@@ -326,7 +303,6 @@ export function MergeBase() {
       <StoryRow label="picker open">
         <RowStage>
           <MergeBaseRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus()}
             selectedMergeBaseBranch={undefined}
             mergeBaseBranchOptions={["main", "develop", "release/2026-04"]}
@@ -339,11 +315,6 @@ export function MergeBase() {
     </StoryCard>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Pull request — PR state and check status are separate. "Open" does not mean
-// ready to merge; the checks/review/mergeability summary determines that.
-// ---------------------------------------------------------------------------
 
 export function PullRequest() {
   const readyPullRequest = makePullRequest();
@@ -609,10 +580,6 @@ export function PullRequest() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Git status — permutations of the "Git status" row.
-// ---------------------------------------------------------------------------
-
 export function GitStatus() {
   return (
     <StoryCard>
@@ -803,10 +770,6 @@ export function GitStatus() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Archived + Changed files — small lifecycle/diff rows.
-// ---------------------------------------------------------------------------
-
 export function Archived() {
   return (
     <StoryCard>
@@ -818,11 +781,6 @@ export function Archived() {
     </StoryCard>
   );
 }
-
-// ---------------------------------------------------------------------------
-// Commits ahead of the merge base. Hidden entirely when nothing is ahead;
-// truncates with "Show N more" when the list is long.
-// ---------------------------------------------------------------------------
 
 const aheadCommits = Array.from({ length: 7 }, (_, index) => ({
   sha: `${index}`.padEnd(40, "0"),
@@ -877,7 +835,6 @@ export function ChangedFiles() {
       <StoryRow label="uncommitted">
         <RowStage>
           <ChangedFilesRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus({
               workingTree: {
                 hasUncommittedChanges: true,
@@ -914,7 +871,6 @@ export function ChangedFiles() {
       <StoryRow label="committed, not merged">
         <RowStage>
           <ChangedFilesRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus({
               mergeBase: {
                 mergeBaseBranch: "main",
@@ -949,7 +905,6 @@ export function ChangedFiles() {
       <StoryRow label="uncommitted + committed">
         <RowStage>
           <ChangedFilesRow
-            thread={makeThread()}
             workspaceStatus={makeWorkspaceStatus({
               workingTree: {
                 hasUncommittedChanges: true,

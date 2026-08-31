@@ -1,18 +1,18 @@
 import type { HostDaemonLogger } from "./logger.js";
 import { normalizeCaughtError } from "./error-utils.js";
 
-export interface HostDaemonIdentity {
+interface HostDaemonIdentity {
   hostId: string;
   hostName: string;
   instanceId: string;
 }
 
-export interface SignalSource {
+interface SignalSource {
   on(event: NodeJS.Signals, listener: () => void): void;
   off(event: NodeJS.Signals, listener: () => void): void;
 }
 
-export interface CreateDaemonOptions {
+interface CreateDaemonOptions {
   identity: HostDaemonIdentity;
   logger: HostDaemonLogger;
   releaseLock: () => Promise<void>;
@@ -20,10 +20,6 @@ export interface CreateDaemonOptions {
   shutdownRuntimes?: () => Promise<void>;
   onStart?: () => Promise<void>;
   signalSource?: SignalSource;
-  /**
-   * Ends the process when a shutdown does not. Only the real process
-   * entrypoint supplies this; in-process callers such as tests leave it unset.
-   */
   forceExit?: (code: number) => void;
   shutdownExitGraceMs?: number;
 }
@@ -37,21 +33,7 @@ export interface HostDaemon {
 
 const TERMINATION_SIGNALS: NodeJS.Signals[] = ["SIGINT", "SIGTERM"];
 
-/**
- * How long a shutdown may take before the process is ended by force. A restart
- * after a self-update only happens once the process really exits, so a hung
- * shutdown step or an undrained event loop must not keep the daemon alive.
- */
-export const DEFAULT_SHUTDOWN_EXIT_GRACE_MS = 15_000;
-
-function listActiveResources(): string[] {
-  const getActiveResourcesInfo = (
-    process as NodeJS.Process & {
-      getActiveResourcesInfo?: () => string[];
-    }
-  ).getActiveResourcesInfo;
-  return getActiveResourcesInfo ? getActiveResourcesInfo() : [];
-}
+const DEFAULT_SHUTDOWN_EXIT_GRACE_MS = 15_000;
 
 export function createDaemon(options: CreateDaemonOptions): HostDaemon {
   let started = false;
@@ -73,8 +55,6 @@ export function createDaemon(options: CreateDaemonOptions): HostDaemon {
     listeners.clear();
   }
 
-  // Unref'd so a drained event loop still ends the process on its own; the
-  // timer only fires when something is still holding the loop open.
   function armShutdownExitWatchdog(reason: string): void {
     const forceExit = options.forceExit;
     if (!forceExit) {
@@ -85,7 +65,7 @@ export function createDaemon(options: CreateDaemonOptions): HostDaemon {
       options.shutdownExitGraceMs ?? DEFAULT_SHUTDOWN_EXIT_GRACE_MS;
     const timer = setTimeout(() => {
       options.logger.error(
-        { reason, graceMs, activeResources: listActiveResources() },
+        { reason, graceMs, activeResources: process.getActiveResourcesInfo() },
         "Host daemon shutdown did not end the process; forcing exit so the service manager can restart it.",
       );
       forceExit(0);
@@ -184,10 +164,6 @@ export function createDaemon(options: CreateDaemonOptions): HostDaemon {
           "Host daemon started",
         );
       } catch (error) {
-        // A failed connection attempt happens after the app has opened its
-        // local API and started background monitors/watchers. Run the same
-        // cleanup as an ordinary shutdown so the process can actually exit
-        // and its service manager can restart it.
         await stop("startup-failed").catch(() => undefined);
         throw error;
       }

@@ -17,38 +17,24 @@ interface SplitLayoutStore {
   set(atom: typeof splitLayoutAtom, value: SplitLayout): void;
 }
 
-export interface OpenThreadInSplitArgs {
+interface OpenThreadInSplitArgs {
   store: SplitLayoutStore;
   navigate: (route: string, options?: { replace?: boolean }) => void;
   projectId: string;
   threadId: string;
-  /** Splits are off on compact viewports. */
   isCompact: boolean;
-  threadSplitsEnabled: boolean;
 }
 
-/**
- * Open a thread in the split area with the same placement rules a drag uses:
- * a right split by default, focus the pane when the thread is already open,
- * and coerce to a replace at the pane cap. Falls back to plain navigation
- * where there is no split to grow.
- *
- * Shared by the sidebar row's cmd-click/menu entry point and by the plugin
- * `open(id, { split: true })` action, so the two can never diverge.
- */
 export function openThreadInSplit({
   store,
   navigate,
   projectId,
   threadId,
   isCompact,
-  threadSplitsEnabled,
 }: OpenThreadInSplitArgs): void {
   const route = getThreadRoutePath({ projectId, threadId });
   const layout = store.get(splitLayoutAtom);
-  // No split to grow (compact viewport, or a non-thread route with no layout):
-  // behave like an ordinary open.
-  if (!threadSplitsEnabled || isCompact || layout === null) {
+  if (isCompact || layout === null) {
     navigate(route);
     return;
   }
@@ -61,7 +47,6 @@ export function openThreadInSplit({
     navigate(route, { replace: true });
     return;
   }
-  // Same decision as a drag with a default right-edge target.
   const decision = decideThreadDrop({
     zone: "right",
     threadAlreadyOpen: false,

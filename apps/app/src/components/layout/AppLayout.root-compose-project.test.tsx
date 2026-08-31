@@ -17,6 +17,11 @@ vi.mock("@/components/commands/AppCommandProvider", () => ({
     commandHandlers.set(command, handler);
   },
   useAppCommandShortcut: () => null,
+  useAppCommandShortcuts: () => new Map(),
+  useAppCommandRunner: () => ({
+    dispatch: () => false,
+    isCommandAvailable: () => false,
+  }),
   useIsAppCommandModifierHeld: () => false,
 }));
 
@@ -24,18 +29,15 @@ vi.mock("@/components/sidebar/AppSidebar", () => ({
   AppSidebar: () => <aside data-testid="app-sidebar" />,
 }));
 
-vi.mock("@/hooks/useThreadSplitsEnabled", () => ({
-  useThreadSplitsEnabled: () => false,
-}));
-
 vi.mock("@/hooks/queries/system-queries", () => ({
   useSystemConfig: () => ({
     data: {
       experiments: {
-        claudeCodeMockCliTraffic: false,
+        changelogPreview: false,
         editMessages: false,
-        newOnboarding: false,
+        mobileApp: false,
         providerSessionReaping: false,
+        timelineWindowing: false,
       },
     },
   }),

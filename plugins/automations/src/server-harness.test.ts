@@ -1,3 +1,4 @@
+import { unlink } from "node:fs/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createFakePluginHost,
@@ -6,6 +7,7 @@ import {
   type FakePluginHost,
 } from "@get-bb/plugin-sdk/testing";
 import plugin from "./server.js";
+import { createAutomationService } from "./service.js";
 import {
   automationListResponseSchema,
   automationsOverviewResponseSchema,
@@ -24,8 +26,6 @@ const rpcMethods = [
   "automations_overview",
   "automations_list",
   "automations_get",
-  "automations_execution_options",
-  "automations_permission_options",
   "automations_create",
   "automations_update",
   "automations_delete",
@@ -83,28 +83,13 @@ async function bootAutomationsPlugin(
             routedPermissionModes !== undefined
               ? routedPermissionModes
               : declaredPermissionModes;
-          return [{ id: "codex", capabilities: { permissionModes } }] as never;
-        },
-        async models() {
-          return {
-            providers: [
-              {
-                id: "codex",
-                available: true,
-                capabilities: { permissionModes: declaredPermissionModes },
-              },
-            ],
-            permissionCeiling: "full",
-            models: [
-              {
-                id: "gpt-5.6-codex",
-                model: "gpt-5.6-codex",
-                displayName: "5.6 Sol",
-              },
-            ],
-            selectedOnlyModels: [],
-            modelLoadError: null,
-          } as never;
+          return [
+            { id: "codex", capabilities: { permissionModes } },
+            {
+              id: "claude",
+              capabilities: { permissionModes: ["auto", "full"] },
+            },
+          ] as never;
         },
       },
       threads: {
@@ -131,8 +116,6 @@ async function bootAutomationsPlugin(
       },
     },
   });
-  // The in-repo testing subpath and bundled plugin SDK entry currently expose
-  // equivalent runtime APIs through distinct type declarations.
   await plugin(host.bb as unknown as Parameters<typeof plugin>[0]);
   return host;
 }
@@ -351,6 +334,10 @@ describe("automations server plugin harness", () => {
       "codex",
       "--model",
       "gpt-5",
+      "--reasoning",
+      "ultra",
+      "--service-tier",
+      "fast",
       "--permission-mode",
       "accept-edits",
       "--target-thread",
@@ -366,6 +353,8 @@ describe("automations server plugin harness", () => {
       prompt: "triage the inbox",
       providerId: "codex",
       model: "gpt-5",
+      reasoningLevel: "ultra",
+      serviceTier: "fast",
       permissionMode: "accept-edits",
       environment: { type: "project-default" },
       targetThreadId: THREAD_ID,
@@ -424,6 +413,48 @@ describe("automations server plugin harness", () => {
     ]);
     expect(errorResult.exitCode).toBe(1);
     expect(errorResult.stderr).toContain("Provide an execution mode");
+
+    await harness.dispose();
+  });
+
+  it("keeps a valid script row canonical when its stored file is missing", async () => {
+    const { harness } = await bootAutomationsPlugin();
+    const createdResult = await harness.runCli([
+      "create",
+      "--project",
+      PROJECT_ID,
+      "--name",
+      "Missing script file",
+      "--in",
+      "1h",
+      "--script",
+      "echo ok",
+      "--json",
+    ]);
+    const created = automationResponseSchema.parse(
+      JSON.parse(createdResult.stdout ?? ""),
+    );
+    if (
+      created.execution.mode !== "script" ||
+      created.execution.storedScriptPath === undefined
+    ) {
+      throw new Error("Expected a stored script fixture");
+    }
+    await unlink(created.execution.storedScriptPath);
+
+    const listed = automationListResponseSchema.parse(
+      await harness.callRpc("automations_list", { projectId: PROJECT_ID }),
+    );
+    expect(listed).toContainEqual(
+      expect.objectContaining({ id: created.id, name: "Missing script file" }),
+    );
+    expect(listed[0]).not.toHaveProperty("problem");
+    await expect(
+      harness.callRpc("automations_get", {
+        projectId: PROJECT_ID,
+        automationId: created.id,
+      }),
+    ).rejects.toThrow("Script file was not found");
 
     await harness.dispose();
   });
@@ -603,6 +634,306 @@ describe("automations server plugin harness", () => {
     await harness.dispose();
   });
 
+  it("accepts a long prompt and keeps the automation readable afterwards", async () => {
+    const { harness } = await bootAutomationsPlugin();
+    const created = await createAgentAutomation(harness);
+    const longPrompt = "review every open pull request carefully. ".repeat(250);
+    expect(longPrompt.length).toBeGreaterThan(8_000);
+
+    const update = await harness.runCli([
+      "update",
+      created.id,
+      "--project",
+      PROJECT_ID,
+      "--prompt",
+      longPrompt,
+      "--json",
+    ]);
+    expect(update.exitCode).toBe(0);
+    expect(
+      automationResponseSchema.parse(JSON.parse(update.stdout ?? "")).execution,
+    ).toMatchObject({ mode: "agent", prompt: longPrompt });
+
+    const listed = automationListResponseSchema.parse(
+      await harness.callRpc("automations_list", { projectId: PROJECT_ID }),
+    );
+    expect(listed).toHaveLength(1);
+    expect(automationResponseSchema.parse(listed[0]).execution).toMatchObject({
+      prompt: longPrompt,
+    });
+
+    const shown = await harness.runCli([
+      "show",
+      created.id,
+      "--project",
+      PROJECT_ID,
+      "--json",
+    ]);
+    expect(shown.exitCode).toBe(0);
+    expect(
+      automationResponseSchema.parse(JSON.parse(shown.stdout ?? "")).execution,
+    ).toMatchObject({ prompt: longPrompt });
+
+    const repaired = automationResponseSchema.parse(
+      await harness.callRpc("automations_update", {
+        projectId: PROJECT_ID,
+        automationId: created.id,
+        agent: { prompt: "short again" },
+      }),
+    );
+    expect(repaired.execution).toMatchObject({ prompt: "short again" });
+
+    await harness.dispose();
+  });
+
+  it("does not persist a CLI create rejected by execution validation", async () => {
+    const { harness } = await bootAutomationsPlugin();
+
+    const result = await harness.runCli([
+      "create",
+      "--project",
+      PROJECT_ID,
+      "--name",
+      "Invalid empty prompt",
+      "--in",
+      "1h",
+      "--prompt",
+      "",
+      "--provider",
+      "codex",
+      "--model",
+      "gpt-5",
+    ]);
+
+    expect(result.exitCode).toBe(1);
+    expect(
+      automationListResponseSchema.parse(
+        await harness.callRpc("automations_list", { projectId: PROJECT_ID }),
+      ),
+    ).toHaveLength(0);
+
+    await harness.dispose();
+  });
+
+  it("lists degraded rows and repairs a desktop v0.40.0 failed create", async () => {
+    const host = await bootAutomationsPlugin();
+    const { harness } = host;
+    await createAgentAutomation(harness, { name: "Hidden legacy row" });
+    await createAgentAutomation(harness, { name: "Invalid stored row" });
+    const healthy = await createAgentAutomation(harness, { name: "Healthy" });
+    const database = host.bb.storage.database();
+    database
+      .prepare("UPDATE automations SET execution = ? WHERE name = ?")
+      .run(
+        JSON.stringify({ ...agentExecution(), prompt: "" }),
+        "Hidden legacy row",
+      );
+    database
+      .prepare("UPDATE automations SET execution = ? WHERE name = ?")
+      .run("not json", "Invalid stored row");
+
+    const listed = automationListResponseSchema.parse(
+      await harness.callRpc("automations_list", { projectId: PROJECT_ID }),
+    );
+    const repairTarget = listed.find(
+      (item) => "problem" in item && item.problem === "missing-agent-prompt",
+    );
+    const invalidTarget = listed.find(
+      (item) => "problem" in item && item.problem === "invalid-stored-data",
+    );
+    expect(repairTarget).toMatchObject({
+      name: "Hidden legacy row",
+      projectId: PROJECT_ID,
+      execution: expect.objectContaining({
+        mode: "agent",
+        prompt: "",
+        providerId: "codex",
+        model: "gpt-5",
+      }),
+    });
+    expect(invalidTarget).toMatchObject({ name: "Invalid stored row" });
+    expect(listed).toContainEqual(expect.objectContaining({ id: healthy.id }));
+    expect(
+      automationsOverviewResponseSchema.parse(
+        await harness.callRpc("automations_overview"),
+      ).automations,
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ automation: repairTarget }),
+        expect.objectContaining({ automation: invalidTarget }),
+      ]),
+    );
+
+    const cliList = await harness.runCli(["list", "--project", PROJECT_ID]);
+    expect(cliList).toMatchObject({ exitCode: 0 });
+    expect(cliList.stdout).toContain("Prompt required");
+    expect(cliList.stdout).toContain("Invalid data");
+    const repairRow = cliList.stdout
+      ?.split("\n")
+      .find((line) => line.includes("Hidden legacy row"));
+    expect(repairRow).toContain("yes");
+    expect(repairRow).toContain("once at");
+    expect(repairRow).toContain("human");
+
+    if (
+      repairTarget === undefined ||
+      !("execution" in repairTarget) ||
+      invalidTarget === undefined ||
+      "execution" in invalidTarget
+    ) {
+      throw new Error("Expected degraded automation descriptors");
+    }
+    expect(
+      await harness.callRpc("automations_get", {
+        projectId: PROJECT_ID,
+        automationId: repairTarget.id,
+      }),
+    ).toEqual(repairTarget);
+    expect(
+      await harness.callRpc("automations_get", {
+        projectId: PROJECT_ID,
+        automationId: invalidTarget.id,
+      }),
+    ).toEqual(invalidTarget);
+    const cliShow = await harness.runCli([
+      "show",
+      repairTarget.id,
+      "--project",
+      PROJECT_ID,
+    ]);
+    expect(cliShow).toMatchObject({ exitCode: 0 });
+    expect(cliShow.stdout).toContain("Status:    Prompt required");
+    expect(cliShow.stdout).toContain("Enabled:   yes");
+    expect(cliShow.stdout).toContain("Schedule:  once at");
+    expect(cliShow.stdout?.endsWith("\n\n")).toBe(true);
+    const rejectedLifecycleWrites = [
+      ["automations_run", repairTarget.id, "it can run"],
+      ["automations_pause", repairTarget.id, "it can be paused"],
+      ["automations_resume", repairTarget.id, "it can be resumed"],
+    ] as const;
+    for (const [method, automationId, operation] of rejectedLifecycleWrites) {
+      await expect(
+        harness.callRpc(method, { projectId: PROJECT_ID, automationId }),
+      ).rejects.toThrow(
+        `Automation "Hidden legacy row" requires a prompt before ${operation}. Edit it and add a prompt first.`,
+      );
+    }
+    await expect(
+      harness.callRpc("automations_update", {
+        projectId: PROJECT_ID,
+        automationId: repairTarget.id,
+        name: "Must not be persisted",
+      }),
+    ).rejects.toThrow(
+      'Automation "Hidden legacy row" requires a prompt before other fields can be updated. Edit it and add a prompt first.',
+    );
+    await expect(
+      harness.callRpc("automations_pause", {
+        projectId: PROJECT_ID,
+        automationId: invalidTarget.id,
+      }),
+    ).rejects.toThrow(
+      'Automation "Invalid stored row" has invalid stored data and cannot be paused. Delete it and recreate it.',
+    );
+    await expect(
+      harness.callRpc("automations_update", {
+        projectId: PROJECT_ID,
+        automationId: invalidTarget.id,
+        name: "Must not be persisted either",
+      }),
+    ).rejects.toThrow(
+      'Automation "Invalid stored row" has invalid stored data and cannot be updated. Delete it and recreate it.',
+    );
+    expect(
+      database
+        .prepare("SELECT name, enabled FROM automations WHERE id = ?")
+        .get(repairTarget.id),
+    ).toEqual({ name: "Hidden legacy row", enabled: 1 });
+
+    const update = await harness.runCli([
+      "update",
+      repairTarget.id,
+      "--project",
+      PROJECT_ID,
+      "--prompt",
+      "repaired prompt",
+    ]);
+    expect(update.exitCode).toBe(0);
+    expect(
+      automationListResponseSchema.parse(
+        await harness.callRpc("automations_list", { projectId: PROJECT_ID }),
+      ),
+    ).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          id: repairTarget.id,
+          execution: expect.objectContaining({ prompt: "repaired prompt" }),
+        }),
+        invalidTarget,
+        expect.objectContaining({ id: healthy.id }),
+      ]),
+    );
+    expect(
+      automationListResponseSchema.parse(
+        await harness.callRpc("automations_list", {
+          projectId: MISSING_PROJECT_ID,
+        }),
+      ),
+    ).toEqual([]);
+
+    await harness.dispose();
+  });
+
+  it("preserves valid rows after rejected full and partial updates", async () => {
+    const host = await bootAutomationsPlugin();
+    const { harness } = host;
+    const full = await createAgentAutomation(harness, { name: "Full" });
+    const partial = await createAgentAutomation(harness, { name: "Partial" });
+
+    const fullResult = await harness.runCli([
+      "update",
+      full.id,
+      "--project",
+      PROJECT_ID,
+      "--prompt",
+      "",
+      "--provider",
+      "codex",
+      "--model",
+      "gpt-5",
+    ]);
+    expect(fullResult.exitCode).toBe(1);
+
+    const service = createAutomationService({
+      bb: host.bb as never,
+      db: host.bb.storage.database(),
+      pluginDataDir: "/tmp/bb-automations-test",
+      serverUrl: "http://127.0.0.1:38886",
+    });
+    await expect(
+      service.update({
+        projectId: PROJECT_ID,
+        automationId: partial.id,
+        agent: { prompt: "" },
+      } as never),
+    ).rejects.toThrow();
+
+    for (const automationId of [full.id, partial.id]) {
+      const unchanged = automationResponseSchema.parse(
+        await harness.callRpc("automations_get", {
+          projectId: PROJECT_ID,
+          automationId,
+        }),
+      );
+      expect(unchanged.execution).toMatchObject({
+        mode: "agent",
+        prompt: "summarize the inbox",
+      });
+    }
+
+    await harness.dispose();
+  });
+
   it("rejects conflicting targets and invalid permission modes before updating", async () => {
     const { harness } = await bootAutomationsPlugin();
     const created = await createAgentAutomation(harness);
@@ -648,7 +979,10 @@ describe("automations server plugin harness", () => {
         automationId: created.id,
         agent: {
           prompt: "updated by RPC",
-          model: "gpt-5.6-codex",
+          providerId: "claude",
+          model: "claude-opus-5",
+          reasoningLevel: "ultra",
+          serviceTier: "fast",
           permissionMode: "full",
           target: { type: "target-thread", threadId: THREAD_ID },
         },
@@ -659,29 +993,14 @@ describe("automations server plugin harness", () => {
       execution: {
         mode: "agent",
         prompt: "updated by RPC",
-        providerId: "codex",
-        model: "gpt-5.6-codex",
+        providerId: "claude",
+        model: "claude-opus-5",
+        reasoningLevel: "ultra",
+        serviceTier: "fast",
         permissionMode: "full",
         environment: { type: "project-default" },
         targetThreadId: THREAD_ID,
       },
-    });
-
-    const options = await harness.callRpc("automations_execution_options", {
-      projectId: PROJECT_ID,
-      automationId: created.id,
-    });
-    expect(options).toMatchObject({
-      models: [{ model: "gpt-5.6-codex", displayName: "5.6 Sol" }],
-      permissionModes: ["accept-edits", "auto", "full"],
-    });
-    await expect(
-      harness.callRpc("automations_permission_options", {
-        projectId: PROJECT_ID,
-        automationId: created.id,
-      }),
-    ).resolves.toEqual({
-      permissionModes: ["accept-edits", "auto", "full"],
     });
 
     await expect(
@@ -822,10 +1141,6 @@ describe("automations server plugin harness", () => {
     );
     expect(started.run.status).toBe("running");
 
-    // The process that owned the run goes away with its settlement events;
-    // the replacement loads against the same database. Its sweep service
-    // asks the server about the thread (the fake reports it idle) and
-    // settles the row before sweeping, so single-flight releases.
     const reloaded = await harness.reload(
       plugin as unknown as Parameters<typeof harness.reload>[0],
     );
@@ -844,7 +1159,6 @@ describe("automations server plugin harness", () => {
     });
     service.controller.abort();
     await service.done;
-    // A new manual run is possible again.
     const next = automationRunRpcResponseSchema.parse(
       await reloaded.harness.callRpc("automations_run", {
         projectId: PROJECT_ID,
@@ -869,8 +1183,6 @@ describe("automations server plugin harness", () => {
 
     vi.setSystemTime(new Date("2026-01-01T00:01:05.000Z"));
     const service = harness.runService("automation-sweep");
-    // The service settles ghost runs from a previous process before its
-    // first sweep; let that (empty) pass and the first tick run, then stop.
     await vi.waitFor(() =>
       expect(harness.sdk.callsTo("threads.spawn")).toHaveLength(1),
     );

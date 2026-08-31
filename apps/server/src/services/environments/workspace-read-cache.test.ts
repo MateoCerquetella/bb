@@ -1,25 +1,10 @@
 import type { ChangedMessage } from "@bb/domain";
+import { createDeferredPromise, type DeferredPromise } from "@bb/test-helpers";
 import { describe, expect, it } from "vitest";
 import {
   EnvironmentReadCache,
   WorkspaceReadCaches,
 } from "./workspace-read-cache.js";
-
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve(value: T): void;
-  reject(error: unknown): void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
-    resolve = res;
-    reject = rej;
-  });
-  return { promise, resolve, reject };
-}
 
 function createClock(start = 1_000) {
   let now = start;
@@ -32,11 +17,11 @@ function createClock(start = 1_000) {
 }
 
 function createCounter<T>(values: T[]) {
-  const loads: Deferred<T>[] = [];
+  const loads: DeferredPromise<T>[] = [];
   return {
     loads,
     load: () => {
-      const next = deferred<T>();
+      const next = createDeferredPromise<T>();
       loads.push(next);
       const value = values[loads.length - 1];
       if (value !== undefined) {
@@ -136,7 +121,6 @@ describe("EnvironmentReadCache", () => {
     const stale = cache.read({ ...READ, load: counter.load });
     cache.invalidateEnvironment("env-1");
 
-    // A reader arriving after the change must not join the pre-change probe.
     const fresh = cache.read({ ...READ, load: counter.load });
     expect(counter.loads).toHaveLength(2);
 
@@ -145,7 +129,6 @@ describe("EnvironmentReadCache", () => {
     await expect(stale).resolves.toBe("pre-change");
     await expect(fresh).resolves.toBe("post-change");
 
-    // The detached probe's late completion must not overwrite the cache.
     await expect(cache.read({ ...READ, load: counter.load })).resolves.toBe(
       "post-change",
     );
@@ -241,8 +224,6 @@ describe("WorkspaceReadCaches", () => {
     const caches = new WorkspaceReadCaches({ hub, now: () => 0 });
     const primed = await primeBoth(caches);
 
-    // The status probe records the observed branch (metadata-changed) while
-    // it is still in flight; that must not detach the probe.
     hub.emit({
       type: "changed",
       entity: "environment",

@@ -1,11 +1,12 @@
 import { useCallback, useRef, useState } from "react";
 import { useUploadPromptAttachment } from "@/hooks/mutations/project-mutations";
-import type { PromptDraftAttachment } from "@/lib/prompt-draft";
+import { getMutationErrorMessage } from "@/lib/mutation-errors";
+import { BbHttpError } from "@/lib/sdk";
+import type { PromptDraftAttachment } from "@bb/client-core";
 import type { InlineQueuedMessageEditState } from "./useInlineQueuedMessageEditing";
 
 interface UseComposerAttachmentUploadsArgs {
   projectId: string;
-  /** Appends an uploaded attachment to the bottom composer draft. */
   addDraftAttachment: (attachment: PromptDraftAttachment) => void;
   inlineEditingQueuedMessage: InlineQueuedMessageEditState | null;
   inlineEditingQueuedMessageRef: React.RefObject<InlineQueuedMessageEditState | null>;
@@ -14,7 +15,7 @@ interface UseComposerAttachmentUploadsArgs {
   ) => void;
 }
 
-export interface UseComposerAttachmentUploadsResult {
+interface UseComposerAttachmentUploadsResult {
   bottomAttachmentError: string | null;
   setBottomAttachmentError: (error: string | null) => void;
   handleAttachBottomFiles: (files: File[]) => Promise<void>;
@@ -25,8 +26,7 @@ export interface UseComposerAttachmentUploadsResult {
   isAttachingInlineFiles: boolean;
 }
 
-export interface DraftAttachmentUploadTarget {
-  /** Changes whenever a newly mounted draft must not receive older uploads. */
+interface DraftAttachmentUploadTarget {
   key: string;
   addAttachment: (attachment: PromptDraftAttachment) => void;
 }
@@ -36,7 +36,7 @@ interface UseDraftAttachmentUploadsArgs {
   target: DraftAttachmentUploadTarget | null;
 }
 
-export interface UseDraftAttachmentUploadsResult {
+interface UseDraftAttachmentUploadsResult {
   attachmentError: string | null;
   setAttachmentError: (error: string | null) => void;
   handleAttachFiles: (files: File[]) => Promise<void>;
@@ -49,7 +49,22 @@ interface DraftAttachmentOperationState {
   targetKey: string | null;
 }
 
-/** Upload state for one independently mounted composer draft. */
+function uploadRejectionReason(error: unknown): string | null {
+  return error instanceof BbHttpError
+    ? getMutationErrorMessage({ error, fallbackMessage: "Request failed" })
+    : null;
+}
+
+function attachFailureMessage(
+  failedFiles: readonly string[],
+  reason: string | null,
+): string {
+  const names = failedFiles.join(", ");
+  return reason === null
+    ? `Failed to attach: ${names}`
+    : `Failed to attach ${names}: ${reason}`;
+}
+
 export function useDraftAttachmentUploads({
   projectId,
   target,
@@ -90,6 +105,7 @@ export function useDraftAttachmentUploads({
         targetKey: capturedTargetKey,
       }));
       const failedFiles: string[] = [];
+      let rejectionReason: string | null = null;
       try {
         for (const file of files) {
           try {
@@ -101,8 +117,9 @@ export function useDraftAttachmentUploads({
             if (currentTarget?.key === capturedTargetKey) {
               currentTarget.addAttachment(uploaded);
             }
-          } catch {
+          } catch (error) {
             failedFiles.push(file.name);
+            rejectionReason ??= uploadRejectionReason(error);
           }
         }
       } finally {
@@ -112,7 +129,7 @@ export function useDraftAttachmentUploads({
                 error:
                   failedFiles.length > 0 &&
                   targetRef.current?.key === capturedTargetKey
-                    ? `Failed to attach: ${failedFiles.join(", ")}`
+                    ? attachFailureMessage(failedFiles, rejectionReason)
                     : current.error,
                 pendingCount: Math.max(0, current.pendingCount - 1),
                 targetKey: capturedTargetKey,
@@ -132,11 +149,6 @@ export function useDraftAttachmentUploads({
   };
 }
 
-/**
- * Uploads dropped/picked files for either independently mounted composer. The
- * inline owner is captured per invocation so a dismissed edit session cannot
- * receive a late upload.
- */
 export function useComposerAttachmentUploads({
   projectId,
   addDraftAttachment,
@@ -187,8 +199,6 @@ export function useComposerAttachmentUploads({
     isAttachingFiles: isAttachingInlineFiles,
   } = useDraftAttachmentUploads({
     projectId,
-    // `editSessionId` is monotonically unique per edit session, so a key match
-    // is a session match.
     target:
       inlineEditSessionId !== null
         ? {

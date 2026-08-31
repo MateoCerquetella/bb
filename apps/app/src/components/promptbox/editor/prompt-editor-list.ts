@@ -34,7 +34,7 @@ export function createSplitPromptListItemTransaction(args: {
     : null;
 }
 
-export function createLiftPromptListItemTransaction(args: {
+function createLiftPromptListItemTransaction(args: {
   state: EditorState;
   editor: SplitListEditorContext;
 }): Transaction | null {
@@ -66,10 +66,7 @@ function isSelectionInEmptyListItem(state: EditorState): boolean {
   if (!selection.empty) return false;
 
   const { $from } = selection;
-  if (
-    $from.parent.type.name !== "paragraph" ||
-    $from.parent.content.size > 0
-  ) {
+  if ($from.parent.type.name !== "paragraph" || $from.parent.content.size > 0) {
     return false;
   }
 

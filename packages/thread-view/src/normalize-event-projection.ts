@@ -1,8 +1,11 @@
+import { isLegacyDelegationToolCall } from "@bb/domain";
+import { getFirstStringField, messageId } from "./format-helpers.js";
 import type {
   EventProjectionDelegationMessage,
   EventProjectionMessage,
   EventProjection,
   EventProjectionEntry,
+  EventProjectionToolCallMessage,
   EventProjectionTurn,
 } from "./event-projection-types.js";
 import { findLastTerminalTimelineMessage } from "./timeline-message-helpers.js";
@@ -66,6 +69,41 @@ function isDelegationSourceMessage(
   message: EventProjectionMessage,
 ): message is EventProjectionDelegationMessage {
   return message.kind === "delegation";
+}
+
+function toolCallAsDelegationMessage(
+  message: EventProjectionToolCallMessage,
+): EventProjectionDelegationMessage {
+  const {
+    kind: _kind,
+    toolArgs,
+    approvalStatus: _approvalStatus,
+    ...shared
+  } = message;
+  const subagentType = getFirstStringField(toolArgs, [
+    "subagent_type",
+    "subagentType",
+  ]);
+  const description = getFirstStringField(toolArgs, ["description", "prompt"]);
+  const model = getFirstStringField(toolArgs, ["model"]);
+  return {
+    ...shared,
+    id: messageId(message.threadId, "delegation", message.callId),
+    kind: "delegation",
+    ...(subagentType ? { subagentType } : {}),
+    ...(description ? { description } : {}),
+    ...(model ? { model } : {}),
+    childRef: null,
+    background: false,
+    childProjection: {
+      state: {
+        activeThinking: null,
+        activeWorkflows: [],
+        activeBackgroundCommands: [],
+      },
+      entries: [],
+    },
+  };
 }
 
 function maybeStartedAt(
@@ -261,6 +299,23 @@ class SemanticProjectionBuilder {
   ) {
     this.contextOnlyToolCallIds =
       options.contextOnlyToolCallIds ?? new Set<string>();
+    const referencedParentCallIds = new Set(
+      contexts
+        .map((context) => context.message.parentToolCallId)
+        .filter((id): id is string => id !== undefined),
+    );
+    for (const context of contexts) {
+      if (
+        context.message.kind === "tool-call" &&
+        (referencedParentCallIds.has(context.message.callId) ||
+          isLegacyDelegationToolCall({
+            tool: context.message.toolName,
+            presentation: context.message.presentation,
+          }))
+      ) {
+        context.message = toolCallAsDelegationMessage(context.message);
+      }
+    }
     const delegationCallIds = new Set(
       contexts
         .map((context) => context.message)
@@ -357,11 +412,6 @@ class SemanticProjectionBuilder {
     };
   }
 
-  // Delegation children render as a flat sequence of messages under the
-  // delegation row. Their lifecycle is owned by the delegation tool call;
-  // wrapping them in a synthetic turn would require aggregating child
-  // statuses into a turn status, which has no meaningful answer while the
-  // subagent is still running.
   private buildFlatChildProjection(
     contexts: readonly SemanticMessageContext[],
   ): EventProjection {

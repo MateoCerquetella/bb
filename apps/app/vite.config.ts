@@ -16,28 +16,37 @@ export const sharedViteConfig = {
     react(),
     babel({ presets: [reactCompilerPreset()] }),
     tailwindcss(),
-    // Build-only: writes bundle-stats.json for the boot-payload budget check.
     bundleStats(),
-    // Build-only: <link rel="preload"> for the Inter latin woff2.
     fontPreload(),
   ],
-  // Keep app and Ladle dep optimization metadata from clobbering each other.
   cacheDir: "node_modules/.vite/app",
   build: {
-    // Skip compressed-size calculation to keep production app builds fast.
     reportCompressedSize: false,
-    // The desktop-app icons (WorkspaceOpenTargetIcon) are each under Vite's
-    // 4 KB inline limit, so by default they are base64-inlined into the
-    // thread route chunk: ~35 KB brotli that every phone downloads for a
-    // menu that needs a local host daemon on 127.0.0.1. Keep them as files
-    // and let the browser fetch only the ones a menu actually renders.
     assetsInlineLimit: (filePath) =>
       filePath.includes("/workspace-open-target-icons/") ? false : undefined,
+    rolldownOptions: {
+      output: {
+        advancedChunks: {
+          groups: [
+            {
+              name: "boot-vendor",
+              test: /node_modules/,
+              tags: ["$initial"],
+              priority: 2,
+              minSize: 12 * 1024,
+            },
+            {
+              name: "boot-app",
+              tags: ["$initial"],
+              priority: 1,
+              minSize: 12 * 1024,
+            },
+          ],
+        },
+      },
+    },
   },
   optimizeDeps: {
-    // The terminal imports xterm lazily when the panel mounts. Pre-optimize
-    // these packages so opening the terminal does not discover new deps and
-    // invalidate Vite's optimized-dependency hash mid-session.
     include: ["@xterm/addon-fit", "@xterm/addon-web-links", "@xterm/xterm"],
   },
   resolve: {

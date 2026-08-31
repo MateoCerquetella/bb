@@ -26,6 +26,7 @@ import {
   buildPromptInputs,
   collectOption,
   PERMISSION_MODE_HELP,
+  PLAN_HELP,
   parseServiceTier,
 } from "./helpers.js";
 
@@ -43,6 +44,7 @@ interface ThreadSpawnCommandOptions {
   title?: string;
   serviceTier?: string;
   permissionMode?: string;
+  plan?: boolean;
   parentSelf?: boolean;
   machine?: string;
   host?: string;
@@ -178,7 +180,7 @@ export function registerSpawnCommand(
     )
     .option(
       "--base-branch <branch>",
-      "Base branch for new managed worktrees. Omit to let bb choose the project's default worktree base.",
+      "Base branch for new managed worktrees. Omit to let bb choose the project's default worktree base; naming the default branch fetches and prefers origin the same way.",
     )
     .option(
       "--machine <id-or-name>",
@@ -202,6 +204,7 @@ export function registerSpawnCommand(
     .option("--title <title>", "Thread title")
     .option("--service-tier <tier>", "Service tier: fast or default")
     .option("--permission-mode <mode>", PERMISSION_MODE_HELP)
+    .option("--plan", PLAN_HELP)
     .option(
       "--file <path>",
       "Pass a host-readable absolute or uploaded attachment file path (repeatable)",
@@ -221,7 +224,10 @@ export function registerSpawnCommand(
     )
     .option("--origin-kind <kind>", "Thread origin: fork")
     .option("--source-thread <id>", "Source thread for a fork")
-    .option("--source-seq-end <seq>", "Last source event sequence")
+    .option(
+      "--source-seq-end <seq>",
+      "Fork after the source turn containing this event sequence",
+    )
     .action(
       action(async (opts: ThreadSpawnCommandOptions) => {
         const projectId = resolveExplicitIdFlag({
@@ -300,6 +306,7 @@ export function registerSpawnCommand(
             ...(opts.model ? { model: opts.model } : {}),
             input: buildPromptInputs({
               message: opts.prompt,
+              plan: opts.plan,
               files: opts.file,
               images: opts.image,
             }),
@@ -309,13 +316,6 @@ export function registerSpawnCommand(
             ...(permissionMode ? { permissionMode } : {}),
             ...(visibility ? { visibility } : {}),
             environment,
-            // The typed $post client types this body against the schema's
-            // output shape, where startedOnBehalfOf/originKind
-            // (`.default(null)`) are required — so a normal spawn passes the
-            // explicit null the server would otherwise fill. (A fork sets
-            // these; the CLI never does. z.input would re-optionalize the
-            // SDK arg type but the underlying $post still requires them, so the
-            // null lives here.)
             startedOnBehalfOf: null,
             originKind: opts.originKind ?? null,
             ...(parentThreadId ? { parentThreadId } : {}),
@@ -329,8 +329,6 @@ export function registerSpawnCommand(
 
         if (outputJson(opts, thread)) return;
         console.log(`Thread spawned: ${thread.id}`);
-        // A hidden child reports to its parent too, so the promise follows the
-        // parent link alone.
         if (
           thread.parentThreadId &&
           thread.parentThreadId === resolveContextThreadId()

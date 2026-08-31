@@ -8,22 +8,18 @@ import { assignIfDefined } from "@bb/config/objects";
 
 interface ResolveLocalBbExecutablePathOptions {
   cliExecutablePath?: string;
+  cliRuntimePath?: string;
 }
 
-export interface PrepareRuntimeShellEnvOptions {
+interface PrepareRuntimeShellEnvOptions {
   bbExecutableDirectory: string;
-  /**
-   * Absolute path to the daemon-managed `bb` executable. Defaults to
-   * `<bbExecutableDirectory>/bb`. Injected as `BB_CLI` so agent shells can
-   * invoke it even when PATH is rewritten (ACP providers).
-   */
   bbExecutablePath?: string;
   hostDaemonPort?: number;
   serverUrl: string;
   inheritedPath?: string;
 }
 
-export interface ResolveUserShellPathOptions {
+interface ResolveUserShellPathOptions {
   env?: NodeJS.ProcessEnv;
   platform?: NodeJS.Platform;
   spawnUserShellEnv?: SpawnUserShellEnv;
@@ -61,6 +57,10 @@ const USER_SHELL_ENV_FORCE_KILL_AFTER_MS = 1_000;
 
 function getDefaultCliExecutablePath(): string {
   return fileURLToPath(new URL("../../cli/bin/bb", import.meta.url));
+}
+
+function getDefaultCliRuntimePath(): string {
+  return fileURLToPath(new URL("../../cli/dist/index.js", import.meta.url));
 }
 
 function getErrorCode(error: unknown): string | undefined {
@@ -105,6 +105,26 @@ async function resolveCliEntryPath(cliExecutablePath: string): Promise<string> {
   }
 
   return cliEntryPath;
+}
+
+async function requireCliRuntimePath(cliRuntimePath: string): Promise<void> {
+  const resolvedCliRuntimePath = resolve(cliRuntimePath);
+
+  try {
+    const stats = await fs.stat(resolvedCliRuntimePath);
+    if (!stats.isFile()) {
+      throw new Error(
+        `Resolved bb CLI runtime is not a file: ${resolvedCliRuntimePath}`,
+      );
+    }
+  } catch (error) {
+    if (getErrorCode(error) === "ENOENT") {
+      throw new Error(
+        `Missing built bb CLI runtime at ${resolvedCliRuntimePath}. Build @bb/cli before starting the host daemon.`,
+      );
+    }
+    throw error;
+  }
 }
 
 function prependPath(
@@ -302,6 +322,13 @@ function parsePathFromUserShellEnv(stdout: string): string | null {
 export async function resolveUserShellPath(
   options: ResolveUserShellPathOptions = {},
 ): Promise<string | null> {
+  return resolveUserShellPathWithPrevious(options, null);
+}
+
+async function resolveUserShellPathWithPrevious(
+  options: ResolveUserShellPathOptions,
+  previousPath: string | null,
+): Promise<string | null> {
   const env = options.env ?? process.env;
   const shell = resolveUserShellCommand(
     env,
@@ -313,7 +340,8 @@ export async function resolveUserShellPath(
 
   const spawnUserShellEnv =
     options.spawnUserShellEnv ?? defaultSpawnUserShellEnv;
-  for (const shellArgs of userShellEnvArgSets(shell)) {
+  const shellArgSets = userShellEnvArgSets(shell);
+  for (const [index, shellArgs] of shellArgSets.entries()) {
     const result = await spawnUserShellEnv({
       command: shell,
       args: shellArgs,
@@ -325,30 +353,52 @@ export async function resolveUserShellPath(
       result.signal !== null ||
       result.status !== 0
     ) {
+      if (index === 0 && previousPath !== null) {
+        return previousPath;
+      }
       continue;
     }
     const path = parsePathFromUserShellEnv(result.stdout);
     if (path !== null) {
       return path;
     }
+    if (index === 0 && previousPath !== null) {
+      return previousPath;
+    }
   }
 
   return null;
 }
 
-/**
- * Absolute path to the local bb CLI entry used for agent shell injection.
- */
+export function createUserShellPathResolver(
+  options: ResolveUserShellPathOptions = {},
+): () => Promise<string | null> {
+  let previousPath: string | null = null;
+  return async () => {
+    const path = await resolveUserShellPathWithPrevious(options, previousPath);
+    if (path !== null) previousPath = path;
+    return path;
+  };
+}
+
 export async function resolveLocalBbExecutablePath(
   options: ResolveLocalBbExecutablePathOptions = {},
 ): Promise<string> {
   const resolvedCliExecutablePath =
     options.cliExecutablePath ?? getDefaultCliExecutablePath();
-  return resolveCliEntryPath(resolvedCliExecutablePath);
+  const cliEntryPath = await resolveCliEntryPath(resolvedCliExecutablePath);
+  const cliRuntimePath =
+    options.cliRuntimePath ??
+    (options.cliExecutablePath === undefined
+      ? getDefaultCliRuntimePath()
+      : undefined);
+  if (cliRuntimePath !== undefined) {
+    await requireCliRuntimePath(cliRuntimePath);
+  }
+  return cliEntryPath;
 }
 
-/** Platform-stable name of the bb CLI file inside `BB_CLI_DIR` / daemon dist. */
-export function bbExecutableFileName(): string {
+function bbExecutableFileName(): string {
   return "bb";
 }
 
@@ -369,9 +419,6 @@ export function prepareRuntimeShellEnv(
       options.bbExecutableDirectory,
       options.inheritedPath ?? process.env.PATH,
     ),
-    // Absolute path survives PATH rewrites in ACP agent tool shells. Official
-    // CLI entrypoints re-exec to this target when it differs from the current
-    // binary (see apps/cli `maybeReexecViaBbCli`).
     BB_CLI: bbExecutablePath,
     BB_SERVER_URL: options.serverUrl,
   };
@@ -383,14 +430,5 @@ export function prepareRuntimeShellEnv(
         ? undefined
         : String(options.hostDaemonPort),
   });
-  // Provider process spawning strips inherited BB_* variables, so the
-  // documented Claude CLI override must be forwarded explicitly for the
-  // bridge to see it.
-  assignIfDefined({
-    key: "BB_CLAUDE_CODE_EXECUTABLE",
-    target: shellEnv,
-    value: process.env.BB_CLAUDE_CODE_EXECUTABLE,
-  });
-
   return shellEnv;
 }

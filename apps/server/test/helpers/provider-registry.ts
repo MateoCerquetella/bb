@@ -1,19 +1,3 @@
-/**
- * Test registries seeded with the first-party providers.
- *
- * Production gets its providers from the four first-party provider plugins;
- * there is no core seed to fall back on. Most server tests need those
- * providers but cannot afford to install and run four plugins, so this helper
- * takes the SAME declarations those plugins register — by invoking their
- * server entrypoints against a capture stub — and pushes them through the same
- * validation and mapping the plugin runtime uses. Nothing is re-stated here,
- * so a declaration change cannot drift from what the tests assume.
- *
- * The plugin modules load by dynamic import rather than a static one: they
- * live outside this package's rootDir, exactly as they do for the real plugin
- * runtime, which also imports them as untyped modules and validates what comes
- * back.
- */
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { writeFileSync } from "node:fs";
@@ -23,15 +7,31 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostDaemonBridgeLaunch } from "@bb/host-daemon-contract";
 import { buildPluginHost, resolvePluginBuildToolchain } from "@bb/plugin-build";
-import { validatePluginProviderDeclaration } from "@get-bb/plugin-sdk/internal/host-policy";
-import type {
-  BbPluginApi,
-  PluginProviderDeclaration,
-} from "@get-bb/plugin-sdk";
+import {
+  validatePluginProviderDeclaration,
+  type NormalizedPluginProviderDeclaration,
+} from "@get-bb/plugin-sdk/internal/host-policy";
+import {
+  EMPTY_PROVIDER_NATIVE_ROOTS,
+  EMPTY_PROVIDER_RESOLVED_NATIVE_ROOTS,
+  type JsonValue,
+  parseNamespacedGlyph,
+  pluginPackageJsonSchema,
+  type ProviderInfo,
+  type ProviderNativeRootSet,
+} from "@bb/domain";
+import type { PluginProviderDeclaration } from "@get-bb/plugin-sdk";
+import {
+  captureFirstPartyProviderDeclarations,
+  firstPartyPluginRootDir,
+} from "@bb/agent-runtime/test";
 import { buildPluginProviderRegistration } from "../../src/services/providers/plugin-provider-registration.js";
+import { readPluginProviderIcon } from "../../src/services/plugins/plugin-runtime.js";
 import {
   createProviderRegistryService,
+  type ProviderRegistration,
   type ProviderRegistryService,
+  type ProviderServerCapabilities,
 } from "../../src/services/providers/provider-registry.js";
 import { PluginHostArtifactRegistry } from "../../src/services/plugins/plugin-host-artifact-registry.js";
 import type { PluginHostArtifactSnapshot } from "../../src/services/plugins/plugin-service-internal.js";
@@ -43,56 +43,51 @@ const FIRST_PARTY_PROVIDER_PLUGIN_IDS = [
   "provider-acp",
 ] as const;
 
-function pluginRootDir(pluginId: string): string {
-  // No trailing slash: the plugin build's directory-escape checks compare
-  // against `rootDir + "/"`.
-  return fileURLToPath(
-    new URL(`../../../../plugins/${pluginId}`, import.meta.url),
+export async function loadFirstPartyProviderDeclarations(): Promise<
+  ReadonlyMap<string, readonly NormalizedPluginProviderDeclaration[]>
+> {
+  const entries = await Promise.all(
+    FIRST_PARTY_PROVIDER_PLUGIN_IDS.map(
+      async (pluginId) =>
+        [
+          pluginId,
+          await captureFirstPartyProviderDeclarations(pluginId),
+        ] as const,
+    ),
   );
+  return new Map(entries);
 }
 
-async function loadDeclaration(
-  pluginId: string,
-): Promise<PluginProviderDeclaration> {
-  const moduleUrl = new URL(
-    `../../../../plugins/${pluginId}/server.ts`,
-    import.meta.url,
-  ).href;
-  const loaded: unknown = await import(/* @vite-ignore */ moduleUrl);
-  const entry = (loaded as { default?: unknown }).default;
-  if (typeof entry !== "function") {
-    throw new Error(`${pluginId} has no default plugin export`);
-  }
-  let captured: PluginProviderDeclaration | undefined;
-  const bb = {
-    agents: {
-      experimental_registerProvider(declaration: PluginProviderDeclaration) {
-        captured = declaration;
-      },
-    },
-  } as unknown as BbPluginApi;
-  (entry as (bb: BbPluginApi) => void)(bb);
-  if (captured === undefined) {
-    throw new Error(`${pluginId} registered no provider declaration`);
-  }
-  // Same narrowing the plugin runtime does: a plugin module is an unknowable
-  // boundary, so the declaration is validated before it is trusted.
-  return validatePluginProviderDeclaration(captured);
+const NO_PLUGIN_SETTINGS = (): Readonly<Record<string, never>> => ({});
+
+async function declaredIcons(pluginId: string): Promise<Map<string, string>> {
+  const manifest = pluginPackageJsonSchema.parse(
+    JSON.parse(
+      await readFile(
+        join(firstPartyPluginRootDir(pluginId), "package.json"),
+        "utf8",
+      ),
+    ),
+  );
+  return new Map(Object.entries(manifest.bb.branding.experimental_icons ?? {}));
 }
 
-/**
- * Registers the four first-party providers into an existing registry, exactly
- * as their plugins would. `excludePluginIds` models a plugin the user disabled
- * (or that failed to load), whose provider is then absent from the registry.
- *
- * Pass `artifacts` to also record a STUB bridge artifact per bridge-shipping
- * plugin. In production a loaded provider plugin always has one, and every
- * bridge-bound command carries a `bridgeLaunch` naming it, so a harness that
- * registers providers without artifacts models a state that cannot happen and
- * every command build fails. The stub is metadata only — no bytes are servable
- * from it. Tests that need the real bundle use
- * {@link recordFirstPartyProviderBridgeArtifacts}, which overwrites the stub.
- */
+function providerIconSnapshot(args: {
+  pluginId: string;
+  icon: string | undefined;
+  icons: ReadonlyMap<string, string>;
+}): { bytes: Uint8Array; contentType: string } | null {
+  const namespaced =
+    args.icon === undefined ? null : parseNamespacedGlyph(args.icon);
+  const asset =
+    namespaced === null
+      ? args.icon
+      : namespaced.pluginId === args.pluginId
+        ? args.icons.get(namespaced.name)
+        : undefined;
+  return readPluginProviderIcon(firstPartyPluginRootDir(args.pluginId), asset);
+}
+
 export async function registerFirstPartyProviders(
   registry: ProviderRegistryService,
   options: {
@@ -107,32 +102,63 @@ export async function registerFirstPartyProviders(
     if (excluded.has(pluginId)) {
       continue;
     }
-    const declaration = await loadDeclaration(pluginId);
-    registry.register({
-      ...buildPluginProviderRegistration({
-        available: !unavailable.has(pluginId),
-        pluginId,
-        declaration,
-      }),
-      pluginId,
-    });
+    const declarations = await captureFirstPartyProviderDeclarations(pluginId);
+    const icons = await declaredIcons(pluginId);
     if (
       options.artifacts !== undefined &&
       !unavailable.has(pluginId) &&
-      (await hasHostEntry(pluginRootDir(pluginId)))
+      (await hasHostEntry(firstPartyPluginRootDir(pluginId)))
     ) {
       options.artifacts.set(pluginId, stubHostArtifact(pluginId));
+    }
+    for (const declaration of declarations) {
+      const icon = providerIconSnapshot({
+        pluginId,
+        icon: declaration.icon,
+        icons,
+      });
+      registry.register({
+        ...buildPluginProviderRegistration({
+          available: !unavailable.has(pluginId),
+          pluginId,
+          declaration,
+          readSettings: NO_PLUGIN_SETTINGS,
+        }),
+        ...(icon === null ? {} : { icon }),
+        pluginId,
+        iconNames: new Set(icons.keys()),
+        installRank: {
+          bundledIndex: FIRST_PARTY_PROVIDER_PLUGIN_IDS.indexOf(pluginId),
+          installedAt: 0,
+        },
+      });
     }
   }
 }
 
-/**
- * A one-line bundle standing in for a built host artifact: real bytes at a real
- * path, so the internal plugin host artifact route serves them and a daemon
- * that downloads and hash-verifies it succeeds. Nothing executes it — the
- * harnesses that get this far run a fake adapter.
- */
-function stubHostArtifact(pluginId: string): PluginHostArtifactSnapshot {
+export function minimalProviderRegistration(args: {
+  pluginId: string;
+  info: ProviderInfo;
+  serverCapabilities: ProviderServerCapabilities;
+}): ProviderRegistration {
+  return {
+    info: args.info,
+    serverCapabilities: args.serverCapabilities,
+    pluginId: args.pluginId,
+    bridgeOptions: {},
+    extensionKinds: {},
+    visibility: "always",
+    fallbackModels: [],
+    envPassthrough: [],
+    nativeSkillRoots: EMPTY_PROVIDER_NATIVE_ROOTS,
+    nativeCommandRoots: EMPTY_PROVIDER_NATIVE_ROOTS,
+    resolvesNativeRoots: false,
+    deriveProviderOptions: () => ({}),
+    iconNames: new Set<string>(),
+  };
+}
+
+export function stubHostArtifact(pluginId: string): PluginHostArtifactSnapshot {
   const bytes = Buffer.from(`// stub host artifact for ${pluginId}\n`);
   const path = join(tmpdir(), `bb-stub-host-artifact-${pluginId}.mjs`);
   writeFileSync(path, bytes);
@@ -144,34 +170,44 @@ function stubHostArtifact(pluginId: string): PluginHostArtifactSnapshot {
   };
 }
 
-/**
- * Builds and records the first-party provider bridge artifacts, exactly as the
- * plugin runtime does on load. Without this a graduated provider has no
- * `bridgeLaunch`, so the daemon has no bridge for it at all — which is the
- * whole point of the artifact route and therefore worth exercising rather
- * than stubbing. Bridges are rebuilt from source so a stale `dist/` cannot
- * make a test pass against yesterday's bridge.
- */
-export async function recordFirstPartyProviderBridgeArtifacts(
-  artifacts: PluginHostArtifactRegistry,
-): Promise<void> {
+const firstPartyBridgeArtifactBuilds = new Map<
+  string,
+  Promise<PluginHostArtifactSnapshot | null>
+>();
+
+async function buildFirstPartyBridgeArtifact(
+  pluginId: string,
+): Promise<PluginHostArtifactSnapshot | null> {
+  const rootDir = firstPartyPluginRootDir(pluginId);
+  if (!(await hasHostEntry(rootDir))) {
+    return null;
+  }
   const toolchain = await resolvePluginBuildToolchain(
     join(tmpdir(), "bb-plugin-build-toolchain"),
   );
+  const build = await buildPluginHost(rootDir, "0.0.0-test", toolchain);
+  const bytes = await readFile(build.jsPath);
+  return {
+    digest: build.artifactDigest,
+    byteLength: bytes.byteLength,
+    path: build.jsPath,
+    generation: `test-${pluginId}`,
+  };
+}
+
+export async function recordFirstPartyProviderBridgeArtifacts(
+  artifacts: PluginHostArtifactRegistry,
+): Promise<void> {
   for (const pluginId of FIRST_PARTY_PROVIDER_PLUGIN_IDS) {
-    const rootDir = pluginRootDir(pluginId);
-    // Pi has no `bb.host`: its bridge stays in the daemon bundle.
-    if (!(await hasHostEntry(rootDir))) {
-      continue;
+    let build = firstPartyBridgeArtifactBuilds.get(pluginId);
+    if (!build) {
+      build = buildFirstPartyBridgeArtifact(pluginId);
+      firstPartyBridgeArtifactBuilds.set(pluginId, build);
     }
-    const build = await buildPluginHost(rootDir, "0.0.0-test", toolchain);
-    const bytes = await readFile(build.jsPath);
-    artifacts.set(pluginId, {
-      digest: build.artifactDigest,
-      byteLength: bytes.byteLength,
-      path: build.jsPath,
-      generation: `test-${pluginId}`,
-    });
+    const snapshot = await build;
+    if (snapshot !== null) {
+      artifacts.set(pluginId, snapshot);
+    }
   }
 }
 
@@ -186,23 +222,34 @@ async function hasHostEntry(rootDir: string): Promise<boolean> {
   );
 }
 
-/** A registry holding the first-party providers, in product order. */
+export function declaredNativeRootSet(
+  registry: ProviderRegistryService,
+  providerId: string,
+): ProviderNativeRootSet {
+  const registration = registry.get(providerId);
+  if (registration === null) {
+    throw new Error(`provider "${providerId}" is not registered`);
+  }
+  return {
+    skills: registration.nativeSkillRoots,
+    commands: registration.nativeCommandRoots,
+    resolved: EMPTY_PROVIDER_RESOLVED_NATIVE_ROOTS,
+  };
+}
+
 export async function createTestProviderRegistry(): Promise<ProviderRegistryService> {
   const registry = createProviderRegistryService();
   await registerFirstPartyProviders(registry);
   return registry;
 }
 
-/**
- * A well-formed `bridgeLaunch` for tests that only need a valid command on the
- * wire — transport plumbing (hub routing, online-RPC retries) that never
- * launches a bridge. Tests about which bridge a provider actually resolves to
- * must go through `resolveBridgeLaunchForProviderId` instead.
- */
 export const TRANSPORT_TEST_BRIDGE_LAUNCH: HostDaemonBridgeLaunch = {
   pluginId: "provider-pi",
-  source: { kind: "daemon-bundled", id: "pi" },
+  source: { kind: "artifact", digest: "a".repeat(64), byteLength: 1 },
+  providerOptions: {},
+  envPassthrough: [],
   capabilities: {
+    providerInstallation: false,
     supportsServiceTier: false,
     permissionModes: ["full"],
     supportsThreadArchive: false,
@@ -211,25 +258,37 @@ export const TRANSPORT_TEST_BRIDGE_LAUNCH: HostDaemonBridgeLaunch = {
   },
 };
 
-/**
- * Provider ids the fake-stack integration tests create threads on. `fake` is
- * the default there; the alpha/beta pair exercises per-provider process
- * isolation.
- */
 const FAKE_PROVIDER_IDS = ["fake", "fake-alpha", "fake-beta"] as const;
 
-/**
- * Declare the fake providers into a registry with a stub bridge artifact each,
- * the way a real provider plugin would. Every bridge-bound command carries a
- * `bridgeLaunch`, so a provider with neither a declaration nor an artifact
- * cannot have a command built for it at all — while the daemon side of those
- * tests runs a fake adapter and never reads the launch. Capabilities are
- * permissive: those tests are about lifecycle, not policy.
- */
-export function registerFakeProviders(
+export function scriptedEchoProviderRootDir(): string {
+  return fileURLToPath(
+    new URL("../../../../tests/scripted-echo-provider", import.meta.url),
+  );
+}
+
+export async function buildScriptedEchoProviderArtifact(): Promise<PluginHostArtifactSnapshot> {
+  const toolchain = await resolvePluginBuildToolchain(
+    join(tmpdir(), "bb-plugin-build-toolchain"),
+  );
+  const build = await buildPluginHost(
+    scriptedEchoProviderRootDir(),
+    "0.0.0-test",
+    toolchain,
+  );
+  const bytes = await readFile(build.jsPath);
+  return {
+    digest: build.artifactDigest,
+    byteLength: bytes.byteLength,
+    path: build.jsPath,
+    generation: "test-scripted-echo",
+  };
+}
+
+export async function registerFakeProviders(
   registry: ProviderRegistryService,
   artifacts: PluginHostArtifactRegistry,
-): void {
+): Promise<void> {
+  const artifact = await buildScriptedEchoProviderArtifact();
   for (const providerId of FAKE_PROVIDER_IDS) {
     const pluginId = `provider-${providerId}`;
     registry.register({
@@ -239,22 +298,78 @@ export function registerFakeProviders(
         declaration: validatePluginProviderDeclaration({
           id: providerId,
           displayName: providerId,
+          maintenance: { health: true, usage: true, installation: false },
           capabilities: {
             supportsServiceTier: true,
-            supportsNativeUserQuestion: false,
+            supportsNativeUserQuestion: true,
             fork: "checkpoint",
             supportsManualCompaction: true,
             supportsThreadArchive: true,
             supportsThreadRename: true,
-            supportsWorkflows: true,
             permissionModes: ["accept-edits", "auto", "full"],
             reasoningLevels: ["low", "medium", "high"],
           },
           composerActions: ["plan", "goal"],
         }),
+        readSettings: NO_PLUGIN_SETTINGS,
       }),
       pluginId,
+      iconNames: new Set<string>(),
     });
-    artifacts.set(pluginId, stubHostArtifact(pluginId));
+    artifacts.set(pluginId, artifact);
+  }
+}
+
+export async function acpProviderDeclarationsFromSetting(
+  entries: readonly JsonValue[],
+): Promise<NormalizedPluginProviderDeclaration[]> {
+  const shipped = new Set(
+    (await captureFirstPartyProviderDeclarations("provider-acp")).map(
+      (declaration) => declaration.id,
+    ),
+  );
+  const withSetting = await captureFirstPartyProviderDeclarations(
+    "provider-acp",
+    {
+      settings: { customAgents: JSON.stringify(entries) },
+    },
+  );
+  const configured = withSetting.filter(
+    (declaration) => !shipped.has(declaration.id),
+  );
+  if (configured.length !== entries.length) {
+    throw new Error(
+      `the ACP plugin registered ${configured.length} of ${entries.length} configured agents; check the setting entries`,
+    );
+  }
+  return configured;
+}
+
+export async function configuredAcpProvider(
+  entry: Record<string, JsonValue>,
+): Promise<{ declaration: PluginProviderDeclaration; pluginId: string }> {
+  const [declaration] = await acpProviderDeclarationsFromSetting([entry]);
+  if (declaration === undefined) {
+    throw new Error("the ACP plugin registered no provider for this entry");
+  }
+  return { declaration, pluginId: "provider-acp" };
+}
+
+export async function registerConfiguredAcpProvider(
+  registry: ProviderRegistryService,
+  entry: Record<string, JsonValue>,
+): Promise<void> {
+  const pluginId = "provider-acp";
+  for (const declaration of await acpProviderDeclarationsFromSetting([entry])) {
+    registry.register({
+      ...buildPluginProviderRegistration({
+        available: true,
+        pluginId,
+        declaration,
+        readSettings: NO_PLUGIN_SETTINGS,
+      }),
+      pluginId,
+      iconNames: new Set<string>(),
+    });
   }
 }

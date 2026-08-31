@@ -38,7 +38,7 @@ import type {
 import type { AppDeps } from "../../src/types.js";
 import { registerTestHostRpcCapture } from "./commands.js";
 
-export interface SeedEventArgs<TType extends ThreadEventType> {
+interface SeedEventArgs<TType extends ThreadEventType> {
   createdAt?: number;
   data: StoredThreadEventDataForType<TType>;
   environmentId?: string | null;
@@ -49,12 +49,13 @@ export interface SeedEventArgs<TType extends ThreadEventType> {
   type: TType;
 }
 
-export interface SeedStoredEventArgs {
+interface SeedStoredEventArgs {
   createdAt?: number;
   data: Record<string, unknown>;
   environmentId?: string | null;
   itemId?: string | null;
   itemKind?: ThreadEventItemType | null;
+  parentToolCallId?: string | null;
   providerThreadId?: string | null;
   scope: ThreadEventScope;
   sequence: number;
@@ -62,7 +63,7 @@ export interface SeedStoredEventArgs {
   type: ThreadEventType;
 }
 
-export interface SeedTurnStartedArgs {
+interface SeedTurnStartedArgs {
   environmentId?: string | null;
   providerThreadId?: string;
   sequence?: number;
@@ -106,7 +107,7 @@ export function seedPrimaryHost(
 }
 
 export function seedSession(deps: Pick<AppDeps, "db" | "hub">, hostId: string) {
-  const session = openSession(deps.db, deps.hub, {
+  const session = openSession(deps.db, {
     hostId,
     instanceId: "instance-1",
     hostName: "Test Host",
@@ -287,10 +288,6 @@ export function seedEvent<TType extends ThreadEventType>(
   ]);
 }
 
-/**
- * Seeds a stored provider turn for tests that exercise server-side behavior
- * after daemon ingestion has already persisted turn/started.
- */
 export function seedTurnStarted(
   deps: Pick<AppDeps, "db" | "hub">,
   args: SeedTurnStartedArgs,
@@ -392,6 +389,7 @@ export function seedStoredEvent(
       type: args.type,
       itemId: args.itemId ?? null,
       itemKind: args.itemKind ?? null,
+      parentToolCallId: args.parentToolCallId ?? null,
       data: JSON.stringify(args.data),
     },
   ]);

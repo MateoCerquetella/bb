@@ -60,7 +60,6 @@ export async function provisionEnvironment(
       ? (resolvedDefaultBranch ?? branchName)
       : null;
 
-    // For fresh provisions, emit cwd (for unmanaged) and branch/SHA entries.
     if (!alreadyExists) {
       if (!entry.workspace.managed) {
         progress.onProgress({
@@ -80,9 +79,7 @@ export async function provisionEnvironment(
             branchText = `Using branch: ${branchName} (${sha.slice(0, 7)})`;
             metadata.sha = sha;
           }
-        } catch {
-          // SHA unavailable (e.g., empty repo)
-        }
+        } catch {}
         progress.onProgress({
           type: "step",
           key: "workspace-branch",
@@ -103,8 +100,6 @@ export async function provisionEnvironment(
       transcript: alreadyExists ? [] : transcript,
     };
   } finally {
-    // Flush buffered progress events before reporting the command result so
-    // streamed transcript entries stay ordered ahead of the terminal outcome.
     progress.flush();
     if (command.initiator) {
       await options.eventSink.flush();
@@ -177,7 +172,7 @@ function buildOnProgress(args: BuildOnProgressArgs): ProvisionProgressEmitter {
   };
 }
 
-export function toProvisionWorkspaceOptions(
+function toProvisionWorkspaceOptions(
   command: EnvironmentProvisionCommand,
   options: Pick<CommandDispatchOptions, "dataDir">,
   onProgress?: ProvisionProgressCallback,

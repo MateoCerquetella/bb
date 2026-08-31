@@ -1,12 +1,12 @@
 import { useCallback, useState } from "react";
 import type { RootComposeSelectedBranch } from "./root-compose-thread-environment";
 
-export interface BranchSelectionScopeArgs {
+interface BranchSelectionScopeArgs {
   environmentValue: string;
   projectId: string | undefined;
 }
 
-export interface UseScopedBranchSelectionResult {
+interface UseScopedBranchSelectionResult {
   onBranchChange: (name: string) => void;
   onClearBranch: () => void;
   onCreateBranch: (currentBranch: string | null) => void;
@@ -14,23 +14,15 @@ export interface UseScopedBranchSelectionResult {
   selectedBranch: RootComposeSelectedBranch | null;
 }
 
-// Identifies the picker's active scope. A null key means there is no usable
-// scope yet (missing project or environment), so branch picks are inert.
 export function getBranchSelectionScopeKey(
   args: BranchSelectionScopeArgs,
 ): string | null {
   if (!args.projectId || !args.environmentValue) {
     return null;
   }
-  // NUL separates the parts so distinct (project, environment) pairs can never
-  // collide into the same key.
   return `${args.projectId}\u0000${args.environmentValue}`;
 }
 
-// Carries a picked branch only while the scope is unchanged. Switching
-// environment mode (e.g. New Worktree -> Working Locally) or project changes
-// the scope key and drops the pick, so re-entering a mode re-seeds from its
-// fresh default instead of restoring a stale selection.
 export function carryBranchSelectionAcrossScope(args: {
   previousScopeKey: string | null;
   currentScopeKey: string | null;
@@ -58,8 +50,6 @@ export function useScopedBranchSelection(
     selectedBranch: selectedBranchState,
   });
 
-  // Reset during render (not in an effect) so a stale pick never paints for a
-  // frame before clearing when the scope changes.
   if (trackedScopeKey !== scopeKey) {
     setTrackedScopeKey(scopeKey);
     if (selectedBranchState !== null) {

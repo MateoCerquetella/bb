@@ -1,3 +1,4 @@
+import { spawnPortableProcess } from "@bb/process-utils";
 import { resolveSupervisorPidPath } from "./dev-restart-utils.js";
 import {
   removePidFileSync,
@@ -7,7 +8,6 @@ import {
 import {
   installTerminationSignalForwarding,
   killProcessIfRunning,
-  spawnScriptProcess,
   type ForwardedSignal,
   type ProcessExitResult,
   waitForProcessExit,
@@ -210,7 +210,7 @@ function createNodeTimer(
 function spawnNodeChildProcess(
   request: DevSupervisorChildSpawnRequest,
 ): DevSupervisorChildProcess {
-  const child = spawnScriptProcess({
+  const child = spawnPortableProcess({
     args: request.args,
     command: request.command,
     cwd: request.cwd,
@@ -405,8 +405,6 @@ export async function runDevSupervisorWithRuntime(
     }
 
     if (restartRequested) {
-      // Manual restarts represent fresh operator intent, even if they arrive
-      // while we are already backing off after a crash.
       restartRequested = false;
       unexpectedRestartAttempt = 0;
     }

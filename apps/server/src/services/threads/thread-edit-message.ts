@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, desc, eq, lt, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import {
   deleteThreadEventSuffixInTransaction,
   events,
@@ -12,7 +12,12 @@ import {
   listActiveBackgroundTaskCountsByThreadIds,
   type DbQueryConnection,
 } from "@bb/db";
-import { threadScope, type Thread, type ThreadEvent } from "@bb/domain";
+import {
+  threadScope,
+  type PromptInput,
+  type Thread,
+  type ThreadEvent,
+} from "@bb/domain";
 import type {
   EditMessageRequest,
   EditMessageResponse,
@@ -45,6 +50,7 @@ import {
   sendThreadMessage,
 } from "./thread-send.js";
 import { requestThreadStopForCurrentState } from "./thread-lifecycle.js";
+import { getLeadingAgentOnlyInput } from "./deferred-first-turn-context.js";
 
 type ThreadRewindPrepareCommand = Extract<
   HostDaemonCommand,
@@ -52,6 +58,7 @@ type ThreadRewindPrepareCommand = Extract<
 >;
 
 interface EditableTurn {
+  leadingAgentOnlyInput: PromptInput[];
   currentTurnId: string;
   oldMaxSequence: number;
   precedingProviderCheckpoint: string | null;
@@ -174,6 +181,23 @@ function getTurnCompletion(
   return event.type === "turn/completed" ? event : null;
 }
 
+const CODEX_NATIVE_TURN_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function resolveTurnProviderCheckpointId(args: {
+  providerCheckpointId: string | null | undefined;
+  providerId: string;
+  turnId: string;
+}): string | null {
+  if (args.providerCheckpointId) {
+    return args.providerCheckpointId;
+  }
+  return args.providerId === "codex" &&
+    CODEX_NATIVE_TURN_ID_PATTERN.test(args.turnId)
+    ? args.turnId
+    : null;
+}
+
 function resolveEditableTurnCandidate(
   db: DbQueryConnection,
   thread: Thread,
@@ -242,7 +266,7 @@ function resolveEditableTurnCandidate(
         eq(events.threadId, thread.id),
         eq(events.type, "turn/started"),
         lt(events.sequence, requestRow.sequence),
-        sql`COALESCE(json_extract(${events.data}, '$.parentToolCallId'), '') = ''`,
+        isNull(events.parentToolCallId),
       ),
     )
     .orderBy(desc(events.sequence))
@@ -263,13 +287,16 @@ function resolveEditableTurnCandidate(
   const precedingProviderCheckpoint =
     precedingTurnId === null
       ? null
-      : thread.providerId === "codex"
-        ? precedingTurnId
-        : (precedingCompletion?.providerCheckpointId ?? null);
+      : resolveTurnProviderCheckpointId({
+          providerCheckpointId: precedingCompletion?.providerCheckpointId,
+          providerId: thread.providerId,
+          turnId: precedingTurnId,
+        });
   if (precedingTurnId !== null && precedingProviderCheckpoint === null) {
     conflict("This earlier provider turn has no editable history checkpoint");
   }
   return {
+    leadingAgentOnlyInput: getLeadingAgentOnlyInput(request.input),
     currentTurnId: accepted.turnId,
     oldMaxSequence: getHighWaterMarks(db, [thread.id])[thread.id] ?? 0,
     precedingProviderCheckpoint,
@@ -368,8 +395,6 @@ function rewindPrepareCommandFromStart(
     sourceProviderThreadId: string;
   },
 ): ThreadRewindPrepareCommand {
-  // The daemon parses commands strictly, so every start-only field must stay
-  // in this destructure — the rest is exactly the shared runtime context.
   const {
     type: _type,
     requestId: _requestId,
@@ -393,9 +418,6 @@ export async function editThreadMessage(
   if (!getExperiments(deps.db).editMessages) {
     conflict("Enable the Edit messages experiment before editing a message");
   }
-  // Rewinding to an earlier point in the provider session is what an edit
-  // is, so the provider's declared rewind support gates it. Fork alone is
-  // not enough — ACP clones whole sessions tip-only.
   if (!deps.providerRegistry.supportsSessionRewind(args.thread.providerId)) {
     conflict(`Editing messages is not supported for ${args.thread.providerId}`);
   }
@@ -446,12 +468,9 @@ export async function editThreadMessage(
   await ensureHostSessionReadyForWork(deps, {
     hostId: readyEnvironment.hostId,
   });
-  const execution = await buildExecutionOptions(
-    deps,
-    args.payload,
-    { threadId: editableThread.id },
-    "client/turn/requested",
-  );
+  const execution = await buildExecutionOptions(deps, args.payload, {
+    threadId: editableThread.id,
+  });
 
   let stagedProviderThreadId: string | null = null;
   let rewindLeaseId: string | null = null;
@@ -467,7 +486,6 @@ export async function editThreadMessage(
       requestId: createClientTurnRequestId(),
       execution,
       permissionEscalation: resolvePermissionEscalation({
-        thread: editableThread,
         initiator,
       }),
       environment: readyEnvironment,
@@ -576,7 +594,11 @@ export async function editThreadMessage(
           ? { onCommandSettled: discardStagedRewind }
           : {}),
       },
-      payload: { ...sendPayload, mode: "start" },
+      payload: {
+        ...sendPayload,
+        input: [...target.leadingAgentOnlyInput, ...sendPayload.input],
+        mode: "start",
+      },
       thread: editableThread,
       trigger: "user",
     });

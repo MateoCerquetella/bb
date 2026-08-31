@@ -65,15 +65,12 @@ const sleep: Sleep = (durationMs) =>
   });
 
 async function settleAsyncWatchWork(): Promise<void> {
-  // Let watcher startup/retry microtasks finish before restoring shared spies.
   await Promise.resolve();
   await sleep(0);
   await Promise.resolve();
 }
 
-function ignoreWatchError(): void {
-  // Ignore watcher warnings in tests that assert only change callbacks.
-}
+function ignoreWatchError(): void {}
 
 async function runGit(
   args: RunGitArgs,
@@ -392,7 +389,6 @@ afterEach(async () => {
   );
 });
 
-// These tests mutate shared module spies, so keep them out of Vitest parallelism.
 describe.sequential("watchWorkspaceStatus", () => {
   it("starts watching before git init and promotes the repository watch", async () => {
     const workspacePath = await makeTempDir("bb-workspace-plain-");
@@ -420,7 +416,8 @@ describe.sequential("watchWorkspaceStatus", () => {
 
     try {
       await ready.promise;
-      expect(workspaceRootOptions[0]?.ignore).toBeUndefined();
+      expect(workspaceRootOptions[0]?.ignore).not.toContain(".git");
+      expect(workspaceRootOptions[0]?.ignore).toContain("*/**/.git/**");
 
       await runGit({ args: ["init", "-b", "main"], cwd: workspacePath });
       const canonicalWorkspacePath = await fs.realpath(workspacePath);
@@ -732,6 +729,10 @@ describe.sequential("watchWorkspaceStatus", () => {
       await ready;
       expect(getWorkspaceRootSubscribeOptions()?.ignore).toEqual([
         ".git",
+        "*/**/.git/**",
+        "**/node_modules/**",
+        "**/.cache/**",
+        "**/__pycache__/**",
         ".turbo",
         "coverage",
       ]);
@@ -785,7 +786,13 @@ describe.sequential("watchWorkspaceStatus", () => {
       expect(ignoreDiscoveryErrors).toHaveLength(1);
       expect(ignoreDiscoveryErrors[0]).toContain(normalizeWatchPath(repoPath));
       expect(subscribedRoots).toEqual([normalizeWatchPath(repoPath)]);
-      expect(subscribedOptions[0]?.ignore).toEqual([".git"]);
+      expect(subscribedOptions[0]?.ignore).toEqual([
+        ".git",
+        "*/**/.git/**",
+        "**/node_modules/**",
+        "**/.cache/**",
+        "**/__pycache__/**",
+      ]);
     } finally {
       await stopWatching();
     }

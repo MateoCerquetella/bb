@@ -17,7 +17,7 @@ import { appToast } from "@/components/ui/app-toast";
 import { BbHttpError } from "@/lib/sdk";
 import type { InlineQueuedMessageEditState } from "./useInlineQueuedMessageEditing";
 
-export type QueuedMessageSendGuard = "current-head" | "exists" | "none";
+type QueuedMessageSendGuard = "current-head" | "exists" | "none";
 
 interface SendQueuedMessageByIdArgs {
   guard: QueuedMessageSendGuard;
@@ -25,28 +25,18 @@ interface SendQueuedMessageByIdArgs {
 }
 
 interface UseQueuedMessageActionsArgs {
-  /** The thread owning the queue. Null disables every action. */
-  threadId: string | null;
+  threadId: string;
   queuedMessages: readonly ThreadQueuedMessage[];
-  /**
-   * How long a steered ("send now") message keeps its "Sending..." label:
-   * `until-left-queue` holds it until the message leaves the queue (the steer
-   * surfaced in the timeline) so the row never flashes back to normal;
-   * `clear-on-settle` clears when the send request settles.
-   */
   sendProcessingPersistence: "clear-on-settle" | "until-left-queue";
-  /** Extra guard evaluated before a send-now besides thread existence. */
   canSendNow?: () => boolean;
   onSendSuccess?: () => void;
   onSaveSuccess?: () => void;
   inlineEditingQueuedMessage: InlineQueuedMessageEditState | null;
   dismissInlineQueuedMessageEditor: () => void;
-  /** The inline edit draft's current prompt input (for saving the edit). */
   activeComposerDraftInput: PromptInput[];
 }
 
-export interface UseQueuedMessageActionsResult {
-  /** The processing state QueuedMessagesList should display. */
+interface UseQueuedMessageActionsResult {
   processingQueuedMessage: {
     action: QueuedMessageProcessingAction;
     id: string;
@@ -63,11 +53,6 @@ export interface UseQueuedMessageActionsResult {
   ) => void;
 }
 
-/**
- * The queued-message row actions shared by every thread-chat composer: send
- * now, inline-edit save, delete, reorder, and group boundaries, with a single
- * per-message processing state driving the row spinners.
- */
 export function useQueuedMessageActions({
   threadId,
   queuedMessages,
@@ -107,7 +92,7 @@ export function useQueuedMessageActions({
 
   const sendQueuedMessageById = useCallback(
     async ({ guard, messageId }: SendQueuedMessageByIdArgs) => {
-      if (threadId === null || (canSendNow !== undefined && !canSendNow())) {
+      if (canSendNow !== undefined && !canSendNow()) {
         return;
       }
       if (
@@ -136,8 +121,6 @@ export function useQueuedMessageActions({
             current?.id === messageId ? null : current,
           );
         }
-        // With `until-left-queue`, the displayed processing state clears via
-        // derivation once the message leaves the queue.
       } catch (error) {
         appToast.error(
           getMutationErrorMessage({
@@ -169,7 +152,6 @@ export function useQueuedMessageActions({
 
   const handleSaveInlineQueuedMessage = useCallback(async () => {
     if (
-      threadId === null ||
       !inlineEditingQueuedMessage ||
       activeComposerDraftInput.length === 0 ||
       updateQueuedMessage.isPending
@@ -224,9 +206,6 @@ export function useQueuedMessageActions({
 
   const handleDeleteQueuedMessage = useCallback(
     (queuedMessageId: string) => {
-      if (threadId === null) {
-        return;
-      }
       setProcessingQueuedMessage({ id: queuedMessageId, action: "delete" });
       void deleteQueuedMessage
         .mutateAsync({
@@ -253,9 +232,6 @@ export function useQueuedMessageActions({
 
   const handleReorderQueuedMessage = useCallback(
     (request: QueuedMessageReorderRequest) => {
-      if (threadId === null) {
-        return;
-      }
       void reorderQueuedMessage
         .mutateAsync({
           ...request,
@@ -276,9 +252,6 @@ export function useQueuedMessageActions({
 
   const handleSetQueuedMessageGroupBoundary = useCallback(
     (request: QueuedMessageGroupBoundaryRequest) => {
-      if (threadId === null) {
-        return;
-      }
       void setQueuedMessageGroupBoundary
         .mutateAsync({
           id: threadId,

@@ -18,12 +18,10 @@ import { useCliSkillsStatus } from "@/hooks/queries/system-queries";
 
 const CLI_SKILLS_SETTING_LABEL = "bb CLI skills";
 
-export interface CliSkillsSettingsSectionContentProps {
-  /** False while no machine is connected, so nothing could receive the files. */
+interface CliSkillsSettingsSectionContentProps {
   hasConnectedMachine: boolean;
   onOpenPicker: () => void;
   pending: boolean;
-  /** Summary badge for the row; null while unknown or still loading. */
   statusBadge: string | null;
 }
 
@@ -33,11 +31,6 @@ function installDescription(hasConnectedMachine: boolean): string {
     : "Connect a machine to install them into ~/.agents/skills and ~/.claude/skills.";
 }
 
-/**
- * One badge for the whole row. With several machines the interesting fact is
- * how many are current, so a mixed fleet reports the shortfall rather than
- * claiming either extreme.
- */
 export function summarizeMachineStatuses(
   statuses: readonly CliSkillMachineStatus[],
 ): string | null {
@@ -85,13 +78,7 @@ export function CliSkillsSettingsSectionContent({
   );
 }
 
-/**
- * Report the per-machine outcome. The route installs machines independently,
- * so a partial success is a real outcome and both halves get surfaced.
- */
-export function reportInstallResults(
-  result: SystemInstallCliSkillsResponse,
-): void {
+function reportInstallResults(result: SystemInstallCliSkillsResponse): void {
   const installed = result.results.filter((entry) => entry.ok);
   const failed = result.results.filter((entry) => !entry.ok);
   if (installed.length > 0) {
@@ -114,12 +101,6 @@ function statusByHostId(
   );
 }
 
-/**
- * Publish bb's built-in CLI skills to chosen machines' global agent skill roots
- * so agents running outside bb can drive it. Gated on a connected machine, not
- * on whether this browser can reach a daemon itself (it cannot when bb is open
- * remotely) — the install runs server-side over each machine's daemon session.
- */
 export function CliSkillsSettingsSection() {
   const hostsQuery = useHosts();
   const statusQuery = useCliSkillsStatus();

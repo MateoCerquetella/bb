@@ -1,58 +1,46 @@
 import type { ThreadEvent } from "@bb/domain";
 import type { AgentRuntimeProviderSession } from "./types.js";
 
-interface PendingIdentityWaiter {
-  resolve: (providerThreadId: string | null) => void;
-  timeout: ReturnType<typeof setTimeout>;
-}
-
 export interface RuntimeProviderIdentityState {
-  identityWaiters: Map<string, PendingIdentityWaiter>;
   pendingIdentityThreadIds: string[];
   providerId: string;
   threadIds: Set<string>;
 }
 
-export interface CreateRuntimeProviderIdentityStateArgs {
+interface CreateRuntimeProviderIdentityStateArgs {
   providerId: string;
 }
 
-export interface RegisterThreadProviderArgs {
+interface RegisterThreadProviderArgs {
   providerId: string;
   providerState: RuntimeProviderIdentityState;
-  shouldWaitForProviderIdentity: boolean;
+  expectsIdentityNotification: boolean;
   threadId: string;
 }
 
-export interface RecordProviderThreadIdentityArgs {
+interface RecordProviderThreadIdentityArgs {
   providerState: RuntimeProviderIdentityState;
   providerThreadId: string;
   threadId: string;
 }
 
-export interface ResolveBbThreadIdForProviderThreadArgs {
+interface ResolveBbThreadIdForProviderThreadArgs {
   providerState: RuntimeProviderIdentityState;
   providerThreadId: string | undefined;
 }
 
-export interface WaitForProviderThreadIdentityArgs {
-  providerState: RuntimeProviderIdentityState;
-  threadId: string;
-  timeoutMs: number;
-}
-
-export interface ForgetThreadArgs {
+interface ForgetThreadArgs {
   providerState: RuntimeProviderIdentityState;
   threadId: string;
 }
 
-export interface ResolveProviderEventThreadIdArgs {
+interface ResolveProviderEventThreadIdArgs {
   eventThreadId: string | undefined;
   providerState: RuntimeProviderIdentityState;
   sourceThreadId: string | undefined;
 }
 
-export interface StampThreadEventScopeArgs {
+interface StampThreadEventScopeArgs {
   event: ThreadEvent;
   providerThreadId: string | undefined;
   threadId: string;
@@ -66,7 +54,6 @@ export class RuntimeThreadIdentityRegistry {
     args: CreateRuntimeProviderIdentityStateArgs,
   ): RuntimeProviderIdentityState {
     return {
-      identityWaiters: new Map(),
       pendingIdentityThreadIds: [],
       providerId: args.providerId,
       threadIds: new Set(),
@@ -76,7 +63,7 @@ export class RuntimeThreadIdentityRegistry {
   registerThreadProvider(args: RegisterThreadProviderArgs): void {
     this.threadToProvider.set(args.threadId, args.providerId);
     args.providerState.threadIds.add(args.threadId);
-    if (args.shouldWaitForProviderIdentity) {
+    if (args.expectsIdentityNotification) {
       args.providerState.pendingIdentityThreadIds.push(args.threadId);
     }
   }
@@ -104,33 +91,6 @@ export class RuntimeThreadIdentityRegistry {
 
   recordProviderThreadIdentity(args: RecordProviderThreadIdentityArgs): void {
     this.threadToProviderThread.set(args.threadId, args.providerThreadId);
-    const waiter = args.providerState.identityWaiters.get(args.threadId);
-    if (!waiter) {
-      return;
-    }
-    clearTimeout(waiter.timeout);
-    args.providerState.identityWaiters.delete(args.threadId);
-    waiter.resolve(args.providerThreadId);
-  }
-
-  waitForProviderThreadIdentity(
-    args: WaitForProviderThreadIdentityArgs,
-  ): Promise<string | null> {
-    const existing = this.threadToProviderThread.get(args.threadId);
-    if (existing) {
-      return Promise.resolve(existing);
-    }
-
-    return new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        args.providerState.identityWaiters.delete(args.threadId);
-        resolve(null);
-      }, args.timeoutMs);
-      args.providerState.identityWaiters.set(args.threadId, {
-        resolve,
-        timeout,
-      });
-    });
   }
 
   resolveBbThreadIdForProviderThread(
@@ -183,11 +143,6 @@ export class RuntimeThreadIdentityRegistry {
       }
     }
 
-    // Last resort for bridges that do not echo an id the runtime can match: a
-    // process serving exactly one thread has only one place to put the event.
-    // Never for an id that names ANOTHER live thread, though — that is a
-    // bridge reporting on a session it does not own, and attributing it here
-    // would write one thread's work into another's timeline.
     if (
       args.providerState.threadIds.size === 1 &&
       !this.namesForeignThread(args.providerState, args.eventThreadId) &&
@@ -223,44 +178,13 @@ export class RuntimeThreadIdentityRegistry {
     this.threadToProviderThread.delete(threadId);
   }
 
-  /**
-   * Fully detaches one thread from a still-running provider process: clears
-   * the identity maps, drops the thread from the provider's bookkeeping, and
-   * resolves any pending identity waiter with `null`. Used when a thread ends
-   * its residency (stop/archive) while the provider process keeps serving
-   * other threads.
-   */
   forgetThread(args: ForgetThreadArgs): void {
     args.providerState.threadIds.delete(args.threadId);
     args.providerState.pendingIdentityThreadIds =
       args.providerState.pendingIdentityThreadIds.filter(
         (pendingThreadId) => pendingThreadId !== args.threadId,
       );
-    const waiter = args.providerState.identityWaiters.get(args.threadId);
-    if (waiter) {
-      clearTimeout(waiter.timeout);
-      args.providerState.identityWaiters.delete(args.threadId);
-      waiter.resolve(null);
-    }
     this.clearThread(args.threadId);
-  }
-
-  clearProviderState(providerState: RuntimeProviderIdentityState): void {
-    providerState.pendingIdentityThreadIds = [];
-    for (const threadId of providerState.threadIds) {
-      this.clearThread(threadId);
-    }
-    this.resolvePendingIdentityWaiters(providerState);
-  }
-
-  resolvePendingIdentityWaiters(
-    providerState: RuntimeProviderIdentityState,
-  ): void {
-    for (const [threadId, waiter] of providerState.identityWaiters) {
-      clearTimeout(waiter.timeout);
-      providerState.identityWaiters.delete(threadId);
-      waiter.resolve(null);
-    }
   }
 }
 

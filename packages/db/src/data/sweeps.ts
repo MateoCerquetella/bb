@@ -3,28 +3,26 @@ import {
   and,
   sql,
   lt,
-  inArray,
+  asc,
 } from "drizzle-orm";
 import { type ThreadEventItemType } from "@bb/domain";
 import type { DbConnection } from "../connection.js";
 import type { DbNotifier } from "../notifier.js";
 import { environments, maintenanceScanCursors } from "../schema.js";
 
-/** Destroyed environments are hard-deleted after 7 days. */
-const DESTROYED_ENVIRONMENT_TTL_MS = 7 * 24 * 60 * 60_000;
+export const DESTROYED_ENVIRONMENT_TTL_MS = 7 * 24 * 60 * 60_000;
 
-/** Closed daemon session rows are retained briefly for debugging/history. */
 export const CLOSED_SESSION_ROW_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
-/** Completed item output remains inspectable, but old large blobs are bounded. */
 export const COMPLETED_EVENT_OUTPUT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 
 export const COMPLETED_EVENT_OUTPUT_TRUNCATION_THRESHOLD_CHARS = 32 * 1024;
 export const COMPLETED_EVENT_OUTPUT_RETAINED_HEAD_CHARS = 2 * 1024;
 export const COMPLETED_EVENT_OUTPUT_RETAINED_TAIL_CHARS = 2 * 1024;
-export const COMPLETED_EVENT_OUTPUT_TRUNCATION_CURSOR_VERSION = 1;
+const COMPLETED_EVENT_OUTPUT_TRUNCATION_CURSOR_VERSION = 1;
 export const DEFAULT_CLOSED_SESSION_PRUNE_BATCH_SIZE = 1_000;
 export const DEFAULT_COMPLETED_EVENT_OUTPUT_TRUNCATION_BATCH_SIZE = 250;
+export const DEFAULT_DESTROYED_ENVIRONMENT_PRUNE_BATCH_SIZE = 10;
 
 const COMPLETED_EVENT_OUTPUT_TRUNCATION_MARKER =
   "\n\n[... output truncated by retention policy; showing beginning and end ...]\n\n";
@@ -88,6 +86,15 @@ export interface PruneClosedSessionsResult {
   deleted: number;
 }
 
+export interface PruneDestroyedEnvironmentsArgs {
+  updatedBefore: number;
+  limit: number;
+}
+
+export interface PruneDestroyedEnvironmentsResult {
+  deleted: number;
+}
+
 export interface TruncateCompletedEventItemOutputsArgs {
   createdBefore: number;
   limit: number;
@@ -105,8 +112,6 @@ export function pruneClosedSessions(
   db: DbConnection,
   args: PruneClosedSessionsArgs,
 ): PruneClosedSessionsResult {
-  // Keep the prune plan pinned to the retention index; this path runs
-  // periodically and can otherwise regress into a scan plus temp sort.
   const result = db.$client
     .prepare<ClosedSessionDeleteParameters>(
       `
@@ -329,18 +334,6 @@ export function truncateCompletedEventItemOutputs(
   };
 }
 
-/**
- * Sweep retiring managed environments with zero non-archived threads.
- * Returns the list of environment records that are candidates for cleanup.
- * The caller decides what to do (e.g., queue destroy commands).
- *
- * The archive grace window (delay a retiring environment's destroy so an
- * accidental archive can be undone) is enforced by the server in
- * `advanceEnvironmentCleanup`, not here: this sweep returns a candidate as soon
- * as it is retiring with no live threads, and the advance defers the actual
- * destroy until the grace window elapses. Keeping the grace check in one place
- * (the advance) avoids splitting the policy across the db query.
- */
 export function sweepManagedEnvironments(db: DbConnection) {
   const rows = db
     .select()
@@ -365,33 +358,30 @@ export function sweepManagedEnvironments(db: DbConnection) {
 export function pruneDestroyedEnvironments(
   db: DbConnection,
   notifier: DbNotifier,
-  now?: number,
-) {
-  const currentTime = now ?? Date.now();
+  args: PruneDestroyedEnvironmentsArgs,
+): PruneDestroyedEnvironmentsResult {
+  if (args.limit <= 0) {
+    return { deleted: 0 };
+  }
+
   const staleEnvironmentIds = db
     .select({ id: environments.id })
     .from(environments)
     .where(
       and(
         eq(environments.status, "destroyed"),
-        lt(environments.updatedAt, currentTime - DESTROYED_ENVIRONMENT_TTL_MS),
+        lt(environments.updatedAt, args.updatedBefore),
       ),
     )
+    .orderBy(asc(environments.updatedAt), asc(environments.id))
+    .limit(args.limit)
     .all()
     .map((environment) => environment.id);
 
-  if (staleEnvironmentIds.length === 0) {
-    return { deleted: 0 };
-  }
-
-  db.delete(environments)
-    .where(inArray(environments.id, staleEnvironmentIds))
-    .run();
   for (const environmentId of staleEnvironmentIds) {
+    db.delete(environments).where(eq(environments.id, environmentId)).run();
     notifier.notifyEnvironment(environmentId, ["environment-deleted"]);
   }
 
-  return {
-    deleted: staleEnvironmentIds.length,
-  };
+  return { deleted: staleEnvironmentIds.length };
 }

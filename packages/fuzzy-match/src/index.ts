@@ -1,23 +1,23 @@
 import { Fzf } from "fzf";
 import type { FzfResultItem, Selector, Tiebreaker } from "fzf";
 
-export type FuzzyPathGetter<T> = (item: T) => string;
-export type FuzzyTextGetter<T> = (item: T) => string | readonly string[];
+type FuzzyPathGetter<T> = (item: T) => string;
+type FuzzyTextGetter<T> = (item: T) => string | readonly string[];
 
-export interface FuzzyMatch<T> {
+interface FuzzyMatch<T> {
   item: T;
   score: number;
   positions: number[];
 }
 
-export interface FuzzyMatchPathsArgs<T> {
+interface FuzzyMatchPathsArgs<T> {
   items: readonly T[];
   query: string;
   getPath: FuzzyPathGetter<T>;
   limit: number;
 }
 
-export interface FuzzyMatchTextArgs<T> {
+interface FuzzyMatchTextArgs<T> {
   items: readonly T[];
   query: string;
   getText: FuzzyTextGetter<T>;
@@ -93,12 +93,6 @@ enum PathIntentRank {
   ExactDirectoryPrefix = 3,
 }
 
-/**
- * `fzf` is the only fuzzy alignment engine here. Path-specific behavior is a
- * small intent layer around it: directory scopes and segment searches outrank a
- * plain full-path fuzzy match, while the fzf score still orders candidates
- * inside each intent.
- */
 const PATH_INTENT_SCORE = {
   rankUnit: 1_000_000,
   directorySegmentExact: 30_000,

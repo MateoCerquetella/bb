@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { UPDATE_ACTION_ICON } from "@bb/domain/update-state";
 import { Button } from "@bb/shared-ui/button";
 import {
   Dialog,
@@ -27,19 +28,12 @@ import {
   SUCCESS_TEXT_STYLE,
 } from "./plugin-ui";
 
-export interface UpdatePluginDialogProps {
+interface UpdatePluginDialogProps {
   plugin: PluginListItem;
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-/**
- * Layer 3 update confirmation (sketch v2, dialogs C): verdict first, checks
- * collapsed, rollback promise always visible. The incompatible variant
- * arrives with details pre-expanded and Update disabled — the details are
- * the story. Persisted and in-session rolled-back outcomes render in place
- * with their recovery action instead of being reduced to tooltip history.
- */
 export function UpdatePluginDialog({
   plugin,
   open,
@@ -194,7 +188,7 @@ function UpdatePluginDialogContent({
       <>
         <DialogHeader>
           <DialogTitle>
-            {/* Hashes shorten here; the details grid keeps the full value. */}
+            {}
             Update {name} to {displayPluginVersion(candidate)}?
           </DialogTitle>
           <DialogDescription>{fromLine}</DialogDescription>
@@ -237,7 +231,9 @@ function UpdatePluginDialogContent({
           >
             {update.isPending ? (
               <Icon name="Spinner" className="animate-spin" />
-            ) : null}
+            ) : (
+              <Icon name={UPDATE_ACTION_ICON} aria-hidden />
+            )}
             Update
           </Button>
         </DialogFooter>
@@ -267,7 +263,7 @@ function UpdatePluginDialogContent({
               bb
             </span>
           </div>
-          {/* Failure case: the details ARE the story, so they arrive open. */}
+          {}
           <DetailsDisclosure summary="Details" defaultExpanded>
             <div className="space-y-1.5">
               {state.blockedReasons.length > 0 ? (
@@ -303,6 +299,7 @@ function UpdatePluginDialogContent({
             Close
           </Button>
           <Button type="button" disabled>
+            <Icon name={UPDATE_ACTION_ICON} aria-hidden />
             Update
           </Button>
         </DialogFooter>

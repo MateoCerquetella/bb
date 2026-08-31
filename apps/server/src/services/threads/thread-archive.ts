@@ -6,6 +6,10 @@ import {
 import type { Environment, Thread } from "@bb/domain";
 import type { AppDeps } from "../../types.js";
 import {
+  threadEnvironmentUnavailableDetails,
+  throwThreadEnvironmentUnavailable,
+} from "../lib/lifecycle-api-errors.js";
+import {
   requestEnvironmentCleanup,
   requestEnvironmentCleanupAdvance,
   wouldCleanupEnvironment,
@@ -21,13 +25,21 @@ import {
 } from "./thread-lifecycle.js";
 import { archiveThreadAndReleaseChildren } from "./thread-ownership.js";
 import { requireThreadHostCommandEnvironment } from "./thread-command-environment.js";
+import { getActiveThreadProvisionContext } from "./thread-provisioning-active-context.js";
+import { isPreStartThreadStatus } from "./thread-status.js";
+
+interface ArchiveThreadEnvironment {
+  hostId: string;
+  id: string;
+}
 
 interface ArchiveThreadWithLifecycleEffectsArgs {
-  environment: {
-    hostId: string;
-    id: string;
-  };
+  environment: ArchiveThreadEnvironment | null;
   thread: Pick<Thread, "environmentId" | "id" | "status">;
+}
+
+interface ResolveArchiveThreadEnvironmentArgs {
+  thread: ArchiveThreadWithLifecycleEffectsArgs["thread"];
 }
 
 interface ArchiveEnvironmentThreadsArgs {
@@ -38,7 +50,29 @@ interface ArchiveThreadAndChildrenArgs {
   parentThread: Thread;
 }
 
-export function archiveThreadWithLifecycleEffects(
+export function resolveArchiveThreadEnvironment(
+  deps: Pick<AppDeps, "db">,
+  args: ResolveArchiveThreadEnvironmentArgs,
+): ArchiveThreadEnvironment | null {
+  if (args.thread.environmentId !== null) {
+    return requireThreadHostCommandEnvironment({
+      db: deps.db,
+      thread: args.thread,
+    });
+  }
+  if (
+    isPreStartThreadStatus(args.thread.status) ||
+    args.thread.status === "stopping" ||
+    getActiveThreadProvisionContext(args.thread.id) !== null
+  ) {
+    throwThreadEnvironmentUnavailable(
+      threadEnvironmentUnavailableDetails("never_attached", null),
+    );
+  }
+  return null;
+}
+
+function archiveThreadWithLifecycleEffects(
   deps: AppDeps,
   args: ArchiveThreadWithLifecycleEffectsArgs,
 ): Thread | null {
@@ -52,13 +86,13 @@ export function archiveThreadWithLifecycleEffects(
   deps.terminalSessions.closeArchivedThreadTerminals({
     threadId: archivedThread.id,
   });
-  // Archive only stops active runtime work; manual stop is the pre-start
-  // provisioning cancellation entrypoint.
-  requestActiveRuntimeThreadStopIfNeeded(
-    deps,
-    archivedThread,
-    args.environment,
-  );
+  if (args.environment !== null) {
+    requestActiveRuntimeThreadStopIfNeeded(
+      deps,
+      archivedThread,
+      args.environment,
+    );
+  }
   dispatchSettledArchivedThreadProviderArchiveCommand(deps, {
     threadId: archivedThread.id,
   });
@@ -72,12 +106,6 @@ export function archiveThreadWithLifecycleEffects(
   return archivedThread;
 }
 
-/**
- * Archive one thread plus the hidden forks that retire with it. A hidden fork
- * (a side chat, say) has no row of its own to reach, so it must not outlive its
- * source. Structural rather than plugin-owned: archiving cannot depend on
- * whichever plugin created the fork still being enabled.
- */
 export function archiveThreadAndHiddenSourceForks(
   deps: AppDeps,
   args: ArchiveThreadWithLifecycleEffectsArgs,
@@ -90,10 +118,7 @@ export function archiveThreadAndHiddenSourceForks(
     sourceThreadId: archivedThread.id,
   })) {
     archiveThreadWithLifecycleEffects(deps, {
-      environment: requireThreadHostCommandEnvironment({
-        db: deps.db,
-        thread: fork,
-      }),
+      environment: resolveArchiveThreadEnvironment(deps, { thread: fork }),
       thread: fork,
     });
   }
@@ -144,8 +169,6 @@ export function archiveThreadAndChildren(
   const childThreads = listUnarchivedAssignedChildThreads(deps.db, {
     parentThreadId: args.parentThread.id,
   });
-  // Collected here rather than through archiveThreadAndHiddenSourceForks so
-  // every cascaded id lands in this route's response.
   const hiddenSourceThreads = listUnarchivedHiddenSourceThreads(deps.db, {
     sourceThreadId: args.parentThread.id,
   });
@@ -160,10 +183,7 @@ export function archiveThreadAndChildren(
   const affectedEnvironmentIds = new Set<string>();
 
   for (const thread of threads) {
-    const environment = requireThreadHostCommandEnvironment({
-      db: deps.db,
-      thread,
-    });
+    const environment = resolveArchiveThreadEnvironment(deps, { thread });
     const result = archiveThreadWithLifecycleEffects(deps, {
       environment,
       thread,
@@ -172,7 +192,9 @@ export function archiveThreadAndChildren(
       continue;
     }
     archivedThreadIds.push(result.id);
-    affectedEnvironmentIds.add(environment.id);
+    if (environment !== null) {
+      affectedEnvironmentIds.add(environment.id);
+    }
   }
 
   for (const environmentId of affectedEnvironmentIds) {

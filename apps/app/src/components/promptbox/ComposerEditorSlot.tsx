@@ -7,30 +7,25 @@ import {
   type PromptMentionLinkResolver,
 } from "./editor/prompt-mention-link";
 
-export type ComposerEditorLayout = "thread" | "root-compose";
+type ComposerEditorLayout = "thread" | "root-compose";
 
 const COMPOSER_EDITOR_MAX_HEIGHT_BY_LAYOUT: Record<
   ComposerEditorLayout,
   string
 > = {
-  thread: "50dvh",
-  "root-compose": "70dvh",
+  thread: "calc(50dvh - 3rem)",
+  "root-compose": "calc(70dvh - 3rem)",
 };
 
-// TipTap's `blur` command defers to the next animation frame, so blur the
-// editor DOM directly and drop the caret with it.
 function blurComposerEditor(editor: Editor): void {
   editor.view.dom.blur();
   window.getSelection()?.removeAllRanges();
 }
 
-/** BB's editor region with the effects already resolved by the Composer host. */
 export function ComposerEditorSlot({
   editor,
   scrollContainerRef,
   inputLocked,
-  isZenMode,
-  hasCompactControls,
   isCompactLayout,
   minHeight,
   layout,
@@ -39,8 +34,6 @@ export function ComposerEditorSlot({
   editor: Editor | null;
   scrollContainerRef: RefObject<HTMLDivElement | null>;
   inputLocked: boolean;
-  isZenMode: boolean;
-  hasCompactControls: boolean;
   isCompactLayout: boolean;
   minHeight: number;
   layout: ComposerEditorLayout;
@@ -54,33 +47,20 @@ export function ComposerEditorSlot({
       className={cn(
         "w-full overflow-y-auto bg-transparent px-4 pb-1 pr-14 pt-3 outline-none",
         COARSE_POINTER_TEXT_BASE_CLASS,
-        // Keep line-height after the text-size class. tailwind-merge treats
-        // text size utilities as owning line-height and would otherwise drop
-        // this, making Composer rows tighter than timeline messages.
         "leading-relaxed",
-        isZenMode && "min-h-0 flex-1",
-        hasCompactControls && !isZenMode && "pr-14",
         isCompactLayout && "h-12 overflow-hidden pb-0 pr-14 pt-0",
       )}
       style={{
-        minHeight: isZenMode
-          ? "0px"
-          : isCompactLayout
-            ? "48px"
-            : `${minHeight}px`,
-        height: isZenMode ? "100%" : isCompactLayout ? "48px" : undefined,
-        maxHeight: isZenMode
-          ? "none"
-          : isCompactLayout
-            ? "48px"
-            : COMPOSER_EDITOR_MAX_HEIGHT_BY_LAYOUT[layout],
+        minHeight: isCompactLayout ? "48px" : `${minHeight}px`,
+        height: isCompactLayout ? "48px" : undefined,
+        maxHeight: isCompactLayout
+          ? "48px"
+          : COMPOSER_EDITOR_MAX_HEIGHT_BY_LAYOUT[layout],
       }}
     >
       <PromptMentionLinkContext.Provider value={resolveMentionLink ?? null}>
         <EditorContent
           editor={editor}
-          // A plugin lock makes the editor non-editable, so ProseMirror skips
-          // its own Escape handler. Release focus explicitly in that state.
           onKeyDown={(event) => {
             if (event.key !== "Escape") return;
             if (editor === null || editor.isEditable) return;

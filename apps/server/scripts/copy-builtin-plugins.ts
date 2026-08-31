@@ -96,6 +96,12 @@ async function writeRuntimePackageJson(args: {
   );
 }
 
+async function runStageAssets(sourceRoot: string): Promise<void> {
+  const scriptPath = path.join(sourceRoot, "scripts", "stage-assets.mjs");
+  if (!(await exists(scriptPath))) return;
+  await import(pathToFileURL(scriptPath).href);
+}
+
 async function copyBuiltinPlugin(args: {
   bbVersion: string;
   build: boolean;
@@ -104,7 +110,6 @@ async function copyBuiltinPlugin(args: {
   targetRoot: string;
 }): Promise<void> {
   if (args.build) {
-    // Resolves from this repo's own devDependencies; no download here.
     const toolchain = await resolvePluginBuildToolchain(
       path.join(serverRoot, "node_modules", ".bb-toolchain"),
     );
@@ -120,6 +125,7 @@ async function copyBuiltinPlugin(args: {
     if (packageJson.bb.host !== undefined) {
       await buildPluginHost(args.sourceRoot, args.bbVersion, toolchain);
     }
+    await runStageAssets(args.sourceRoot);
   }
 
   const targetDir = path.join(args.targetRoot, args.name);
@@ -144,7 +150,15 @@ async function copyBuiltinPlugin(args: {
   const compactIcon = isPluginOwnedIconPath(packageJson.bb.branding.icon ?? "")
     ? packageJson.bb.branding.icon
     : undefined;
-  for (const asset of [compactIcon, logo?.light, logo?.dark]) {
+  const declaredIcons = Object.values(
+    packageJson.bb.branding.experimental_icons ?? {},
+  );
+  for (const asset of [
+    compactIcon,
+    logo?.light,
+    logo?.dark,
+    ...declaredIcons,
+  ]) {
     if (asset === undefined) continue;
     const sourcePath = path.resolve(args.sourceRoot, asset);
     const targetPath = path.resolve(targetDir, asset);

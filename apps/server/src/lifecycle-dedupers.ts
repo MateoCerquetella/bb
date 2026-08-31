@@ -8,13 +8,7 @@ import {
   type AsyncTtlMemo,
 } from "./services/lib/async-ttl-memo.js";
 
-/**
- * How long a successful `provider.list_models` answer is reused. Provider
- * catalogs change on the order of releases, and the memo key already carries
- * the daemon session and provider registration revision, so a daemon restart
- * or a plugin reload re-probes immediately regardless of this window.
- */
-export const PROVIDER_MODEL_LIST_MEMO_TTL_MS = 10 * 60_000;
+const PROVIDER_MODEL_LIST_MEMO_TTL_MS = 10 * 60_000;
 
 export interface ProviderModelListMemoValue {
   models: AvailableModel[];
@@ -22,11 +16,8 @@ export interface ProviderModelListMemoValue {
 }
 
 export interface LifecycleDedupers {
+  deferredThreadMessageFlush: AsyncDeduper<string, void>;
   environmentCleanupAdvance: AsyncDeduper<string, void>;
-  /**
-   * Memo for host model probes: every execution-options read (each thread
-   * open, focus, and reconnect) used to spawn a provider CLI on the host.
-   */
   providerModelList: AsyncTtlMemo<string, ProviderModelListMemoValue>;
   queuedMessageAutoSend: AsyncDeduper<string, void>;
   threadProvisionAdvance: AsyncDeduper<string, void>;
@@ -34,6 +25,7 @@ export interface LifecycleDedupers {
 
 export function createLifecycleDedupers(): LifecycleDedupers {
   return {
+    deferredThreadMessageFlush: createAsyncDeduper<string, void>(),
     environmentCleanupAdvance: createAsyncDeduper<string, void>(),
     providerModelList: createAsyncTtlMemo<string, ProviderModelListMemoValue>({
       ttlMs: PROVIDER_MODEL_LIST_MEMO_TTL_MS,

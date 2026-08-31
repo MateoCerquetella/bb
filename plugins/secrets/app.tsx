@@ -13,9 +13,10 @@ import {
 } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {
+  SECRET_REQUEST_RENDERER_ID,
   secretRequestPayloadSchema,
   secretRequestResponseSchema,
-} from "./src/contracts.js";
+} from "@bb/plugin-interaction-contracts";
 import { reconcileDotenv } from "./src/dotenv.js";
 
 function SecretRequestInteraction({
@@ -70,9 +71,7 @@ function SecretRequestInteraction({
       try {
         await submit({ values });
         setValues({});
-      } catch {
-        // The host renders the submission error outside this plugin form.
-      }
+      } catch {}
     } finally {
       setBusy(false);
     }
@@ -80,9 +79,7 @@ function SecretRequestInteraction({
   const cancelRequest = async () => {
     try {
       await cancel();
-    } catch {
-      // The host renders the cancellation error outside this plugin form.
-    }
+    } catch {}
   };
 
   return (
@@ -216,7 +213,7 @@ function SecretRequestInteraction({
 
 export default definePluginApp((app) => {
   app.slots.pendingInteraction({
-    id: "secret-request",
+    id: SECRET_REQUEST_RENDERER_ID,
     component: SecretRequestInteraction,
   });
 });

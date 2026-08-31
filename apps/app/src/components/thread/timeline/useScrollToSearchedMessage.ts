@@ -2,8 +2,6 @@ import { useEffect, useRef } from "react";
 import { useLocation } from "react-router-dom";
 import { useBottomAnchoredScroll } from "@/components/ui/bottom-anchored-scroll-body.js";
 
-// Structural subset of a timeline view row — every row carries an event-sequence
-// range, which is how we map a searched message's sequence to its rendered row.
 interface SeqAnchoredRow {
   id: string;
   sourceSeqStart: number;
@@ -30,6 +28,7 @@ interface SeqRange {
 
 const FLASH_CLASS_NAME = "bb-search-flash";
 const FLASH_DURATION_MS = 1700;
+const POST_WINDOW_SETTLE_REVEAL_MS = 800;
 
 function escapeTimelineRowId(rowId: string): string {
   if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
@@ -129,7 +128,7 @@ function collectSearchedMessageAncestorRowIdsInRows({
       continue;
     }
     const nestedRows = getNestedRows(row);
-    if (nestedRows === null) {
+    if (nestedRows === null || nestedRows.length === 0) {
       ancestorIds.add(row.id);
       return true;
     }
@@ -156,8 +155,6 @@ export function collectSearchedMessageAncestorRowIds(
   return ancestorIds;
 }
 
-// Sidebar search hands the matched message's event sequence to the thread route
-// via `navigate(path, { state: { searchMessageSeq, searchThreadId } })`.
 export function readSearchMessageTarget(
   state: unknown,
 ): SearchMessageTarget | null {
@@ -180,14 +177,6 @@ export function readSearchMessageTarget(
   return null;
 }
 
-/**
- * When the thread was opened from a sidebar search result whose match was in a
- * message body, scroll that message into view and briefly highlight it.
- *
- * Keyed off `location.key` so it fires once per navigation (not on every render
- * or row update). The effect also depends on `rows`, so if the timeline hasn't
- * hydrated the target row yet it simply retries once the rows arrive.
- */
 export function useScrollToSearchedMessage(
   rows: readonly SeqAnchoredRow[],
   threadId: string | undefined,
@@ -201,6 +190,19 @@ export function useScrollToSearchedMessage(
   const bottomAnchor = useBottomAnchoredScroll();
   const handledKeyRef = useRef<string | null>(null);
   const olderLoadAttemptKeyRef = useRef<string | null>(null);
+  const locationKeyRef = useRef(location.key);
+  locationKeyRef.current = location.key;
+  const pendingRevealTimersRef = useRef<Set<number>>(new Set());
+  useEffect(() => {
+    const pendingRevealTimers = pendingRevealTimersRef.current;
+    return () => {
+      for (const timer of pendingRevealTimers) {
+        window.clearTimeout(timer);
+      }
+      pendingRevealTimers.clear();
+      handledKeyRef.current = null;
+    };
+  }, []);
   const target = readSearchMessageTarget(location.state);
   const targetSeq = target?.seq ?? null;
   const targetThreadId = target?.threadId ?? null;
@@ -216,8 +218,6 @@ export function useScrollToSearchedMessage(
     }
     const targetLeafRow = findDeepestSeqAnchoredRow(rows, targetSeq);
     if (targetLeafRow === null) {
-      // Target row not rendered yet (still loading, or inside a collapsed
-      // group). Leave the key unhandled so a later rows change can retry.
       const loadedRange = getRowsSeqRange(rows);
       const targetIsOlderThanLoadedRows =
         loadedRange !== null && targetSeq < loadedRange.max;
@@ -247,20 +247,25 @@ export function useScrollToSearchedMessage(
       return;
     }
     const selector = `[data-timeline-row-id="${escapeTimelineRowId(targetLeafRow.id)}"]`;
-    if (document.querySelector(selector) === null) {
+    const renderedTarget = document.querySelector<HTMLElement>(selector);
+    if (
+      renderedTarget === null ||
+      renderedTarget.dataset.timelineWindowedRealized === "false"
+    ) {
       return;
     }
     handledKeyRef.current = location.key;
 
     let flashed = false;
     const revealTarget = () => {
+      if (locationKeyRef.current !== location.key) {
+        return;
+      }
       const element = document.querySelector<HTMLElement>(selector);
       if (element === null) {
         return;
       }
       if (bottomAnchor !== null) {
-        // scrollElementIntoView suppresses stick-to-bottom so this wins over the
-        // default open-at-bottom behavior.
         bottomAnchor.scrollElementIntoView({
           element,
           options: { block: "center" },
@@ -277,13 +282,19 @@ export function useScrollToSearchedMessage(
       }
     };
 
-    // Reveal on the next frame, then once more after layout settles, so a late
-    // scroll-anchor restore can't leave the target off-screen.
+    const scheduleReveal = (delayMs: number) => {
+      const timer = window.setTimeout(() => {
+        pendingRevealTimersRef.current.delete(timer);
+        revealTarget();
+      }, delayMs);
+      pendingRevealTimersRef.current.add(timer);
+    };
+
     const frame = requestAnimationFrame(revealTarget);
-    const settle = window.setTimeout(revealTarget, 320);
+    scheduleReveal(320);
+    scheduleReveal(POST_WINDOW_SETTLE_REVEAL_MS);
     return () => {
       cancelAnimationFrame(frame);
-      window.clearTimeout(settle);
     };
   }, [
     bottomAnchor,

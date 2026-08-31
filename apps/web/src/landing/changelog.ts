@@ -1,34 +1,28 @@
-/* Parses the repo-root CHANGELOG.md (the single source of truth for release
- * notes) into structured releases for the /changelog page. The changelog's
- * shape is deliberately simple — `## <version>` per release, optional intro
- * paragraphs, `### <section>` groups of paragraphs and `- ` bullets — and the
- * parser supports exactly that shape. */
-
 export type ReleaseBlock =
   | { kind: "paragraph"; text: string }
   | { kind: "list"; items: string[] };
 
-export type ReleaseSection = {
+type ReleaseSection = {
   title: string;
   blocks: ReleaseBlock[];
 };
 
 export type Release = {
   version: string;
-  /** Intro blocks between the `##` heading and the first `###` section. */
   lede: ReleaseBlock[];
   sections: ReleaseSection[];
 };
 
-/** Presentation extras that don't belong in CHANGELOG.md itself. */
-export type ReleaseMeta = {
-  /** Human-readable ship date, e.g. "July 14, 2026". */
+type ReleaseMeta = {
   date: string;
-  /** Marketing headline shown instead of the bare version number. */
   headline: string;
 };
 
 export const RELEASE_META: Record<string, ReleaseMeta> = {
+  "0.40.0": {
+    date: "August 26, 2026",
+    headline: "File Editor, quick palette, and agent providers",
+  },
   "0.39.0": {
     date: "August 19, 2026",
     headline: "Faster large threads and a long list of fixes",
@@ -107,7 +101,6 @@ export function parseChangelog(markdown: string): Release[] {
       continue;
     }
     if (!release) {
-      // Preamble (the `# Changelog` title) — nothing to collect.
       continue;
     }
     if (line.startsWith("### ")) {
@@ -132,7 +125,6 @@ export function parseChangelog(markdown: string): Release[] {
       continue;
     }
     if (line.startsWith("  ") && line.trim()) {
-      // Indented continuation of the previous bullet.
       const last = blocksInScope()?.at(-1);
       if (last?.kind === "list" && last.items.length > 0) {
         last.items[last.items.length - 1] += ` ${line.trim()}`;

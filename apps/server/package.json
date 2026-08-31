@@ -10,7 +10,8 @@
     "dev": "node --conditions=source --import tsx scripts/dev-supervisor.mjs",
     "clean": "rimraf dist",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts",
+    "test:provider-corpus": "vitest run --config vitest.config.ts test/provider-corpus"
   },
   "dependencies": {
     "@bb/config": "workspace:*",
@@ -50,6 +51,7 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@bb/agent-runtime": "workspace:*",
     "@bb/scripts": "workspace:*",
     "@bb/test-helpers": "workspace:*",
     "@bb/tsconfig": "workspace:*",

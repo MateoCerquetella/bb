@@ -1,55 +1,64 @@
-import type { ComponentType } from "react";
-import { createElement, useState, useSyncExternalStore } from "react";
-import { ClaudeIcon } from "@/components/icons/ClaudeIcon";
-import { CursorIcon } from "@/components/icons/CursorIcon";
-import { GrokIcon } from "@/components/icons/GrokIcon";
-import { HermesAgentIcon } from "@/components/icons/HermesAgentIcon";
-import { OpenAiIcon } from "@/components/icons/OpenAiIcon";
-import { OpencodeIcon } from "@/components/icons/OpencodeIcon";
-import { OmpIcon } from "@/components/icons/OmpIcon";
-import { PiIcon } from "@/components/icons/PiIcon";
-import { Icon } from "@bb/shared-ui/icon";
+import type { CSSProperties, ComponentType } from "react";
+import { createElement, useSyncExternalStore } from "react";
+import { isPresentationTintColor, type ProviderInfo } from "@bb/domain";
+import { Icon, ICON_NAMES, type IconName } from "@bb/shared-ui/icon";
 import { getPluginSlotSnapshot, subscribePluginSlots } from "./plugin-slots";
-
-const ACP_ID_PREFIX = "acp-";
 
 interface ProviderIconInfo {
   icon: ComponentType<{ className?: string }>;
   ariaLabel: string;
 }
 
-function isAcpProviderId(providerId: string): boolean {
-  return providerId.startsWith(ACP_ID_PREFIX);
-}
-
 const GenericAcpIcon: ComponentType<{ className?: string }> = ({ className }) =>
   createElement(Icon, { name: "Code", className, "aria-hidden": "true" });
 
-// Vendored brand marks for the built-in providers, keyed by provider id. The
-// first-party provider plugins ship no frontend bundle: registering these
-// same marks through `app.slots.experimental_providerIcon` cost four JS+CSS
-// fetches and four icon remounts at boot for byte-identical SVGs, so this map
-// is their only source. A plugin registration for one of these ids (e.g. a
-// community provider plugin) still wins, per `getProviderIconInfo`.
-const BUILT_IN_BRAND_ICONS: Record<string, ProviderIconInfo> = {
-  codex: { icon: OpenAiIcon, ariaLabel: "Codex" },
-  "claude-code": { icon: ClaudeIcon, ariaLabel: "Claude Code" },
-  pi: { icon: PiIcon, ariaLabel: "Pi" },
-  "acp-cursor": { icon: CursorIcon, ariaLabel: "Cursor" },
-};
+const ACP_FAMILY = "acp";
 
-// Brand icons for well-known ACP agents, keyed by slug (the provider id with
-// the `acp-` prefix stripped). Unknown ACP agents fall back to the generic
-// glyph; the display name still comes from the server-provided ProviderInfo.
-const KNOWN_ACP_BRAND_ICONS: Record<
+interface ProviderIconSource {
+  logoUrl: string | null;
+  icon?: { glyph: string };
+  family?: string;
+  displayName?: string;
+}
+
+function isIconName(name: string): name is IconName {
+  return (ICON_NAMES as readonly string[]).includes(name);
+}
+
+const declaredGlyphIcons = new Map<
   string,
   ComponentType<{ className?: string }>
-> = {
-  grok: GrokIcon,
-  "hermes-agent": HermesAgentIcon,
-  opencode: OpencodeIcon,
-  omp: OmpIcon,
-};
+>();
+
+function getDeclaredGlyphIcon(
+  glyph: string,
+): ComponentType<{ className?: string }> | undefined {
+  if (!isIconName(glyph)) {
+    return undefined;
+  }
+  const cached = declaredGlyphIcons.get(glyph);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const GlyphIcon: ComponentType<{ className?: string }> = ({ className }) =>
+    createElement(Icon, { name: glyph, className, "aria-hidden": "true" });
+  declaredGlyphIcons.set(glyph, GlyphIcon);
+  return GlyphIcon;
+}
+
+function providerLogoMaskStyle(logoUrl: string): CSSProperties {
+  const image = `url("${logoUrl.replace(/["\\]/gu, "\\$&")}")`;
+  return {
+    maskImage: image,
+    WebkitMaskImage: image,
+    maskRepeat: "no-repeat",
+    WebkitMaskRepeat: "no-repeat",
+    maskPosition: "center",
+    WebkitMaskPosition: "center",
+    maskSize: "contain",
+    WebkitMaskSize: "contain",
+  };
+}
 
 const configuredProviderLogoIcons = new Map<
   string,
@@ -59,31 +68,23 @@ const configuredProviderLogoIcons = new Map<
 function getConfiguredProviderLogoIcon(
   providerId: string,
   logoUrl: string,
+  family: string | undefined,
 ): ComponentType<{ className?: string }> {
-  const cacheKey = `${providerId}\0${logoUrl}`;
+  const cacheKey = `${providerId}\0${logoUrl}\0${family ?? ""}`;
   const cached = configuredProviderLogoIcons.get(cacheKey);
   if (cached !== undefined) {
     return cached;
   }
 
-  const fallbackIcon = resolveStaticProviderIconInfo(providerId, null)?.icon;
   const ProviderLogoIcon: ComponentType<{ className?: string }> = ({
     className,
-  }) => {
-    const [failed, setFailed] = useState(false);
-    if (failed) {
-      return fallbackIcon === undefined
-        ? null
-        : createElement(fallbackIcon, { className });
-    }
-    return createElement("img", {
+  }) =>
+    createElement("span", {
       "aria-hidden": "true",
-      alt: "",
-      className: `${className ?? ""} object-contain`.trim(),
-      onError: () => setFailed(true),
-      src: logoUrl,
+      className: `${className ?? ""} inline-block shrink-0 bg-current`.trim(),
+      "data-provider-logo": logoUrl,
+      style: providerLogoMaskStyle(logoUrl),
     });
-  };
   configuredProviderLogoIcons.set(cacheKey, ProviderLogoIcon);
   return ProviderLogoIcon;
 }
@@ -101,19 +102,12 @@ const pluginAwareProviderIcons = new Map<
   ComponentType<{ className?: string }>
 >();
 
-/**
- * Wraps a resolved static icon so a plugin's `experimental_providerIcon`
- * registration takes over live. The subscription lives in the icon component
- * rather than in every call site: plugin frontends boot (and reload, disable,
- * or crash) after the sidebar and settings rows have already rendered, and a
- * disposed registration must fall straight back to the static chain.
- */
 function getPluginAwareProviderIcon(
   providerId: string,
-  logoUrl: string | null,
+  source: ProviderIconSource,
   staticIcon: ComponentType<{ className?: string }> | undefined,
 ): ComponentType<{ className?: string }> {
-  const cacheKey = `${providerId}\0${logoUrl ?? ""}`;
+  const cacheKey = `${providerId}\0${source.logoUrl ?? ""}\0${source.icon?.glyph ?? ""}\0${source.family ?? ""}`;
   const cached = pluginAwareProviderIcons.get(cacheKey);
   if (cached !== undefined) {
     return cached;
@@ -121,10 +115,6 @@ function getPluginAwareProviderIcon(
   const ProviderIcon: ComponentType<{ className?: string }> = ({
     className,
   }) => {
-    // Factory-created component: it closes over `providerId` from the
-    // enclosing scope, which the React Compiler mishandles (it hoists the
-    // snapshot callback to module scope, losing the capture — a live
-    // ReferenceError in compiled builds only, invisible to vitest).
     "use no memo";
     const pluginIcon = useSyncExternalStore(subscribePluginSlots, () =>
       getRegisteredPluginProviderIcon(providerId),
@@ -138,89 +128,67 @@ function getPluginAwareProviderIcon(
   return ProviderIcon;
 }
 
-/**
- * Resolves a provider's icon. Resolution order:
- *
- * 1. A plugin-registered `app.slots.experimental_providerIcon` component. It
- *    is inline React, so it inherits the app theme, and the owning plugin
- *    ships it alongside the provider declaration itself.
- * 2. The vendored brand maps (built-ins plus well-known ACP slugs). These are
- *    theme-aware React components (`currentColor` cascades), so they must win
- *    over a server `logoUrl`: an SVG rendered through `<img>` is a separate
- *    document where `currentColor` resolves to black — invisible on dark
- *    themes — and page CSS cannot reach it.
- * 3. A caller-supplied `logoUrl` (from a server-provided `ProviderInfo`) for
- *    providers without a vendored mark — plugin-registered third parties, and
- *    the right home for static color logos.
- * 4. The generic glyph for unrecognized ACP providers.
- *
- * Returns undefined for unknown non-ACP providers so callers can fall back
- * gracefully.
- */
 export function getProviderIconInfo(
   providerId: string,
-  logoUrl: string | null = null,
+  source: ProviderIconSource | null = null,
 ): ProviderIconInfo | undefined {
-  const staticInfo = resolveStaticProviderIconInfo(providerId, logoUrl);
+  const resolvedSource = source ?? { logoUrl: null };
+  const staticInfo = resolveStaticProviderIconInfo(providerId, resolvedSource);
   const pluginIcon = getRegisteredPluginProviderIcon(providerId);
   if (staticInfo === undefined && pluginIcon === undefined) {
     return undefined;
   }
   return {
-    icon: getPluginAwareProviderIcon(providerId, logoUrl, staticInfo?.icon),
-    ariaLabel: staticInfo?.ariaLabel ?? providerId,
+    icon: getPluginAwareProviderIcon(
+      providerId,
+      resolvedSource,
+      staticInfo?.icon,
+    ),
+    ariaLabel:
+      resolvedSource.displayName ?? staticInfo?.ariaLabel ?? providerId,
   };
 }
 
 function resolveStaticProviderIconInfo(
   providerId: string,
-  logoUrl: string | null,
+  source: ProviderIconSource,
 ): ProviderIconInfo | undefined {
-  const builtInBrand = BUILT_IN_BRAND_ICONS[providerId];
-  if (builtInBrand !== undefined) {
-    return builtInBrand;
-  }
-
-  if (isAcpProviderId(providerId)) {
-    const slug = providerId.slice(ACP_ID_PREFIX.length);
-    const brandIcon = KNOWN_ACP_BRAND_ICONS[slug];
-    if (brandIcon !== undefined) {
-      return { icon: brandIcon, ariaLabel: slug };
-    }
-  }
-
-  if (logoUrl !== null) {
+  if (source.logoUrl !== null) {
     return {
-      icon: getConfiguredProviderLogoIcon(providerId, logoUrl),
+      icon: getConfiguredProviderLogoIcon(
+        providerId,
+        source.logoUrl,
+        source.family,
+      ),
       ariaLabel: "Provider logo",
     };
   }
 
-  if (isAcpProviderId(providerId)) {
+  const glyphIcon =
+    source.icon === undefined
+      ? undefined
+      : getDeclaredGlyphIcon(source.icon.glyph);
+  if (glyphIcon !== undefined) {
+    return { icon: glyphIcon, ariaLabel: "Provider icon" };
+  }
+
+  if (source.family === ACP_FAMILY) {
     return { icon: GenericAcpIcon, ariaLabel: "ACP provider" };
   }
 
   return undefined;
 }
 
-export function getProviderIconColorClass(providerId: string): string {
-  if (providerId === "codex") {
-    return "text-foreground";
+export function getProviderIconTintStyle(
+  provider: Pick<ProviderInfo, "strings"> | undefined,
+): CSSProperties | undefined {
+  const tint = provider?.strings?.iconTint;
+  if (
+    tint === undefined ||
+    !isPresentationTintColor(tint.light) ||
+    !isPresentationTintColor(tint.dark)
+  ) {
+    return undefined;
   }
-  if (providerId === "claude-code") {
-    return "text-[#D97757]";
-  }
-  if (providerId === "pi") {
-    return "text-[#6D5DFB]";
-  }
-  if (providerId === "acp-cursor") {
-    return "text-[#111827] dark:text-[#F5F5F5]";
-  }
-  if (providerId === "acp-opencode") {
-    return "text-[#2563EB]";
-  }
-  if (providerId === "acp-omp") {
-    return "text-[#9333EA]";
-  }
-  return "text-foreground";
+  return { color: `light-dark(${tint.light.trim()}, ${tint.dark.trim()})` };
 }

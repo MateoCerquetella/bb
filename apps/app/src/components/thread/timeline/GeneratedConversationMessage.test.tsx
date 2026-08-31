@@ -16,7 +16,7 @@ import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadT
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import type { TimelineTitleActionResolver } from "./TimelineTitleView";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
-import { GENERATED_MESSAGE_COLLAPSED_PREVIEW_CHAR_CAP } from "./conversation-message-limits";
+import { GENERATED_MESSAGE_COLLAPSED_PREVIEW_CHAR_CAP } from "@bb/client-core";
 import { generatedConversationCollapsedPreview } from "./GeneratedConversationMessage";
 
 function resolveThreadLink(link: TimelineTitleLink): string | null {
@@ -85,9 +85,6 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-// An agent-generated body that carries an offset-based `path` mention and a
-// leading markdown heading. Both Markdown and the structured mention must
-// survive the combined renderer.
 const AGENT_BODY = "# notes\nedited path:src/app.ts here";
 const AGENT_PATH_TOKEN = "path:src/app.ts";
 const AGENT_PATH_START = AGENT_BODY.indexOf(AGENT_PATH_TOKEN);
@@ -214,7 +211,52 @@ function renderAgentMessage(
   );
 }
 
-function mockInnerPreviewTextOverflow(text: string): void {
+function mockResizeObserverDeliveries(): () => void {
+  const observers: Array<{
+    callback: ResizeObserverCallback;
+    instance: ResizeObserver;
+    targets: Set<Element>;
+  }> = [];
+
+  class ResizeObserverMock {
+    private readonly record: (typeof observers)[number];
+    constructor(callback: ResizeObserverCallback) {
+      this.record = {
+        callback,
+        instance: this as unknown as ResizeObserver,
+        targets: new Set(),
+      };
+      observers.push(this.record);
+    }
+    observe(target: Element): void {
+      this.record.targets.add(target);
+    }
+    unobserve(target: Element): void {
+      this.record.targets.delete(target);
+    }
+    disconnect(): void {
+      this.record.targets.clear();
+    }
+  }
+
+  vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+  return () => {
+    act(() => {
+      for (const { callback, instance, targets } of observers) {
+        callback(
+          Array.from(
+            targets,
+            (target) => ({ target }) as unknown as ResizeObserverEntry,
+          ),
+          instance,
+        );
+      }
+    });
+  };
+}
+
+function mockInnerPreviewTextOverflow(text: string): () => void {
+  const notifyResize = mockResizeObserverDeliveries();
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(20);
   vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(20);
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockReturnValue(100);
@@ -226,23 +268,11 @@ function mockInnerPreviewTextOverflow(text: string): void {
         : 100;
     },
   );
+  return notifyResize;
 }
 
 function mockContinuationSensitiveOverflow(): () => void {
-  const resizeCallbacks: Array<() => void> = [];
-
-  class ResizeObserverMock {
-    constructor(callback: ResizeObserverCallback) {
-      resizeCallbacks.push(() =>
-        callback([], this as unknown as ResizeObserver),
-      );
-    }
-
-    observe(): void {}
-    disconnect(): void {}
-  }
-
-  vi.stubGlobal("ResizeObserver", ResizeObserverMock);
+  const notifyResize = mockResizeObserverDeliveries();
   vi.spyOn(HTMLElement.prototype, "clientHeight", "get").mockReturnValue(20);
   vi.spyOn(HTMLElement.prototype, "scrollHeight", "get").mockReturnValue(20);
   vi.spyOn(HTMLElement.prototype, "clientWidth", "get").mockImplementation(
@@ -255,11 +285,7 @@ function mockContinuationSensitiveOverflow(): () => void {
   );
   vi.spyOn(HTMLElement.prototype, "scrollWidth", "get").mockReturnValue(100);
 
-  return () => {
-    act(() => {
-      for (const callback of resizeCallbacks) callback();
-    });
-  };
+  return notifyResize;
 }
 
 describe("GeneratedConversationMessage markdown body", () => {
@@ -542,8 +568,11 @@ describe("GeneratedConversationMessage markdown body", () => {
   });
 
   it("expands a one-line agent message when its preview text overflows", () => {
-    mockInnerPreviewTextOverflow(OVERFLOWING_ONE_LINE_AGENT_BODY);
+    const notifyResize = mockInnerPreviewTextOverflow(
+      OVERFLOWING_ONE_LINE_AGENT_BODY,
+    );
     renderAgentMessage(OVERFLOWING_ONE_LINE_AGENT_BODY);
+    notifyResize();
 
     const toggle = screen.getByRole("button", { name: /Message from Worker/u });
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
@@ -592,8 +621,6 @@ describe("GeneratedConversationMessage markdown body", () => {
     ).not.toBeNull();
   });
 
-  // A side chat opens in the plugin's panel, so its name carries the panel
-  // title action rather than a route link to the thread.
   it("opens a side-chat sender in the plugin panel instead of linking it", () => {
     const openPanel = vi.fn();
     const { container } = renderAgentMessage("Handed back.", {
@@ -615,6 +642,7 @@ describe("GeneratedConversationMessage markdown body (system)", () => {
   it("keeps the continuation width stable when it makes the preview overflow", () => {
     const notifyResize = mockContinuationSensitiveOverflow();
     renderChildCompleted();
+    notifyResize();
 
     const continuation = screen.getByText("...");
     expect(continuation.className).toContain("invisible");

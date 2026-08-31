@@ -46,7 +46,7 @@ commands.
 
 - Thread recovery is validated with the existing lifecycle commands:
   `bb thread stop`, `bb thread tell`, `bb thread spawn`, archive/unarchive, and
-  the recovery checks below. When the provider-retry plugin is installed,
+  the recovery checks below. When the provider-retry plugin is enabled,
   `bb provider-retry retry <thread-id>` is the manual path for a failed,
   accepted provider rate-limit turn; inspect the thread before using it. For
   other failed or interrupted threads, send a fresh turn with `bb thread tell`,
@@ -723,8 +723,8 @@ bb thread log "$SMOKE_THREAD_ID" --format json \
 Inspect logs and state:
 
 ```bash
-tail -n 200 "$LOGS_DIR/server.log"
-tail -n 200 "$LOGS_DIR/host-daemon.log"
+tail -n 200 "$SERVER_LOG_DIR"/server*.log
+tail -n 200 "$DAEMON_LOG_DIR"/host-daemon*.log
 curl -fsS "$BB_SERVER_URL/api/v1/threads/$SMOKE_THREAD_ID" | jq
 ```
 
@@ -905,7 +905,9 @@ Expected result:
 - `accept-edits` turns allow workspace changes but surface pending interactions
   for the explicit outside-workspace probes; inspect them with
   `bb thread interactions list/show`.
-- `bb thread tell` is rejected while the thread is awaiting user interaction.
+- `bb thread tell` reports the message as held while the thread is awaiting
+  user interaction and delivers it after the interaction settles;
+  `--mode start` is still rejected with 409 `awaiting_user_interaction`.
 - `approve`, `deny`, and `grant` resolve their matching interaction kinds.
 - Approved/granted threads continue to `idle`; denied threads either reply with the denial handling text or clearly record the denied approval in the log.
 

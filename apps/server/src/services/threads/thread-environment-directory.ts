@@ -48,6 +48,13 @@ export const UPDATE_ENVIRONMENT_DIRECTORY_TOOL: DynamicTool = {
     required: ["path"],
     additionalProperties: false,
   },
+  presentation: {
+    label: {
+      pending: "Moving the thread directory",
+      completed: "Moved the thread directory",
+    },
+    icon: { glyph: "FolderOpen" },
+  },
 };
 
 interface HandleUpdateEnvironmentDirectoryToolCallArgs {
@@ -113,19 +120,18 @@ function threadWritableFailure(thread: Thread): string | null {
   return null;
 }
 
-function readyEnvironmentFailure(environment: Environment): string | null {
+function resolveReadyEnvironment(
+  environment: Environment,
+): ReadyEnvironment | { failure: string } {
   if (environment.status !== "ready") {
-    return `Environment at this path is ${environment.status}, not ready.`;
+    return {
+      failure: `Environment at this path is ${environment.status}, not ready.`,
+    };
   }
   if (!environment.path) {
-    return "Environment at this path does not have a resolved directory.";
-  }
-  return null;
-}
-
-function asReadyEnvironment(environment: Environment): ReadyEnvironment | null {
-  if (environment.status !== "ready" || !environment.path) {
-    return null;
+    return {
+      failure: "Environment at this path does not have a resolved directory.",
+    };
   }
   return {
     ...environment,
@@ -249,13 +255,9 @@ async function provisionUnmanagedEnvironmentForPath(
   if (!readyEnvironment) {
     return toolCallFailure("Prepared environment no longer exists.");
   }
-  const failure = readyEnvironmentFailure(readyEnvironment);
-  if (failure) {
-    return toolCallFailure(failure);
-  }
-  const ready = asReadyEnvironment(readyEnvironment);
-  if (!ready) {
-    return toolCallFailure("Prepared environment is not ready.");
+  const ready = resolveReadyEnvironment(readyEnvironment);
+  if ("failure" in ready) {
+    return toolCallFailure(ready.failure);
   }
   return ready;
 }
@@ -288,8 +290,6 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
     );
   }
 
-  // The claim is project-scoped, but attaching in place to another project's
-  // bb-managed worktree is unsafe: its cleanup deletes the directory.
   const refusal = unmanagedAttachRefusal(deps.db, {
     checksOutBranch: false,
     dataDir: findHostDataDir(deps, args.currentEnvironment.hostId),
@@ -311,13 +311,9 @@ export async function handleUpdateEnvironmentDirectoryToolCall(
   let targetEnvironment: ReadyEnvironment;
 
   if (existingEnvironment) {
-    const failure = readyEnvironmentFailure(existingEnvironment);
-    if (failure) {
-      return toolCallFailure(failure);
-    }
-    const ready = asReadyEnvironment(existingEnvironment);
-    if (!ready) {
-      return toolCallFailure("Environment at this path is not ready.");
+    const ready = resolveReadyEnvironment(existingEnvironment);
+    if ("failure" in ready) {
+      return toolCallFailure(ready.failure);
     }
     targetEnvironment = ready;
   } else {

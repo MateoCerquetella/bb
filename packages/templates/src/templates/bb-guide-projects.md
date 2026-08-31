@@ -34,6 +34,7 @@ A project maps to a code repository. All threads belong to a project.
 Discovery:
 
   bb project branches <id> --host <id>   List branches for a machine source
+    --refresh                            Wait for remote refs before listing
   bb project paths <id>                   Search workspace paths
   bb project files <id>                   List workspace files
   bb project content <id> <path>          Read file content (binary is base64)
@@ -61,6 +62,8 @@ Attachments:
   its relative `path` to thread --file/--image input. Those thread flags never
   read a client path: absolute values remain paths for the execution host.
   image/* uploads are limited to 10MB; other files are limited to 25MB.
+  image/heic and image/heif uploads are rejected because no renderer or
+  provider can decode them; convert them to JPEG or PNG first.
 
 Sources:
 

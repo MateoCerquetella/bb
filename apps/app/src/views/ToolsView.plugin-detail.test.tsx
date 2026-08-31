@@ -19,13 +19,13 @@ import {
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
 } from "@/lib/plugin-slots";
-import { PluginDetail, ToolsView } from "./ToolsView";
+import { ToolsView } from "./ToolsView";
 import {
   CatalogPluginDetail,
   CatalogPluginDetailBanner,
+  PluginDetail,
   PluginDetailBanners,
   PluginProvenancePill,
-  pluginDetailBannerKind,
   pluginFrontendDiagnosticRequiresFailureBanner,
 } from "@/components/tools/PluginDetail";
 import type { PluginCatalogSearchEntry } from "@/hooks/queries/plugin-catalog-queries";
@@ -72,12 +72,14 @@ const GITHUB_CATALOG_ENTRY = {
   iconTinted: false,
   category: "Developer tools",
   source: "builtin:github",
+  repositoryUrl: null,
   marketplaceDisplayName: "BB Official",
   publisherKey: "builtin",
   publisherLabel: "BB Official",
   official: true,
   author: null,
   installed: false,
+  installs: null,
   compatible: true,
   incompatibleReason: null,
 } satisfies PluginCatalogSearchEntry;
@@ -110,6 +112,24 @@ describe("PluginDetail official catalog lifecycle", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Install GitHub" }));
     expect(onInstall).toHaveBeenCalledWith(GITHUB_CATALOG_ENTRY);
+  });
+
+  it("links the catalog entry's repository from the metadata line", () => {
+    render(
+      <CatalogPluginDetail
+        entry={{
+          ...GITHUB_CATALOG_ENTRY,
+          repositoryUrl: "https://github.com/acme/bb-github",
+        }}
+        onInstall={() => {}}
+      />,
+    );
+
+    const link = screen.getByRole("link", {
+      name: "github.com/acme/bb-github",
+    });
+    expect(link.getAttribute("href")).toBe("https://github.com/acme/bb-github");
+    expect(link.getAttribute("target")).toBe("_blank");
   });
 
   it("explains why an incompatible official plugin cannot be installed", () => {
@@ -190,16 +210,11 @@ describe("PluginDetail official catalog lifecycle", () => {
       </MemoryRouter>,
     );
 
-    // Only builtin plugins wear the BB Official pill: a catalog install can
-    // come from any marketplace, so this catalog-provenance plugin shows no
-    // provenance label — and no uninstall-on-hover control either.
     expect(screen.queryByText("BB Official")).toBeNull();
     expect(
       screen.queryByRole("button", { name: "Uninstall GitHub" }),
     ).toBeNull();
 
-    // About remains prose only. Release uses the same connected label/value
-    // table treatment as the other structured plugin detail sections.
     expect(screen.getByText("About")).toBeTruthy();
     expect(screen.getByText("Release")).toBeTruthy();
     expect(
@@ -225,8 +240,6 @@ describe("PluginDetail official catalog lifecycle", () => {
 
     expect(container.querySelector('[data-icon="Github"]')).not.toBeNull();
 
-    // Uninstall is irreversible, so it sits with the other ownership actions
-    // rather than beside the reversible enable toggle.
     fireEvent.pointerDown(
       screen.getByRole("button", { name: "GitHub actions" }),
     );
@@ -517,7 +530,10 @@ describe("BB Official plugin detail routing", () => {
     render(
       <MemoryRouter initialEntries={["/extensions/plugins/github"]}>
         <Routes>
-          <Route path="/extensions/plugins/:pluginId" element={<ToolsView />} />
+          <Route
+            path="/extensions/plugins/:pluginId"
+            element={<ToolsView pluginId="github" />}
+          />
         </Routes>
       </MemoryRouter>,
       { wrapper: QueryClientWrapper },
@@ -529,6 +545,84 @@ describe("BB Official plugin detail routing", () => {
       await screen.findByRole("heading", { name: "Install GitHub?" }),
     ).toBeTruthy();
     expect(screen.getByTestId("full-trust-warning")).toBeTruthy();
+  });
+});
+
+describe("plugin removal confirmation", () => {
+  it("warns that removing a local plugin deletes its settings, secrets, and schedules and names the move path", async () => {
+    const localPlugin = {
+      id: "github",
+      source: "path:/Users/you/src/bb-plugin-github",
+      rootDir: "/Users/you/src/bb-plugin-github",
+      version: "0.1.0",
+      provenance: "direct",
+      isOrphanedBuiltin: false,
+      publisherLabel: null,
+      sourceDisplay: "path · /Users/you/src/bb-plugin-github",
+      updateState: {},
+      enabled: true,
+      description: "Browse GitHub issues and pull requests in BB.",
+      name: "GitHub",
+      icon: "Github",
+      iconUrl: null,
+      status: "running",
+      statusDetail: null,
+      handlerStats: { count: 0, totalMs: 0, maxMs: 0, errorCount: 0 },
+      services: [],
+      schedules: [],
+      cliCommand: null,
+      capabilities: [],
+      hasSettings: false,
+      app: { hasApp: false, bundle: null },
+      logoUrl: null,
+      logoDarkUrl: null,
+    };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        if (url === "/api/v1/plugins") {
+          return new Response(
+            JSON.stringify({ enabled: true, plugins: [localPlugin] }),
+            { headers: { "content-type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ error: "not found" }), {
+          status: 404,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    );
+
+    const { wrapper: QueryClientWrapper } = createQueryClientTestHarness();
+    render(
+      <MemoryRouter initialEntries={["/extensions/plugins/github"]}>
+        <Routes>
+          <Route
+            path="/extensions/plugins/:pluginId"
+            element={<ToolsView pluginId="github" />}
+          />
+        </Routes>
+      </MemoryRouter>,
+      { wrapper: QueryClientWrapper },
+    );
+
+    expect(await screen.findByRole("heading", { name: "GitHub" })).toBeTruthy();
+    fireEvent.pointerDown(
+      screen.getByRole("button", { name: "GitHub actions" }),
+    );
+    fireEvent.click(
+      await screen.findByRole("menuitem", { name: "Remove from bb" }),
+    );
+
+    expect(
+      await screen.findByRole("heading", { name: "Remove plugin from bb?" }),
+    ).toBeTruthy();
+    const description = screen.getByText(/Remove "github" from bb/);
+    expect(description.textContent).toContain(
+      "delete its settings, secrets, and schedules",
+    );
+    expect(description.textContent).toContain("source files stay on disk");
+    expect(description.textContent).toContain("install the new path instead");
   });
 });
 
@@ -560,50 +654,6 @@ describe("PluginDetail banner precedence", () => {
       },
     },
   };
-
-  it("maps implementation sources into five operational states", () => {
-    // The current server-reported state wins over browser diagnostics and
-    // release metadata because it is the plugin's present-tense condition.
-    expect(pluginDetailBannerKind(collision, true)).toBe("degraded");
-    expect(pluginDetailBannerKind(collision, false)).toBe("degraded");
-
-    const runningPlugin: PluginListItem = {
-      ...collision,
-      status: "running",
-      statusDetail: null,
-      handlerStats: managedPlugin.handlerStats,
-    };
-    expect(pluginDetailBannerKind(runningPlugin, true)).toBe("failed");
-    expect(
-      pluginDetailBannerKind(
-        {
-          ...runningPlugin,
-          handlerStats: { ...runningPlugin.handlerStats, errorCount: 3 },
-        },
-        false,
-      ),
-    ).toBeNull();
-
-    for (const [status, kind] of [
-      ["error", "failed"],
-      ["incompatible", "incompatible"],
-      ["missing", "missing"],
-      ["needs-configuration", "needs-configuration"],
-    ] as const) {
-      expect(pluginDetailBannerKind({ ...runningPlugin, status }, false)).toBe(
-        kind,
-      );
-    }
-
-    // Release opportunities and history never enter the health-banner slot.
-    expect(pluginDetailBannerKind(runningPlugin, false)).toBeNull();
-    expect(
-      pluginDetailBannerKind(
-        { ...runningPlugin, enabled: false, status: "disabled" },
-        true,
-      ),
-    ).toBeNull();
-  });
 
   it("renders only current health and keeps diagnostics out of user copy", () => {
     const { wrapper } = createQueryClientTestHarness();
@@ -692,8 +742,6 @@ describe("PluginDetail runtime health", () => {
       statusDetail: "The runtime reported a problem.",
       ...overrides,
     };
-    // Banner and page are siblings in production too (ToolsView.tsx:236): the
-    // banner renders outside the scroll page so it can span the pane.
     const result = render(
       <MemoryRouter>
         <QueryClientWrapper>
@@ -724,9 +772,6 @@ describe("PluginDetail runtime health", () => {
     expect(alert.textContent).toContain("Reload the plugin.");
     expect(screen.getByRole("button", { name: "Reload" })).toBeTruthy();
 
-    // The banner spans the pane rather than sitting inset in the detail
-    // column, and it precedes every section: a broken runtime is a condition
-    // on the page, not a block of its content.
     const about = container.querySelector(
       '[data-resource-detail-section="overview"]',
     ) as HTMLElement;
@@ -1036,8 +1081,6 @@ describe("PluginDetail capability inventory", () => {
     fireEvent.pointerMove(commandGlyph);
     expect((await screen.findByRole("tooltip")).textContent).toBe("Command");
 
-    // Services and schedules are two objects with two status vocabularies, so
-    // they remain separately named rather than grouped under "Health".
     const [services, schedules] = Array.from(
       container.querySelectorAll('[data-resource-detail-section="activity"]'),
     ) as HTMLElement[];
@@ -1077,8 +1120,6 @@ describe("PluginDetail capability inventory", () => {
 
     for (const [label, icon] of [
       ["Scheduled", "Clock"],
-      // A running job shimmers its own clock. The app never swaps a row's icon
-      // for a spinner to say "working" (ThreadRow.tsx:144).
       ["Running", "Clock"],
       ["Succeeded", "CircleCheck"],
       ["Failed", "CircleX"],

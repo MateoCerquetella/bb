@@ -1,9 +1,3 @@
-// bb-plugin-memory — durable, progressively disclosed memory for BB agents.
-//
-// The model sees a compact global + current-project catalog in its standing
-// instructions. Full records stay in SQLite and are read or changed through
-// the `bb memory` CLI command; this plugin intentionally registers no native
-// agent tools.
 import { randomBytes } from "node:crypto";
 import {
   defineRpcContract,
@@ -831,44 +825,6 @@ const USAGE = [
 
 function jsonOutput(value: unknown): string {
   return JSON.stringify(value, null, 2);
-}
-
-function assertNoRpcInput(input: unknown): void {
-  if (input !== null && input !== undefined) {
-    throw new Error("expected no input");
-  }
-}
-
-function parseRpcRecord(input: unknown): Record<string, unknown> {
-  if (!isRecord(input)) throw new Error("expected an object");
-  return input;
-}
-
-function rpcString(record: Record<string, unknown>, key: string): string {
-  const value = record[key];
-  if (typeof value !== "string") throw new Error(`${key} must be a string`);
-  return value;
-}
-
-function rpcInteger(
-  record: Record<string, unknown>,
-  key: string,
-  min: number,
-  max: number,
-): number {
-  const value = record[key];
-  if (!Number.isInteger(value) || Number(value) < min || Number(value) > max) {
-    throw new Error(`${key} must be an integer between ${min} and ${max}`);
-  }
-  return Number(value);
-}
-
-function parseRpcTags(record: Record<string, unknown>): string[] {
-  const value = record.tags;
-  if (!Array.isArray(value) || !value.every((tag) => typeof tag === "string")) {
-    throw new Error("tags must be an array of strings");
-  }
-  return value;
 }
 
 export default async function plugin(bb: BbPluginApi) {

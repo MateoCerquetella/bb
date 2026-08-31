@@ -10,7 +10,7 @@ const LABEL = "Beta";
 function BetaThreadList({
   activeProjectId,
   activeThreadId,
-  experimental_Original: Original,
+  Original,
   searchQuery,
 }: PluginThreadListProps) {
   const [embedOriginal, setEmbedOriginal] = useState(false);
@@ -51,11 +51,7 @@ function BetaThreadList({
   );
 }
 
-function BetaFileOpener({
-  experimental_Original: Original,
-  path,
-  source,
-}: PluginFileOpenerProps) {
+function BetaFileOpener({ Original, path, source }: PluginFileOpenerProps) {
   const [embedOriginal, setEmbedOriginal] = useState(false);
   const [shouldCrash, setShouldCrash] = useState(false);
   if (shouldCrash) throw new Error("Beta file-opener test crash");

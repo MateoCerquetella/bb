@@ -3,6 +3,9 @@ import {
   makeWorkspaceStatus,
 } from "@bb/test-helpers";
 import type { WorkspaceResolutionFailure } from "@bb/host-daemon-contract";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import ts from "typescript";
 import { describe, expect, it } from "vitest";
 import * as contract from "../src/index.js";
 import {
@@ -200,11 +203,12 @@ const OPTIONAL_SERVER_FIELD_GROUPS: readonly OptionalServerFieldGroup[] = [
   },
   {
     reason:
-      "System provider lookups may target a host indirectly or directly and may omit provider id to use the host default.",
+      "System provider lookups may target a host indirectly or directly, omit provider id to use the host default, and omit capability to return the full roster.",
     fields: [
       "systemExecutionOptionsQuerySchema.environmentId",
       "systemExecutionOptionsQuerySchema.hostId",
       "systemExecutionOptionsQuerySchema.providerId",
+      "systemProvidersQuerySchema.capability",
       "systemProvidersQuerySchema.environmentId",
       "systemProvidersQuerySchema.hostId",
     ],
@@ -479,9 +483,16 @@ describe("git branch name contract", () => {
     expect(
       contract.projectBranchesQuerySchema.safeParse({
         hostId: "host_123",
+        refresh: "blocking",
         selectedBranch: "upstream/main",
       }).success,
     ).toBe(true);
+    expect(
+      contract.projectBranchesQuerySchema.safeParse({
+        hostId: "host_123",
+        refresh: "eager",
+      }).success,
+    ).toBe(false);
     expect(
       contract.projectBranchesQuerySchema.safeParse({
         hostId: "host_123",
@@ -1227,7 +1238,6 @@ describe("server-contract canonical schemas", () => {
     });
     expect(parsed.input[0]).toMatchObject({ mentions: [pluginMention] });
 
-    // All plugin resource fields are required — a partial resource fails.
     expect(() =>
       sendMessageRequestSchema.parse({
         input: [
@@ -1402,21 +1412,18 @@ describe("server-contract canonical schemas", () => {
         workspace: { type: "unmanaged" as const, path: null },
       },
     };
-    // Missing senderThreadId.
     expect(() =>
       createThreadRequestSchema.parse({
         ...baseRequest,
         startedOnBehalfOf: { initiator: "agent" },
       }),
     ).toThrow();
-    // Empty senderThreadId.
     expect(() =>
       createThreadRequestSchema.parse({
         ...baseRequest,
         startedOnBehalfOf: { initiator: "agent", senderThreadId: "" },
       }),
     ).toThrow();
-    // "user" is not a valid started-on-behalf-of initiator.
     expect(() =>
       createThreadRequestSchema.parse({
         ...baseRequest,
@@ -1463,6 +1470,64 @@ describe("server-contract canonical schemas", () => {
 });
 
 describe("server-contract clients", () => {
+  it("keeps the api client off the route table's value import graph", () => {
+    const source = readFileSync(
+      fileURLToPath(new URL("../src/api-client.ts", import.meta.url)),
+      "utf8",
+    );
+    const file = ts.createSourceFile(
+      "api-client.ts",
+      source,
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+    const edges = file.statements.flatMap((statement) => {
+      if (
+        ts.isImportDeclaration(statement) &&
+        ts.isStringLiteral(statement.moduleSpecifier)
+      ) {
+        return [
+          {
+            specifier: statement.moduleSpecifier.text,
+            typeOnly:
+              statement.importClause?.phaseModifier ===
+              ts.SyntaxKind.TypeKeyword,
+          },
+        ];
+      }
+      if (
+        ts.isExportDeclaration(statement) &&
+        statement.moduleSpecifier !== undefined &&
+        ts.isStringLiteral(statement.moduleSpecifier)
+      ) {
+        return [
+          {
+            specifier: statement.moduleSpecifier.text,
+            typeOnly: statement.isTypeOnly,
+          },
+        ];
+      }
+      return [];
+    });
+
+    const valueSpecifiers = edges
+      .filter((edge) => !edge.typeOnly)
+      .map((edge) => edge.specifier);
+    expect(new Set(valueSpecifiers)).toEqual(new Set(["hono/client"]));
+    expect(
+      edges.filter((edge) => edge.specifier === "./public-api.js"),
+    ).toEqual([{ specifier: "./public-api.js", typeOnly: true }]);
+  });
+
+  it("declares the package side-effect free so the barrel's route-table edge is droppable", () => {
+    const manifest = readFileSync(
+      fileURLToPath(new URL("../package.json", import.meta.url)),
+      "utf8",
+    );
+    expect(JSON.parse(manifest)).toHaveProperty("sideEffects", false);
+  });
+
   it("builds canonical public routes", () => {
     const publicClient = createPublicApiClient("http://localhost:3334");
 
@@ -1532,6 +1597,11 @@ describe("server-contract clients", () => {
       }).pathname,
     ).toBe("/api/v1/threads/thr_123/thread-storage/files");
     expect(
+      publicClient.threads[":id"]["thread-storage"].location.$url({
+        param: { id: "thr_123" },
+      }).pathname,
+    ).toBe("/api/v1/threads/thr_123/thread-storage/location");
+    expect(
       publicClient.threads[":id"]["thread-storage"].paths.$url({
         param: { id: "thr_123" },
         query: {
@@ -1552,8 +1622,6 @@ describe("server-contract clients", () => {
         query: { path: "/Users/me/notes/plan.md" },
       }).pathname,
     ).toBe("/api/v1/threads/thr_123/host-files/content");
-    // Path-suffix file routes: `:filePath{.+}` spans slashes and the caller
-    // passes a pre-encoded value ($url substitutes params verbatim).
     expect(
       publicClient.threads[":id"]["thread-storage"].files[":filePath{.+}"].$url(
         {

@@ -49,8 +49,6 @@ export function createNodeTransport(
   args: CreateNodeTransportArgs = {},
 ): BbSdkTransport {
   return createHttpTransport({
-    // Only fall back to CLI config when no base URL is given, so explicitly
-    // configured SDKs work in environments without BB_SERVER_URL.
     baseUrl: args.baseUrl ?? resolveCliConfig(args.cliConfig).BB_SERVER_URL,
     fetch:
       args.fetch ??
@@ -96,6 +94,11 @@ export {
   DEFAULT_BB_REQUEST_TIMEOUT_MS,
 };
 export { BbHttpError, BbRequestTimeoutError } from "./response.js";
+export {
+  pluginMutationResponseSchema,
+  type PluginMutationResponse,
+} from "./areas/plugins.js";
+export { createBuiltinPlanCommandTextInput } from "./core.js";
 export { createGuideArea } from "./areas/guide.js";
 export {
   DEFAULT_THREAD_WAIT_POLL_INTERVAL_MS,

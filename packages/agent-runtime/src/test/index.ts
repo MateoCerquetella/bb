@@ -1,6 +1,16 @@
-export { createAgentRuntimeWithAdapters } from "../runtime.js";
-export type {
-  ProviderAdapter,
-  ProviderAdapterFactory,
-} from "../provider-adapter.js";
-export { createFakeAdapter, fakeProviderScriptPath } from "./fake-adapter.js";
+export {
+  captureFirstPartyProviderDeclarations,
+  firstPartyPluginRootDir,
+  type CaptureFirstPartyProviderDeclarationsOptions,
+} from "./first-party-provider-declarations.js";
+export {
+  createScriptedEchoLaunch,
+  createScriptedEchoRequestRecord,
+  createScriptedEchoRuntime,
+  scriptedEchoBridgeModulePath,
+  withBridgeLaunch,
+  type CreateScriptedEchoLaunchOptions,
+  type LaunchBoundAgentRuntime,
+  type ScriptedEchoLaunchScript,
+  type ScriptedEchoRequestRecord,
+} from "./runtime-test-harness.js";

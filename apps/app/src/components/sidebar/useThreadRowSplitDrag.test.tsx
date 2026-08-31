@@ -10,10 +10,9 @@ import type { LayoutNode, PaneContent, SplitLayout } from "@/lib/split-layout";
 import { RouteNavigationProvider } from "@/components/ui/app-route-anchor";
 import { useThreadRowSplitDrag } from "./useThreadRowSplitDrag";
 
-const { navigateSpy, compactState, experimentState } = vi.hoisted(() => ({
+const { navigateSpy, compactState } = vi.hoisted(() => ({
   navigateSpy: vi.fn(),
   compactState: { value: false },
-  experimentState: { enabled: true },
 }));
 
 vi.mock("react-router-dom", async (importOriginal) => ({
@@ -23,10 +22,6 @@ vi.mock("react-router-dom", async (importOriginal) => ({
 
 vi.mock("@bb/shared-ui/hooks/use-compact-viewport", () => ({
   useIsCompactViewport: () => compactState.value,
-}));
-
-vi.mock("@/hooks/useThreadSplitsEnabled", () => ({
-  useThreadSplitsEnabled: () => experimentState.enabled,
 }));
 
 function content(threadId: string): PaneContent {
@@ -90,7 +85,6 @@ describe("useThreadRowSplitDrag — openInSplit (cmd-click / context-menu entry)
   beforeEach(() => {
     navigateSpy.mockClear();
     compactState.value = false;
-    experimentState.enabled = true;
   });
 
   it("splits the focused pane to the right by default", () => {
@@ -101,10 +95,8 @@ describe("useThreadRowSplitDrag — openInSplit (cmd-click / context-menu entry)
     expect(countPanes(layout!.root)).toBe(2);
     const opened = findPaneByThread(layout!.root, "p1", "t9");
     expect(opened).not.toBeNull();
-    // Default placement is a right split, so the new pane is the last in order.
     expect(listPanes(layout!.root).at(-1)?.paneId).toBe(opened?.paneId);
     expect(layout!.focusedPaneId).toBe(opened?.paneId);
-    // A fresh open pushes a history entry (no replace).
     expect(navigateSpy).toHaveBeenCalledWith("/projects/p1/threads/t9");
   });
 
@@ -112,7 +104,7 @@ describe("useThreadRowSplitDrag — openInSplit (cmd-click / context-menu entry)
     const { store, openInSplit } = renderOpenInSplit("t2", twoPanes());
     openInSplit();
     const layout = store.get(splitLayoutAtom);
-    expect(countPanes(layout!.root)).toBe(2); // no new pane
+    expect(countPanes(layout!.root)).toBe(2);
     expect(layout!.focusedPaneId).toBe("pane-2");
     expect(navigateSpy).toHaveBeenCalledWith("/projects/p1/threads/t2", {
       replace: true,
@@ -123,9 +115,9 @@ describe("useThreadRowSplitDrag — openInSplit (cmd-click / context-menu entry)
     const { store, openInSplit } = renderOpenInSplit("t9", eightPanes());
     openInSplit();
     const layout = store.get(splitLayoutAtom);
-    expect(countPanes(layout!.root)).toBe(8); // never exceeds the cap
+    expect(countPanes(layout!.root)).toBe(8);
     const opened = findPaneByThread(layout!.root, "p1", "t9");
-    expect(opened?.paneId).toBe("pane-1"); // replaced the focused pane
+    expect(opened?.paneId).toBe("pane-1");
     expect(findPaneByThread(layout!.root, "p1", "t1")).toBeNull();
     expect(navigateSpy).toHaveBeenCalledWith("/projects/p1/threads/t9");
   });
@@ -135,7 +127,7 @@ describe("useThreadRowSplitDrag — openInSplit (cmd-click / context-menu entry)
     const seeded = singlePane();
     const { store, openInSplit } = renderOpenInSplit("t9", seeded);
     openInSplit();
-    expect(store.get(splitLayoutAtom)).toBe(seeded); // unchanged reference
+    expect(store.get(splitLayoutAtom)).toBe(seeded);
     expect(navigateSpy).toHaveBeenCalledWith("/projects/p1/threads/t9");
   });
 
@@ -143,20 +135,6 @@ describe("useThreadRowSplitDrag — openInSplit (cmd-click / context-menu entry)
     const { store, openInSplit } = renderOpenInSplit("t9", null);
     openInSplit();
     expect(store.get(splitLayoutAtom)).toBeNull();
-    expect(navigateSpy).toHaveBeenCalledWith("/projects/p1/threads/t9");
-  });
-
-  it("disables drag and plain-navigates without touching the layout when the experiment is off", () => {
-    experimentState.enabled = false;
-    const seeded = twoPanes();
-    const { store, getOnPointerDown, openInSplit } = renderOpenInSplit(
-      "t9",
-      seeded,
-    );
-
-    expect(getOnPointerDown()).toBeUndefined();
-    openInSplit();
-    expect(store.get(splitLayoutAtom)).toBe(seeded);
     expect(navigateSpy).toHaveBeenCalledWith("/projects/p1/threads/t9");
   });
 });

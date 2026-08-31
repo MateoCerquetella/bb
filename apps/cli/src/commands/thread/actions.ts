@@ -9,6 +9,7 @@ import {
 } from "@bb/domain";
 import { action } from "../../action.js";
 import { createCliBbSdk } from "../../client.js";
+import type { ThreadSendResult } from "@bb/sdk";
 import {
   confirmDestructiveAction,
   outputJson,
@@ -24,6 +25,7 @@ import {
   parsePermissionMode,
   parseServiceTier,
   PERMISSION_MODE_HELP,
+  PLAN_HELP,
   buildPromptInputs,
   collectOption,
 } from "./helpers.js";
@@ -69,6 +71,7 @@ interface ThreadTellCommandOptions {
   reasoningLevel?: string;
   serviceTier?: string;
   mode?: string;
+  plan?: boolean;
   file?: string[];
   image?: string[];
 }
@@ -97,14 +100,14 @@ interface PostThreadMessageArgs {
   reasoningLevel?: ReasoningLevel;
   serviceTier?: ServiceTier;
   senderThreadId?: string;
+  plan?: boolean;
   files?: readonly string[];
   images?: readonly string[];
 }
 
-interface PostThreadMessageResult {
-  ok: true;
+type PostThreadMessageResult = ThreadSendResult & {
   mode: ThreadTellDeliveryMode;
-}
+};
 
 interface ThreadUpdateBody {
   title?: string;
@@ -423,6 +426,7 @@ export function registerActionsCommands(
     )
     .option("--permission-mode <mode>", PERMISSION_MODE_HELP)
     .option("--mode <mode>", "Message mode: steer (default), queue, or auto")
+    .option("--plan", PLAN_HELP)
     .option(
       "--file <path>",
       "Pass a host-readable absolute or uploaded attachment file path (repeatable)",
@@ -448,15 +452,12 @@ export function registerActionsCommands(
             reasoningLevel: parseReasoningLevel(opts.reasoningLevel),
             serviceTier: parseServiceTier(opts.serviceTier),
             senderThreadId: resolveSenderThreadId(id),
+            plan: opts.plan,
             files: opts.file,
             images: opts.image,
           });
           if (outputJson(opts, { threadId: id, ...response })) return;
-          console.log(
-            response.mode === "steer"
-              ? `Thread ${id} steered`
-              : `Thread ${id} updated`,
-          );
+          console.log(describeThreadTellOutcome(id, response));
         },
       ),
     );
@@ -526,10 +527,11 @@ async function postThreadMessage(
   args: PostThreadMessageArgs,
 ): Promise<PostThreadMessageResult> {
   const sdk = createCliBbSdk(args.getUrl());
-  await sdk.threads.send({
+  const response = await sdk.threads.send({
     threadId: args.threadId,
     input: buildPromptInputs({
       message: args.message,
+      plan: args.plan,
       files: args.files,
       images: args.images,
     }),
@@ -546,9 +548,24 @@ async function postThreadMessage(
     ...(args.senderThreadId ? { senderThreadId: args.senderThreadId } : {}),
   });
   return {
-    ok: true,
+    ...response,
     mode: args.mode,
   };
+}
+
+function describeThreadTellOutcome(
+  threadId: string,
+  response: PostThreadMessageResult,
+): string {
+  if (response.delivery === "deferred") {
+    return `Thread ${threadId} is awaiting user interaction; message held and delivers once the interaction settles`;
+  }
+  if (response.delivery === "queued") {
+    return `Thread ${threadId} message queued`;
+  }
+  return response.mode === "steer"
+    ? `Thread ${threadId} steered`
+    : `Thread ${threadId} updated`;
 }
 
 function resolveSenderThreadId(targetThreadId: string): string | undefined {

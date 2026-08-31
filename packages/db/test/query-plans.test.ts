@@ -17,10 +17,12 @@ import {
   hasParentedEventCrossingSequence,
   insertEvents,
   listActiveBackgroundTaskCountsByThreadIds,
-  listLatestGoalEventRowsByThreadIds,
+  listLatestThreadStateEventRowsByThreadIds,
   listLatestOpenBackgroundTaskStateRowsForThread,
   listStoredConversationOutlineEventRows,
   listStoredEventRows,
+  listStoredEventRowsByParentToolCallIds,
+  listTodoSnapshotEventRowsForThread,
   pruneContextWindowUsageEventsBeforeSequence,
   pruneResolvedItemDeltas,
 } from "../src/data/events.js";
@@ -157,10 +159,6 @@ interface CapturedStatement {
   sql: string;
 }
 
-// Captures the exact prepared SQL and bindings. The slow-query log is not
-// usable here: it redacts string literals and truncates long SQL, and both
-// would change the plan under EXPLAIN (a redacted literal no longer implies a
-// partial-index predicate, so an INDEXED BY pin stops preparing).
 function captureStatements(
   db: DbConnection,
   run: () => void,
@@ -262,6 +260,7 @@ describe("slow query index plans", () => {
         scope: turnScope(turnId),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ providerThreadId: "provider-plan" }),
       },
       {
@@ -271,6 +270,7 @@ describe("slow query index plans", () => {
         scope: turnScope(turnId),
         itemId,
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider-plan",
           item: { type: "agentMessage", id: itemId, text: "done" },
@@ -288,6 +288,7 @@ describe("slow query index plans", () => {
             scope: turnScope(turnId),
             itemId,
             itemKind: "agentMessage",
+            parentToolCallId: null,
             providerThreadId: "provider-plan",
             data: JSON.stringify({
               providerThreadId: "provider-plan",
@@ -322,7 +323,7 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("resolves parent crossings through the covering tool-call index", () => {
+  it("resolves parent crossings through the covering delegating-item index", () => {
     const { db, thread } = setup();
 
     const captured = captureStatements(db, () => {
@@ -345,7 +346,31 @@ describe("slow query index plans", () => {
       sql: query.sql,
     });
     expect(details).toMatch(
-      /SEARCH parent_event .*USING COVERING INDEX events_tool_call_parent_lookup_idx/u,
+      /SEARCH parent_event .*USING COVERING INDEX events_delegating_item_lookup_idx/u,
+    );
+
+    db.$client.close();
+  });
+
+  it("loads parented timeline rows through the normalized parent index", () => {
+    const { db, thread } = setup();
+
+    const [query] = captureStatements(db, () => {
+      expect(
+        listStoredEventRowsByParentToolCallIds(db, {
+          maxInlineOutputChars: null,
+          parentToolCallIds: ["parent-tool-call"],
+          threadId: thread.id,
+        }),
+      ).toEqual([]);
+    });
+    if (!query) {
+      throw new Error("Expected the parented timeline row lookup SQL");
+    }
+    expect(
+      queryPlanDetails({ db, params: query.params, sql: query.sql }),
+    ).toMatch(
+      /SEARCH events USING INDEX events_parent_tool_call_thread_parent_sequence_idx/u,
     );
 
     db.$client.close();
@@ -382,8 +407,6 @@ describe("slow query index plans", () => {
   it("uses selective indexes for conversation-outline events", () => {
     const { db, thread } = setup();
 
-    // The slow-query log truncates this union past 1,000 chars; capture the
-    // statement itself.
     const captured = captureStatements(db, () => {
       listStoredConversationOutlineEventRows(db, { threadId: thread.id });
     });
@@ -421,9 +444,6 @@ describe("slow query index plans", () => {
       params: query?.params ?? [],
       sql: query?.sql ?? "",
     });
-    // Each union branch stays on a thread/type index (the lifecycle branch has
-    // no item kind); the superseded-snapshot check on the structural branch
-    // probes the background-task partial index instead of scanning.
     expect(
       details.match(/USING INDEX events_thread_type_sequence_idx/gu),
     ).toHaveLength(1);
@@ -434,6 +454,28 @@ describe("slow query index plans", () => {
       /USING COVERING INDEX events_background_task_thread_type_item_sequence_idx/u,
     );
     expect(details).not.toMatch(/SCAN events/u);
+
+    db.$client.close();
+  });
+
+  it("loads the newest plan snapshot through the kind-based plan-steps index", () => {
+    const { db, thread } = setup();
+
+    const captured = captureStatements(db, () => {
+      expect(
+        listTodoSnapshotEventRowsForThread(db, { threadId: thread.id }),
+      ).toEqual([]);
+    });
+    const query = captured.find((entry) => entry.sql.includes("planSteps"));
+    if (!query) {
+      throw new Error("Expected the plan snapshot SQL");
+    }
+    expect(query.sql).not.toContain("json_extract");
+    expect(query.sql).not.toContain("tool_name");
+    expect(query.params).toEqual([thread.id, 1]);
+    expect(
+      queryPlanDetails({ db, params: query.params, sql: query.sql }),
+    ).toContain("events_plan_steps_thread_sequence_idx");
 
     db.$client.close();
   });
@@ -467,11 +509,6 @@ describe("slow query index plans", () => {
       params,
     });
 
-    // This query runs on every latest-page timeline build. Written with
-    // correlated subqueries it re-scanned the thread once per candidate task
-    // row — 154 ms on a real 9,012-event thread with 2,640 task rows — so the
-    // plan must resolve both "newest lifecycle row" and "already completed" as
-    // set membership, evaluated once.
     expect(
       queryPlanDetails({ db, params, sql: debugLog.fields.sql }),
     ).not.toMatch(/CORRELATED/);
@@ -482,7 +519,7 @@ describe("slow query index plans", () => {
   it("uses the closed-session prune index for emitted delete SQL", () => {
     const { db, host, logger } = setup();
     const now = Date.now();
-    const staleSession = openSession(db, noopNotifier, {
+    const staleSession = openSession(db, {
       hostId: host.id,
       instanceId: "closed-prune-query-plan",
       hostName: "query-plan-host",
@@ -574,6 +611,7 @@ describe("slow query index plans", () => {
         }),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         scope: turnScope("turn_query_plan"),
         sequence: 1,
         threadId: thread.id,
@@ -588,6 +626,7 @@ describe("slow query index plans", () => {
         }),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         scope: turnScope("turn_query_plan"),
         sequence: 2,
         threadId: thread.id,
@@ -597,6 +636,7 @@ describe("slow query index plans", () => {
         data: "{}",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         scope: threadScope(),
         sequence: 3,
         threadId: thread.id,
@@ -723,6 +763,7 @@ describe("slow query index plans", () => {
         }),
         itemId: "cmd-truncation-query-plan",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         scope: turnScope("turn_truncation_query_plan"),
         sequence: 1,
         threadId: thread.id,
@@ -761,8 +802,8 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("uses the consolidated turn/item event index for resolved delta pruning", () => {
-    const { db, thread } = setup();
+  it("uses materialized parent ids and the consolidated index for delta pruning", () => {
+    const { db, logger, thread } = setup();
     const turnId = "turn_resolved_delta_query_plan";
     const itemId = "call_resolved_delta_query_plan";
     insertEvents(db, noopNotifier, [
@@ -770,6 +811,7 @@ describe("slow query index plans", () => {
         data: JSON.stringify({ output: "first", parentToolCallId: "parent" }),
         itemId,
         itemKind: null,
+        parentToolCallId: "parent",
         scope: turnScope(turnId),
         sequence: 1,
         threadId: thread.id,
@@ -779,6 +821,7 @@ describe("slow query index plans", () => {
         data: JSON.stringify({ output: "second", parentToolCallId: "parent" }),
         itemId,
         itemKind: null,
+        parentToolCallId: "parent",
         scope: turnScope(turnId),
         sequence: 2,
         threadId: thread.id,
@@ -795,14 +838,24 @@ describe("slow query index plans", () => {
         }),
         itemId,
         itemKind: "commandExecution",
+        parentToolCallId: "parent",
         scope: turnScope(turnId),
         sequence: 3,
         threadId: thread.id,
         type: "item/completed",
       },
     ]);
+    logger.clear();
 
     expect(pruneResolvedItemDeltas(db, { threadId: thread.id })).toBe(1);
+    const pruneQuery = findOnlyDebugLog({
+      logger,
+      predicate: (fields) =>
+        fields.operation === "run" &&
+        fields.sql.startsWith("DELETE FROM events"),
+    });
+    expect(pruneQuery.fields.sql).toContain("parent_tool_call_id IS");
+    expect(pruneQuery.fields.sql).not.toContain("json_extract");
 
     const completedLookupPlan = queryPlanDetails({
       db,
@@ -847,13 +900,14 @@ describe("slow query index plans", () => {
     db.$client.close();
   });
 
-  it("pins the latest-goal lookup to the partial goal index with no temp sort", () => {
+  it("pins the latest-thread-state lookup to the partial index with no temp sort", () => {
     const { db, thread } = setup();
     insertEvents(db, noopNotifier, [
       {
         data: JSON.stringify({ goal: "guard the query plan" }),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         scope: threadScope(),
         sequence: 1,
         threadId: thread.id,
@@ -863,27 +917,27 @@ describe("slow query index plans", () => {
 
     const captured = captureStatements(db, () => {
       expect(
-        listLatestGoalEventRowsByThreadIds(db, { threadIds: [thread.id] }),
+        listLatestThreadStateEventRowsByThreadIds(db, {
+          threadIds: [thread.id],
+          kind: "provider-codex/goal",
+        }),
       ).toHaveLength(1);
     });
     const statement = captured.find((entry) =>
-      entry.sql.includes("latest_goal"),
+      entry.sql.includes("latest_state"),
     );
     if (!statement) {
-      throw new Error("Expected the latest-goal lookup SQL");
+      throw new Error("Expected the latest-thread-state lookup SQL");
     }
 
-    // The #1131 cold stall: with an ORDER BY present, the stats-less planner
-    // served this filter from events_thread_sequence_idx and fetched every
-    // event row of every listed thread. The contract is one probe of the tiny
-    // partial index for the candidate list and one for the per-thread MAX —
-    // never a full-size events index, never a temporary sort.
     const details = queryPlanDetails({
       db,
       params: statement.params,
       sql: statement.sql,
     });
-    expect(details.match(/events_goal_thread_sequence_idx/gu)).toHaveLength(2);
+    expect(
+      details.match(/events_thread_state_thread_sequence_idx/gu),
+    ).toHaveLength(2);
     expect(details).not.toContain("USING INDEX events_thread_sequence_idx");
     expect(details).not.toContain("USE TEMP B-TREE");
 
@@ -913,9 +967,6 @@ describe("slow query index plans", () => {
     expect(details).toContain(
       "USING COVERING INDEX pending_interactions_thread_status_created_idx",
     );
-    // The correlated EXISTS replaced a pending_interactions join with
-    // GROUP BY threads.id; a reintroduced GROUP BY brings back the temp
-    // B-tree materialization of the whole joined result.
     expect(details).not.toContain("USE TEMP B-TREE FOR GROUP BY");
 
     db.$client.close();
@@ -924,10 +975,9 @@ describe("slow query index plans", () => {
   it("drops redundant events indexes after creating their consolidated replacement", () => {
     const { db } = setup();
     const indexRows = db.$client
-      .prepare<
-        [],
-        IndexNameRow
-      >("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'")
+      .prepare<[], IndexNameRow>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'events'",
+      )
       .all();
     const indexNames = indexRows.map((row) => row.name);
 

@@ -10,11 +10,11 @@ import { makeThreadListEntry } from "../../../.ladle/story-fixtures";
 import { SidebarMenu, SidebarMenuItem } from "@/components/ui/sidebar.js";
 import { ThreadActionsProvider } from "@/components/thread/ThreadActionsProvider";
 import { ThreadRow, type ThreadRowOptions } from "./ThreadRow";
-import { SidebarThreadTitleMentionResourcesProvider } from "./SidebarThreadTitleMentions";
+import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
 import {
   NO_COLLAPSED_CHILD_ACTIVITY,
   type CollapsedChildActivity,
-} from "@/lib/thread-activity";
+} from "@bb/client-core";
 import { StoryCard, StoryRow } from "../../../.ladle/story-card";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 
@@ -29,8 +29,6 @@ export default {
   title: "sidebar/Threads",
 };
 
-// Caps at the production sidebar max (460px) but shrinks with the parent so
-// truncation behavior is visible at any container width.
 function SidebarStage({ children }: { children: ReactNode }) {
   return (
     <ThreadActionsProvider>
@@ -248,7 +246,6 @@ const childOption: ThreadRowOptions = {
   depth: 2,
   isCompact: true,
 };
-// Projectless threads are top-level rows (depth 0), flush with project headers.
 const projectlessOption: ThreadRowOptions = {
   kind: "default",
   depth: 0,
@@ -563,6 +560,25 @@ export function Overview() {
         </SidebarStage>
       </StoryRow>
       <StoryRow
+        label="long title + rich pills"
+        hint="title truncates in reading order through mention pills; hover reveals row actions"
+      >
+        <SidebarStage>
+          <StoryThreadRow
+            projectId="proj_demo"
+            crossProjectId={null}
+            thread={makeThread({
+              title:
+                "Review this branch using @docs/CODE_REVIEW.md and @apps/app/src/components/sidebar/ThreadRow.tsx before merging",
+              titleFallback:
+                "Review this branch using @docs/CODE_REVIEW.md and @apps/app/src/components/sidebar/ThreadRow.tsx before merging",
+            })}
+            isActive={false}
+            options={defaultOption}
+          />
+        </SidebarStage>
+      </StoryRow>
+      <StoryRow
         label="long title + draft"
         hint="title truncates before the right-aligned draft icon"
       >
@@ -666,7 +682,7 @@ export function Overview() {
         label="parent with a child from another project"
         hint="a child that lives in a different project than its parent shows the folder-export marker after its title; hover it for the project name"
       >
-        <SidebarThreadTitleMentionResourcesProvider
+        <ThreadTitleMentionResourcesProvider
           sectionNamesById={new Map()}
           projectNamesById={new Map([["proj_web", "web"]])}
           threadById={new Map()}
@@ -696,7 +712,7 @@ export function Overview() {
               options={childOption}
             />
           </SidebarStage>
-        </SidebarThreadTitleMentionResourcesProvider>
+        </ThreadTitleMentionResourcesProvider>
       </StoryRow>
       <StoryRow
         label="parent, collapsed"

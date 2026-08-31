@@ -10,13 +10,7 @@ import {
   type PluginComposerHost,
 } from "./plugin-composer-host";
 
-/**
- * The renderer-independent state for one mounted Composer. Page-specific
- * owners keep submission and durable draft state above this boundary; the
- * extension host keeps the active renderer bound to the same plugin API,
- * reactive view, and keyboard-command behavior.
- */
-export interface ComposerExtensionController {
+interface ComposerExtensionController {
   host: PluginComposerHost | null;
   view: ComposerView;
   focus(): boolean;
@@ -51,11 +45,6 @@ export function useComposerExtensionController({
   return useMemo(() => ({ host, view, focus }), [focus, host, view]);
 }
 
-/**
- * The single renderer-selection boundary for a Composer instance. It
- * currently mounts BB's renderer; replacement resolution can be added here
- * without moving or remounting the caller-owned controller.
- */
 export function ComposerExtensionHost({
   controller,
   defaultRenderer,

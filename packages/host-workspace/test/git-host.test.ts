@@ -14,8 +14,6 @@ vi.mock("node:child_process", async () => {
       "node:child_process",
     );
   const { promisify } = await import("node:util");
-  // Real execFile carries a promisify custom that resolves { stdout, stderr };
-  // mirror it so `promisify(execFile)` behaves the same over the mock.
   Object.defineProperty(execFileMock, promisify.custom, {
     value: (file: string, args: readonly string[], options: object) =>
       new Promise((resolve, reject) => {
@@ -189,6 +187,7 @@ describe("runPullRequestActionForCurrentBranch", () => {
   const actionArgs = {
     cwd: "/tmp/workspace",
     localBranch: "bb/pr-action",
+    shellPath: "/Users/test/.local/bin:/usr/bin",
   };
 
   function mockGhSuccess(): void {
@@ -242,6 +241,9 @@ describe("runPullRequestActionForCurrentBranch", () => {
         expect.objectContaining({
           cwd: "/tmp/workspace",
           encoding: "utf8",
+          env: expect.objectContaining({
+            PATH: "/Users/test/.local/bin:/usr/bin",
+          }),
           maxBuffer: 16 * 1024 * 1024,
           timeout: 60_000,
         }),
@@ -289,6 +291,7 @@ describe("getPullRequestForCurrentBranch", () => {
   const lookupArgs = {
     cwd: "/tmp/workspace",
     localBranch: "bb/pr-lookup",
+    shellPath: "/Users/test/.local/bin:/usr/bin",
   };
 
   function mockGhStdout(stdout: string): void {
@@ -340,7 +343,12 @@ describe("getPullRequestForCurrentBranch", () => {
     expect(execFileMock).toHaveBeenCalledWith(
       "gh",
       ["pr", "view", "--json", expect.any(String)],
-      expect.objectContaining({ cwd: "/tmp/workspace" }),
+      expect.objectContaining({
+        cwd: "/tmp/workspace",
+        env: expect.objectContaining({
+          PATH: "/Users/test/.local/bin:/usr/bin",
+        }),
+      }),
       expect.any(Function),
     );
   });

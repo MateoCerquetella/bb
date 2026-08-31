@@ -3,11 +3,6 @@ import type { HostDaemonOnlineRpcResultByType } from "@bb/host-daemon-contract";
 import { ApiError } from "../../errors.js";
 
 const OCTET_STREAM_MIME_TYPE = "application/octet-stream";
-/**
- * Host files change under the agent, so the browser must revalidate on every
- * use — but it may keep the bytes and send `If-None-Match`, which turns an
- * unchanged multi-megabyte image into a 304 instead of a re-download.
- */
 const REVALIDATE_CACHE_CONTROL = "private, no-cache";
 
 export type DaemonFileReadResult =
@@ -16,19 +11,13 @@ export type DaemonFileReadResult =
 
 interface CreateDaemonFileContentResponseOptions {
   headers?: HeadersInit;
-  /** `If-None-Match` from the request; a match answers 304 without a body. */
   ifNoneMatch?: string | undefined;
 }
 
-/** Strong validator: the daemon hashes exactly the bytes it returned. */
-export function daemonFileEntityTag(result: DaemonFileReadResult): string {
+function daemonFileEntityTag(result: DaemonFileReadResult): string {
   return `"${result.sha256}"`;
 }
 
-/**
- * RFC 9110 `If-None-Match`: a `*` or any listed tag (weak prefix ignored)
- * that equals the current one means the client already holds these bytes.
- */
 export function requestMatchesEntityTag(
   ifNoneMatch: string | undefined,
   entityTag: string,
@@ -64,9 +53,7 @@ function buildFileContentHeaders(
   return headers;
 }
 
-export function decodeDaemonFileContent(
-  result: DaemonFileReadResult,
-): ArrayBuffer {
+function decodeDaemonFileContent(result: DaemonFileReadResult): ArrayBuffer {
   const bytes =
     result.contentEncoding === "utf8"
       ? Buffer.from(result.content, "utf8")

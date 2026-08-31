@@ -32,6 +32,7 @@ import {
 import type { Logger } from "@bb/logger";
 import { registerPluginRoutes } from "../../../src/routes/plugins.js";
 import { createPluginCatalogService } from "../../../src/services/plugin-catalog/plugin-catalog-service.js";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginService,
@@ -77,6 +78,41 @@ async function commitPlugin(
   return git(repo, ["rev-parse", "HEAD"]);
 }
 
+describe("plugin update scheduling", () => {
+  it("waits one full interval when no plugins are eligible for update checks", async () => {
+    const HOUR = 60 * 60 * 1_000;
+    const emptyDb = createConnection(":memory:");
+    migrate(emptyDb);
+    const scheduled: number[] = [];
+    const emptyService = createPluginService({
+      aiServices: createAiServiceRegistry(),
+      telemetry: createNoopTelemetryService(),
+      db: emptyDb,
+      hub: {
+        getDaemonSessionIdForHost: () => null,
+        notifyPluginSignal: () => 0,
+        notifySystem: () => {},
+      },
+      logger,
+      dataDir: join(tmpdir(), "bb-plugin-update-empty-test"),
+      appVersion: "1.0.0",
+      stabilizationWindowMs: 0,
+      scheduleUpdateCheck: (delayMs) => {
+        scheduled.push(delayMs);
+        return () => {};
+      },
+    });
+
+    try {
+      emptyService.startPeriodicUpdateChecks();
+      expect(scheduled).toEqual([6 * HOUR]);
+    } finally {
+      await emptyService.stop();
+      emptyDb.$client.close();
+    }
+  });
+});
+
 describe("plugin update service and routes", () => {
   let db: DbConnection;
   let workDir: string;
@@ -105,6 +141,7 @@ describe("plugin update service and routes", () => {
     afterArtifactPromoted = undefined;
     materializationCount = 0;
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -228,9 +265,6 @@ describe("plugin update service and routes", () => {
   });
 
   it("reports legacy retired-marketplace installs as unavailable without fetching", async () => {
-    // Rows installed through the pre-bundling marketplace persist a synthetic
-    // GitHub-Release registry URL with the pre-transfer owner; the check must
-    // degrade per-row instead of rejecting the whole multi-plugin update sweep.
     upsertInstalledPlugin(db, {
       id: "legacy-marketplace",
       source: "npm:bb-plugin-legacy-marketplace@^0.2.0",
@@ -281,8 +315,6 @@ describe("plugin update service and routes", () => {
   });
 
   it("checks, reads persisted state, and updates through the exact HTTP contract", async () => {
-    // Simulate a Phase 1 normalized row migrated before ref classification
-    // existed. The first network resolution classifies and persists it.
     db.$client
       .prepare("UPDATE plugins SET source_git_ref_kind = NULL WHERE id = ?")
       .run("updater");
@@ -337,11 +369,6 @@ describe("plugin update service and routes", () => {
   });
 
   it("checks a git candidate without installing or building it", async () => {
-    // An update check is read-only by contract: it must not resolve a
-    // dependency tree or bundle, or a `file:`/`git:` dependency would reach
-    // local paths and new hosts on every poll. This candidate cannot compile,
-    // so a check that built would report `unavailable` instead of offering
-    // the update; the failure belongs at apply time.
     const candidate = await commitPlugin(
       repo,
       "1.2.0",
@@ -359,7 +386,6 @@ describe("plugin update service and routes", () => {
       },
     ]);
 
-    // ...and applying it does fail, so the check is not hiding a real problem.
     const applied = await service.applyUpdate("updater");
     expect(applied.ok ? applied.result.outcome : "failed").not.toBe("updated");
   });
@@ -379,6 +405,7 @@ describe("plugin update service and routes", () => {
       manifestUrl: workDir,
       sourceGitRef: null,
       sourceGitCommit: null,
+      statsJson: null,
       manifestJson: JSON.stringify({
         schemaVersion: 1,
         name: "acme-plugins",
@@ -508,8 +535,6 @@ describe("plugin update service and routes", () => {
     expect(listPluginArtifacts(db, "updater")).toHaveLength(2);
   });
 
-  // A real git update is built, promoted, crashed, and rolled back here.
-  // Under full-workspace load it can exceed the suite's 30s default.
   it("rolls back when a background service crashes during stabilization", async () => {
     const installedCommit = getInstalledPluginRegistration(
       db,
@@ -525,6 +550,7 @@ describe("plugin update service and routes", () => {
     vi.stubGlobal("__bbPluginStabilizationCrash", serviceCrash);
     await service.stop();
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -626,6 +652,7 @@ describe("plugin update service and routes", () => {
     );
     await service.stop();
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -663,6 +690,7 @@ describe("plugin update service and routes", () => {
 
     await service.stop();
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -706,11 +734,143 @@ describe("plugin update service and routes", () => {
     ]);
   }, 60_000);
 
+  function upsertNpmRow(
+    id: string,
+    registry: string,
+    provenance:
+      | { kind: "direct" }
+      | { kind: "catalog"; marketplace: string; entryId: string } = {
+      kind: "direct",
+    },
+  ): void {
+    const packageName = `bb-plugin-${id}`;
+    upsertInstalledPlugin(db, {
+      id,
+      source: `npm:${packageName}`,
+      provenance,
+      sourceIntent: {
+        kind: "npm",
+        packageName,
+        registry,
+        requestedSpec: "",
+        specKind: "default",
+      },
+      exactResolution: {
+        kind: "npm",
+        version: "1.0.0",
+        integrity: "sha512-current",
+      },
+      updateState: {
+        lastCheckAt: null,
+        availableCompatibleVersion: null,
+        newestIncompatibleVersion: null,
+        statusDetail: null,
+      },
+      activeArtifactId: null,
+      rootDir: join(workDir, id),
+      version: "1.0.0",
+      enabled: false,
+    });
+  }
+
+  async function restartWithScheduler(clock: () => number) {
+    const scheduled: Array<{ delayMs: number; onElapsed: () => void }> = [];
+    await service.stop();
+    service = createPluginService({
+      aiServices: createAiServiceRegistry(),
+      telemetry: createNoopTelemetryService(),
+      db,
+      hub: {
+        getDaemonSessionIdForHost: () => null,
+        notifyPluginSignal: () => 0,
+        notifySystem: () => {},
+      },
+      logger,
+      dataDir: join(workDir, "data"),
+      appVersion: "1.0.0",
+      stabilizationWindowMs: 0,
+      now: clock,
+      scheduleUpdateCheck: (delayMs, onElapsed) => {
+        const entry = { delayMs, onElapsed };
+        scheduled.push(entry);
+        return () => {
+          const index = scheduled.indexOf(entry);
+          if (index !== -1) scheduled.splice(index, 1);
+        };
+      },
+    });
+    await service.start();
+    return scheduled;
+  }
+
+  it("sweeps on start when a plugin was never checked, then waits out the interval across restarts", async () => {
+    const HOUR = 60 * 60 * 1_000;
+    let clock = Date.now();
+    let scheduled = await restartWithScheduler(() => clock);
+    const nextCommit = await commitPlugin(repo, "1.1.0");
+
+    service.startPeriodicUpdateChecks();
+    expect(scheduled.map((entry) => entry.delayMs)).toEqual([0]);
+    scheduled.shift()?.onElapsed();
+    await vi.waitFor(() =>
+      expect(getInstalledPlugin(db, "updater")).toMatchObject({
+        lastUpdateCheckAt: clock,
+        availableCompatibleVersion: nextCommit,
+      }),
+    );
+    await vi.waitFor(() =>
+      expect(scheduled.map((entry) => entry.delayMs)).toEqual([6 * HOUR]),
+    );
+    await service.stopPeriodicUpdateChecks();
+    expect(scheduled).toHaveLength(0);
+
+    clock += 2 * HOUR;
+    scheduled = await restartWithScheduler(() => clock);
+    service.startPeriodicUpdateChecks();
+    expect(scheduled.map((entry) => entry.delayMs)).toEqual([4 * HOUR]);
+    await service.stopPeriodicUpdateChecks();
+
+    upsertNpmRow("never-checked", "https://never-checked.test");
+    await service.checkForUpdates("updater");
+    service.startPeriodicUpdateChecks();
+    expect(scheduled.map((entry) => entry.delayMs)).toEqual([0]);
+    await service.stopPeriodicUpdateChecks();
+  }, 60_000);
+
+  it("shares one in-flight full sweep between concurrent callers", async () => {
+    const first = service.checkForUpdates();
+    expect(service.checkForUpdates()).toBe(first);
+    await first;
+    expect(service.checkForUpdates()).not.toBe(first);
+  }, 60_000);
+
+  it("keeps the guarded registry policy for catalog installs during a check", async () => {
+    upsertNpmRow("listed", "https://127.0.0.1", {
+      kind: "catalog",
+      marketplace: "bb-community",
+      entryId: "listed",
+    });
+    const fetchMock = vi.fn(async () => {
+      throw new Error("unexpected unguarded fetch");
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(service.checkForUpdates("listed")).resolves.toEqual([
+      expect.objectContaining({
+        id: "listed",
+        outcome: "unavailable",
+        detail: expect.stringContaining("non-public address 127.0.0.1"),
+      }),
+    ]);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it("retains rollback state through the grace period and collects it afterward", async () => {
     await service.stop();
     let clock = Date.now();
     const makeService = () =>
       createPluginService({
+        aiServices: createAiServiceRegistry(),
         telemetry: createNoopTelemetryService(),
         db,
         hub: {
@@ -971,7 +1131,6 @@ describe("plugin update service and routes", () => {
     });
     await stat(join(legacyRoot, "package.json"));
   });
-  /** A second repository whose plugin releases are tagged vX.Y.Z. */
   async function taggedRepo(): Promise<string> {
     const tagged = join(workDir, "tagged");
     await mkdir(tagged, { recursive: true });
@@ -1013,7 +1172,6 @@ describe("plugin update service and routes", () => {
     const tagged = await taggedRepo();
     await service.install(`git:${tagged}@semver:^1.0.0`, { kind: "root" });
     const nextCommit = await releaseTag(tagged, "v1.1.0");
-    // Outside the range: it must never be offered.
     await releaseTag(tagged, "v2.0.0");
 
     const checked = await service.checkForUpdates("tagged");
@@ -1044,7 +1202,6 @@ describe("plugin update service and routes", () => {
     const tagged = await taggedRepo();
     await service.install(`git:${tagged}@semver:^1.0.0`, { kind: "root" });
     const installed = getInstalledPluginRegistration(db, "tagged");
-    // The author rewrites the release the user already accepted.
     await writeFile(join(tagged, "release.txt"), "rewritten");
     await git(tagged, ["add", "-A"]);
     await git(tagged, ["commit", "-qm", "rewrite"]);
@@ -1065,7 +1222,6 @@ describe("plugin update service and routes", () => {
         `${installed?.gitResolvedCommit ?? ""} to ${moved}`,
       ),
     });
-    // The installed plugin is untouched: only the resolution is refused.
     expect(getInstalledPluginRegistration(db, "tagged")).toMatchObject({
       sourceGitResolvedTag: "v1.0.0",
       gitResolvedCommit: installed?.gitResolvedCommit,
@@ -1116,13 +1272,10 @@ describe("plugin update service and routes", () => {
     const tagged = await taggedRepo();
     await service.install(`git:${tagged}@v1.0.0`, { kind: "root" });
     const installed = getInstalledPluginRegistration(db, "tagged");
-    // An offline migration left this row without a classified ref kind.
     db.$client
       .prepare("UPDATE plugins SET source_git_ref_kind = NULL WHERE id = ?")
       .run("tagged");
 
-    // The attacker deletes the release tag and publishes a branch of the
-    // same name carrying their own commit.
     await git(tagged, ["tag", "-d", "v1.0.0"]);
     await writeFile(join(tagged, "release.txt"), "attacker code");
     await git(tagged, ["add", "-A"]);
@@ -1136,7 +1289,6 @@ describe("plugin update service and routes", () => {
         detail: expect.stringContaining("security check failed"),
       },
     ]);
-    // The row stays pinned: no branch classification, no new commit.
     expect(getInstalledPluginRegistration(db, "tagged")).toMatchObject({
       sourceGitRefKind: null,
       gitResolvedCommit: installed?.gitResolvedCommit,
@@ -1162,9 +1314,6 @@ describe("plugin update service and routes", () => {
     const tagged = await taggedRepo();
     await service.install(`git:${tagged}@semver:^1.0.0`, { kind: "root" });
     const compatible = await releaseTag(tagged, "v1.1.0");
-    // v1.2.0 demands a bb nobody is running, so it must not be offered and
-    // must not hide v1.1.0. Activation must also store the tag this
-    // resolution selected, not the highest tag a second query would find.
     await writeFile(
       join(tagged, "package.json"),
       JSON.stringify({

@@ -16,6 +16,7 @@ import type {
 import type { HostDaemonCommand } from "@bb/host-daemon-contract";
 import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { requireThreadEnvironment } from "../lib/entity-lookup.js";
+import { deferThreadMessage } from "./deferred-thread-messages.js";
 import {
   addRequestIdToTurnSubmitCommandPayload,
   buildExecutionOptions,
@@ -25,12 +26,12 @@ import {
 import {
   ensureThreadCanStartRequest,
   prepareReadyThreadTurnCommand,
-  prepareReadyThreadTurnDispatch,
 } from "./thread-lifecycle.js";
 import { applyLoggedThreadLifecycleEventInTransaction } from "./lifecycle-outcome.js";
+import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
 import {
   appendClientTurnEventInTransaction,
-  appendPreparedClientTurnRequestedEventInTransaction,
+  appendPreparedClientTurnRequestedEventWithNotificationInTransaction,
   createClientTurnRequestId,
   getActiveTurnId,
 } from "./thread-events.js";
@@ -48,10 +49,6 @@ import {
 
 const PARENT_SYSTEM_MESSAGE_SOURCE = "tell";
 
-// Family-B taxonomy stamping carried alongside the message input from each emit
-// site to the persisted `client/turn/requested` event. `senderThreadId` is null
-// for these `initiator: "system"` messages, so the subject must be stamped at
-// emit time.
 export interface ParentSystemMessageTaxonomy {
   systemMessageKind: SystemMessageKind;
   systemMessageSubject: SystemMessageSubject | null;
@@ -114,13 +111,7 @@ interface QueueReadyParentSystemMessageArgs extends ParentSystemMessageTaxonomy 
 }
 
 interface QueueActiveParentSystemMessageInTransactionArgs extends QueueReadyParentSystemMessageArgs {
-  sessionId: string;
   preparedCommand: PreparedTurnSubmitCommandPayload;
-}
-
-interface QueueActiveParentSystemMessageResult {
-  command: Extract<HostDaemonCommand, { type: "turn.submit" }> | null;
-  queued: boolean;
 }
 
 function splitRenderedParentSystemSlot(
@@ -141,7 +132,7 @@ function splitRenderedParentSystemSlot(
   };
 }
 
-export function buildParentSystemInputFromSegments(
+function buildParentSystemInputFromSegments(
   args: BuildParentSystemInputFromSegmentsArgs,
 ): PromptInput[] {
   let text = "";
@@ -181,12 +172,6 @@ export function buildParentSystemInputFromTemplateSlot(
   });
 }
 
-/**
- * Canonical display label for a thread that is the subject of a parent-facing
- * system message: the trimmed title, or the thread id when untitled. Shared by
- * the stamped `systemMessageSubject.threadName` and the body's `@thread`
- * mention label so the two can't drift.
- */
 export function parentSystemThreadLabel(thread: {
   id: string;
   title: string | null;
@@ -211,7 +196,7 @@ export function buildParentSystemThreadMention(
 function queueActiveParentSystemMessageInTransaction(
   tx: DbTransaction,
   args: QueueActiveParentSystemMessageInTransactionArgs,
-): QueueActiveParentSystemMessageResult {
+): Extract<HostDaemonCommand, { type: "turn.submit" }> | null {
   const currentThread = getThread(tx, args.thread.id);
   if (
     !currentThread ||
@@ -220,7 +205,7 @@ function queueActiveParentSystemMessageInTransaction(
     currentThread.archivedAt !== null ||
     currentThread.deletedAt !== null
   ) {
-    return { command: null, queued: false };
+    return null;
   }
 
   const expectedSteerTurnId = getActiveTurnId({ db: tx }, args.thread.id);
@@ -241,19 +226,16 @@ function queueActiveParentSystemMessageInTransaction(
       expectedTurnId: expectedSteerTurnId,
     },
   });
-  return {
-    command: addRequestIdToTurnSubmitCommandPayload({
-      requestId: request.requestId,
-      preparedCommand: {
-        ...args.preparedCommand,
-        target: {
-          mode: "auto",
-          expectedTurnId: expectedSteerTurnId,
-        },
+  return addRequestIdToTurnSubmitCommandPayload({
+    requestId: request.requestId,
+    preparedCommand: {
+      ...args.preparedCommand,
+      target: {
+        mode: "auto",
+        expectedTurnId: expectedSteerTurnId,
       },
-    }),
-    queued: true,
-  };
+    },
+  });
 }
 
 async function queueActiveParentSystemMessage(
@@ -262,10 +244,9 @@ async function queueActiveParentSystemMessage(
 ): Promise<boolean> {
   const expectedSteerTurnId = getActiveTurnId(deps, args.thread.id);
   const permissionEscalation = resolvePermissionEscalation({
-    thread: args.thread,
     initiator: "system",
   });
-  const session = await ensureHostSessionReadyForWork(deps, {
+  await ensureHostSessionReadyForWork(deps, {
     hostId: args.environment.hostId,
   });
   const preparedCommand = await prepareTurnSubmitCommandPayload(deps, {
@@ -286,16 +267,15 @@ async function queueActiveParentSystemMessage(
     },
   });
 
-  const queued = deps.db.transaction(
+  const command = deps.db.transaction(
     (tx) =>
       queueActiveParentSystemMessageInTransaction(tx, {
         ...args,
         preparedCommand,
-        sessionId: session.id,
       }),
     { behavior: "immediate" },
   );
-  if (!queued.queued || !queued.command) {
+  if (command === null) {
     return false;
   }
 
@@ -303,7 +283,7 @@ async function queueActiveParentSystemMessage(
     eventTypes: ["client/turn/requested"],
   });
   startLiveHostCommand(deps, {
-    command: queued.command,
+    command,
     hostId: args.environment.hostId,
     timeoutMs: LIVE_DAEMON_COMMAND_TIMEOUT_MS,
     onError: ({ error }) => {
@@ -325,15 +305,12 @@ async function queueReadyParentSystemMessage(
   }
 
   const permissionEscalation = resolvePermissionEscalation({
-    thread: args.thread,
     initiator: "system",
   });
   const requestId = createClientTurnRequestId();
 
   const command = await prepareReadyThreadTurnCommand(deps, {
     thread: args.thread,
-    // A parent system message targets an already-started thread; forking only
-    // happens at create time.
     fork: null,
     input: args.input,
     requestId,
@@ -350,11 +327,10 @@ async function queueReadyParentSystemMessage(
     providerId: args.thread.providerId,
     syncGeneratedTitle: false,
   });
-  let transitioned = false;
-  deps.db.transaction(
+  const activeThread: Thread | null = deps.db.transaction(
     (tx) => {
       ensureThreadCanStartRequest(args.thread);
-      appendPreparedClientTurnRequestedEventInTransaction(tx, {
+      appendPreparedClientTurnRequestedEventWithNotificationInTransaction(tx, {
         threadId: args.thread.id,
         environmentId: args.environment.id,
         type: "client/turn/requested",
@@ -369,19 +345,16 @@ async function queueReadyParentSystemMessage(
         target: { kind: "new-turn" },
         requestId,
       });
-      const dispatchKind = prepareReadyThreadTurnDispatch({
-        command,
-        thread: args.thread,
-      });
-      if (dispatchKind === "turn.submit") {
-        requireThreadLifecycleEventApplied(
-          applyLoggedThreadLifecycleEventInTransaction(
-            { db: tx, logger: deps.logger },
-            { event: { type: "run.started" }, threadId: args.thread.id },
-          ),
-        );
-        transitioned = true;
+      const dispatchKind = command.mode;
+      if (dispatchKind !== "turn.submit") {
+        return null;
       }
+      return requireThreadLifecycleEventApplied(
+        applyLoggedThreadLifecycleEventInTransaction(
+          { db: tx, logger: deps.logger },
+          { event: { type: "run.started" }, threadId: args.thread.id },
+        ),
+      );
     },
     { behavior: "immediate" },
   );
@@ -399,10 +372,12 @@ async function queueReadyParentSystemMessage(
       );
     },
   });
-  if (transitioned) {
-    deps.hub.notifyThread(args.thread.id, ["status-changed"], {
-      projectId: args.thread.projectId,
-    });
+  if (activeThread) {
+    deps.hub.notifyThread(
+      args.thread.id,
+      ["status-changed"],
+      buildThreadStatusChangeMetadata(deps, activeThread),
+    );
   }
   return true;
 }
@@ -420,7 +395,16 @@ export async function queueParentSystemMessage(
     return false;
   }
   if (deps.pendingInteractions.hasPendingThreadInteraction(parentThread.id)) {
-    return false;
+    deferThreadMessage(deps, {
+      threadId: parentThread.id,
+      payload: {
+        kind: "parent-system",
+        input: args.input,
+        systemMessageKind: args.systemMessageKind,
+        systemMessageSubject: args.systemMessageSubject,
+      },
+    });
+    return true;
   }
 
   const { environment } = requireThreadEnvironment(
@@ -433,7 +417,6 @@ export async function queueParentSystemMessage(
     {
       threadId: parentThread.id,
     },
-    "client/turn/requested",
   );
   if (
     await dispatchTurnDuringReprovision({

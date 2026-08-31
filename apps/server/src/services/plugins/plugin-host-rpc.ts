@@ -66,6 +66,7 @@ export async function callPluginHostRpc(
     input: unknown;
     hostId: string;
     signal?: AbortSignal;
+    timeoutMs?: number;
     artifact: PluginHostArtifactSnapshot;
   },
 ): Promise<unknown> {
@@ -79,9 +80,10 @@ export async function callPluginHostRpc(
     `host rpc input for ${args.method}`,
   );
   const callId = randomUUID();
+  const timeoutMs = args.timeoutMs ?? COMMAND_TIMEOUT_MS;
   const rpc = callHostOnlineRpc(deps, {
     hostId: args.hostId,
-    timeoutMs: COMMAND_TIMEOUT_MS + HOST_RPC_TRANSPORT_GRACE_MS,
+    timeoutMs: timeoutMs + HOST_RPC_TRANSPORT_GRACE_MS,
     command: {
       type: "plugin.host.call",
       pluginId: args.pluginId,
@@ -93,7 +95,7 @@ export async function callPluginHostRpc(
       callId,
       method: args.method,
       input,
-      timeoutMs: COMMAND_TIMEOUT_MS,
+      timeoutMs,
     },
   });
   const signal = args.signal;
@@ -129,9 +131,6 @@ export async function callPluginHostRpc(
           );
         });
   const output = await validateValue(method.output, result.output, "output");
-  // The daemon already returned JSON. This second validation is the server
-  // side of the contract and may intentionally transform that wire value into
-  // the schema's typed output (for example, a Date). Return it as-is.
   return output;
 }
 

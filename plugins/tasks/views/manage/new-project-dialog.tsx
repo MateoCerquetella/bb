@@ -43,12 +43,15 @@ import {
 const NO_FOLDER = "__none__";
 const NEW_FOLDER = "__new__";
 
-export interface NewProjectDialogProps {
+interface NewProjectDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }
 
-export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) {
+export function NewProjectDialog({
+  open,
+  onOpenChange,
+}: NewProjectDialogProps) {
   const rpc = useTasksRpc();
   const navigation = useTasksNavigation();
   const projects = useProjects();
@@ -67,7 +70,6 @@ export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // BB workspace projects, including Personal, for the linked-project picker.
   const bbProjects = useTasksQuery(
     async (rpc) => (await rpc.call("listBbProjects")).bbProjects,
     [],
@@ -150,7 +152,6 @@ export function NewProjectDialog({ open, onOpenChange }: NewProjectDialogProps) 
         linkedBbProjectId: linkedTrimmed === "" ? null : linkedTrimmed,
       });
       onOpenChange(false);
-      // No explicit view: the shell opens the view this client last used.
       navigation.go({ kind: "project", projectId: project.id, view: null });
     } catch (submitError) {
       setError(describeCreateProjectError(submitError));

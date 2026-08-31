@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
 
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { useEffect, useLayoutEffect, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { FollowUpComposerProps } from "@/components/promptbox/FollowUpPromptBox";
+import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
+import { getPromptDraftAccessor } from "@/hooks/usePromptDraftStorage";
 import { EmbeddedThreadChat } from "./EmbeddedThreadChat";
 
 const mocks = vi.hoisted(() => ({
@@ -20,8 +22,6 @@ const mocks = vi.hoisted(() => ({
   readTrackingThreads: [] as Array<unknown>,
   sendThreadMessageMutateAsync: vi.fn(),
   threadRuntimeDisplayStatus: "idle" as string,
-  // Stands in for the realtime-updated timeline query cache: rows appended here
-  // while the component is unmounted must appear after a remount.
   timelineRows: [] as Array<{ text: string }>,
   injectedTimelineProps: [] as Array<unknown>,
   timelinePanelProps: [] as Array<Record<string, unknown>>,
@@ -29,30 +29,62 @@ const mocks = vi.hoisted(() => ({
   resolveMentionLink: vi.fn(),
 }));
 
-vi.mock("@/components/promptbox/FollowUpPromptBox", () => ({
-  FollowUpPromptBox: ({
-    composer,
-    stack,
-  }: {
-    composer: Pick<
-      FollowUpComposerProps,
-      "message" | "onChangeMessage" | "onSubmit"
-    >;
-    stack: ReactNode;
-  }) => (
-    <div>
-      {stack}
-      <input
-        data-testid="embedded-chat-composer"
-        value={composer.message}
-        onChange={(event) => composer.onChangeMessage(event.target.value, [])}
-      />
-      <button type="button" onClick={composer.onSubmit}>
-        Send
-      </button>
-    </div>
-  ),
+const hostDraftMocks = vi.hoisted(() => ({
+  latestHost: null as {
+    getCurrent(): { text: string };
+    subscribeDraft(listener: () => void): () => void;
+  } | null,
+  textAtNotify: [] as string[],
+  subscribed: false,
 }));
+
+vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
+  const { usePluginComposerHostDraft } =
+    await import("@/components/plugin/plugin-composer-host");
+  function BottomHostDraftProbe({ host }: { host: PluginComposerHost | null }) {
+    useLayoutEffect(() => {
+      hostDraftMocks.latestHost = host;
+    }, [host]);
+    useEffect(() => {
+      if (hostDraftMocks.subscribed || !host) return;
+      hostDraftMocks.subscribed = true;
+      host.subscribeDraft(() => {
+        hostDraftMocks.textAtNotify.push(
+          hostDraftMocks.latestHost?.getCurrent().text ?? "",
+        );
+      });
+    }, [host]);
+    const draft = usePluginComposerHostDraft(host);
+    return <div data-testid="embedded-host-draft">{draft?.text ?? ""}</div>;
+  }
+  return {
+    FollowUpPromptBox: ({
+      composer,
+      stack,
+      pluginComposerHost,
+    }: {
+      composer: Pick<
+        FollowUpComposerProps,
+        "message" | "onChangeMessage" | "onSubmit"
+      >;
+      stack: ReactNode;
+      pluginComposerHost?: PluginComposerHost | null;
+    }) => (
+      <div>
+        {stack}
+        <input
+          data-testid="embedded-chat-composer"
+          value={composer.message}
+          onChange={(event) => composer.onChangeMessage(event.target.value, [])}
+        />
+        <button type="button" onClick={composer.onSubmit}>
+          Send
+        </button>
+        <BottomHostDraftProbe host={pluginComposerHost ?? null} />
+      </div>
+    ),
+  };
+});
 
 vi.mock("@/components/promptbox/banner/QueuedMessagesList", () => ({
   QueuedMessagesList: ({
@@ -148,7 +180,7 @@ vi.mock("@/hooks/useThreadCreationOptions", () => ({
 vi.mock("@/hooks/usePromptMentions", () => ({
   usePromptMentions: () => ({
     triggers: [],
-    suggestions: [],
+    results: { groups: [], suggestions: [] },
     isLoading: false,
     isError: false,
     setQuery: vi.fn(),
@@ -272,25 +304,23 @@ vi.mock("@/hooks/mutations/project-mutations", () => ({
   }),
 }));
 
-function renderEmbeddedChat({
+function buildEmbeddedChat({
   threadId = "thr_child",
-  isActive = true,
   surfaceTone = "background",
+  pluginComposerBottomScope,
 }: {
-  threadId?: string | null;
-  isActive?: boolean;
+  threadId?: string;
   surfaceTone?: "background" | "sidebar";
+  pluginComposerBottomScope?: PluginComposerHost["scope"];
 } = {}) {
-  return render(
+  return (
     <EmbeddedThreadChat
       variant="compact"
       surfaceTone={surfaceTone}
       threadId={threadId}
-      surfaceFallbackKey="tab-1"
       projectId="proj-1"
       providerId="provider-1"
       promptContextEnvironmentId={null}
-      isActive={isActive}
       onOpenLink={mocks.onOpenLink}
       onOpenLocalFileLink={mocks.onOpenLocalFileLink}
       resolveMentionLink={mocks.resolveMentionLink}
@@ -299,15 +329,22 @@ function renderEmbeddedChat({
         draftScope: {
           kind: "thread",
           projectId: "proj-1",
-          threadId: threadId ?? "thr_parent",
+          threadId,
         },
-        executionDefaultsThreadId: threadId ?? "thr_parent",
+        executionDefaultsThreadId: threadId,
         executionResetKey: "thr_parent",
         permissionPolicy: "snapshot",
         environmentSummary: null,
+        ...(pluginComposerBottomScope ? { pluginComposerBottomScope } : {}),
       }}
-    />,
+    />
   );
+}
+
+function renderEmbeddedChat(
+  options: Parameters<typeof buildEmbeddedChat>[0] = {},
+) {
+  return render(buildEmbeddedChat(options));
 }
 
 describe("EmbeddedThreadChat", () => {
@@ -327,6 +364,9 @@ describe("EmbeddedThreadChat", () => {
     mocks.timelinePanelProps = [];
     mocks.timelineProjectIds = [];
     mocks.resolveMentionLink.mockReset();
+    hostDraftMocks.latestHost = null;
+    hostDraftMocks.textAtNotify = [];
+    hostDraftMocks.subscribed = false;
   });
 
   it("applies the requested surface tone to the timeline and footer", () => {
@@ -349,8 +389,6 @@ describe("EmbeddedThreadChat", () => {
   });
 
   it("forwards the project to the timeline so attachment images resolve to API URLs", () => {
-    // Without it, uploaded attachment paths stay relative and the browser
-    // resolves them against the current route (e.g. /plugins/<id>/...).
     renderEmbeddedChat();
     expect(mocks.timelineProjectIds.at(-1)).toBe("proj-1");
   });
@@ -376,9 +414,6 @@ describe("EmbeddedThreadChat", () => {
       target: { value: "Typing must not invalidate timeline rows" },
     });
 
-    // ThreadTimelineRows memoizes its static renderer context around these
-    // callbacks. Replacing either one on every draft write re-renders every
-    // visible timeline row for each keystroke.
     expect(mocks.timelinePanelProps.at(-1)).toEqual(
       expect.objectContaining({
         onMessageAddToChat: initialTimelineProps?.onMessageAddToChat,
@@ -397,9 +432,6 @@ describe("EmbeddedThreadChat", () => {
     expect(screen.getAllByTestId("embedded-chat-timeline-row")).toHaveLength(1);
     first.unmount();
 
-    // The stream advances while no surface is mounted (rows land in the shared
-    // timeline store); a fresh mount must pick up both the persisted draft and
-    // the newly streamed rows.
     mocks.timelineRows = [{ text: "First reply" }, { text: "Streamed later" }];
     renderEmbeddedChat();
     expect(
@@ -408,7 +440,6 @@ describe("EmbeddedThreadChat", () => {
     const rows = screen.getAllByTestId("embedded-chat-timeline-row");
     expect(rows).toHaveLength(2);
     expect(rows[1]?.textContent).toBe("Streamed later");
-    // No injected controller: the component owns timeline loading here.
     expect(mocks.injectedTimelineProps.at(-1)).toBeUndefined();
   });
 
@@ -431,7 +462,6 @@ describe("EmbeddedThreadChat", () => {
       }),
     );
     expect(mocks.sendThreadMessageMutateAsync).not.toHaveBeenCalled();
-    // The submitted draft clears — and stays cleared on a remount.
     expect(
       screen.getByTestId<HTMLInputElement>("embedded-chat-composer").value,
     ).toBe("");
@@ -456,20 +486,6 @@ describe("EmbeddedThreadChat", () => {
     );
   });
 
-  it("tracks read state only while active", () => {
-    renderEmbeddedChat({ isActive: false });
-    expect(mocks.readTrackingThreads.every((t) => t === undefined)).toBe(true);
-    cleanup();
-
-    mocks.readTrackingThreads = [];
-    renderEmbeddedChat({ isActive: true });
-    expect(
-      mocks.readTrackingThreads.some(
-        (t) => (t as { id?: string } | undefined)?.id === "thr_child",
-      ),
-    ).toBe(true);
-  });
-
   it("keeps queued messages adjacent to the composer", () => {
     mocks.queuedMessages = [{ id: "q1" }, { id: "q2" }];
     renderEmbeddedChat();
@@ -480,15 +496,6 @@ describe("EmbeddedThreadChat", () => {
     expect(screen.getByTestId("queued-count").textContent).toBe("2");
   });
 
-  it("keeps queued messages visible while a retained embedded chat is inactive", () => {
-    mocks.queuedMessages = [{ id: "q1" }];
-    renderEmbeddedChat({ isActive: false });
-
-    expect(screen.getByTestId("queued-count").textContent).toBe("1");
-  });
-
-  // Only the main thread view used to render approvals, so a side chat in a
-  // plugin panel would sit on an approval the user could not answer.
   it("swaps the composer for a pending approval so it can be answered", () => {
     mocks.pendingInteractions = [
       { id: "int_1", createdAt: 1, payload: { kind: "approval" } },
@@ -502,7 +509,6 @@ describe("EmbeddedThreadChat", () => {
     expect(screen.queryByTestId("embedded-chat-composer")).toBeNull();
   });
 
-  // A plugin-owned interaction has its own composer, so the draft must stay.
   it("keeps the composer for a plugin-owned interaction", () => {
     mocks.pendingInteractions = [
       { id: "int_2", createdAt: 1, payload: { kind: "plugin" } },
@@ -512,5 +518,52 @@ describe("EmbeddedThreadChat", () => {
 
     expect(screen.queryByTestId("pending-interaction-banner")).toBeNull();
     expect(screen.getByTestId("embedded-chat-composer")).toBeTruthy();
+  });
+
+  it("delivers the new thread's draft to host subscribers immediately on a thread switch", () => {
+    getPromptDraftAccessor({
+      kind: "thread",
+      projectId: "proj-1",
+      threadId: "thr_switch_a",
+    }).setDraft({ text: "alpha draft", mentions: [], attachments: [] });
+    getPromptDraftAccessor({
+      kind: "thread",
+      projectId: "proj-1",
+      threadId: "thr_switch_b",
+    }).setDraft({ text: "beta draft", mentions: [], attachments: [] });
+
+    const scopeFor = (threadId: string) =>
+      ({ kind: "thread", threadId }) as const;
+    const view = render(
+      buildEmbeddedChat({
+        threadId: "thr_switch_a",
+        pluginComposerBottomScope: scopeFor("thr_switch_a"),
+      }),
+    );
+    expect(screen.getByTestId("embedded-host-draft").textContent).toBe(
+      "alpha draft",
+    );
+
+    view.rerender(
+      buildEmbeddedChat({
+        threadId: "thr_switch_b",
+        pluginComposerBottomScope: scopeFor("thr_switch_b"),
+      }),
+    );
+    expect(screen.getByTestId("embedded-host-draft").textContent).toBe(
+      "beta draft",
+    );
+    expect(hostDraftMocks.textAtNotify).toEqual(["beta draft"]);
+
+    view.rerender(
+      buildEmbeddedChat({
+        threadId: "thr_switch_a",
+        pluginComposerBottomScope: scopeFor("thr_switch_a"),
+      }),
+    );
+    expect(screen.getByTestId("embedded-host-draft").textContent).toBe(
+      "alpha draft",
+    );
+    expect(hostDraftMocks.textAtNotify).toEqual(["beta draft", "alpha draft"]);
   });
 });

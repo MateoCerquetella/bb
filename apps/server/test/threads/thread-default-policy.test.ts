@@ -9,8 +9,6 @@ import {
   resolveCreateThreadExecutionDefaults,
   resolveThreadDefaultPermissionMode,
   resolveThreadExecutionPermissionMode,
-  resolveWorkflowsEnabledPolicy,
-  PRODUCT_DEFAULT_PROVIDER_ID,
 } from "../../src/services/threads/thread-default-policy.js";
 import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
 import {
@@ -73,29 +71,58 @@ function makeParentThread(
   };
 }
 
-describe("resolveWorkflowsEnabledPolicy", () => {
-  it("enables workflows for claude-code sessions only", () => {
-    expect(resolveWorkflowsEnabledPolicy(registry, "claude-code")).toBe(true);
-    expect(resolveWorkflowsEnabledPolicy(registry, "codex")).toBe(false);
-    expect(resolveWorkflowsEnabledPolicy(registry, "pi")).toBe(false);
-    expect(resolveWorkflowsEnabledPolicy(registry, "acp-my-agent")).toBe(false);
-  });
-});
-
 describe("resolveCreateThreadExecutionDefaults", () => {
   it("uses the picker's first provider without pinning a model", () => {
-    // The product default and the picker's first entry are the same fact.
-    const productProviderId = registry.list()[0]?.info.id;
-    expect(productProviderId).toBe(PRODUCT_DEFAULT_PROVIDER_ID);
+    expect(registry.list()[0]?.info.id).toBe("codex");
 
     expect(
       resolveCreateThreadExecutionDefaults(registry, {
         storedDefaults: null,
       }),
     ).toEqual({
-      providerId: productProviderId,
+      providerId: "codex",
       executionDefaults: null,
     });
+  });
+
+  it("honors the user's default provider and picker order", async () => {
+    const preferences = {
+      providerOrder: ["pi", "claude-code"],
+      defaultProviderId: null as string | null,
+    };
+    const userRegistry = createProviderRegistryService({
+      readUserProviderPreferences: () => preferences,
+    });
+    await registerFirstPartyProviders(userRegistry);
+
+    expect(userRegistry.list().map((entry) => entry.info.id)).toEqual([
+      "pi",
+      "claude-code",
+      "codex",
+      "acp-cursor",
+      "acp-opencode",
+      "acp-omp",
+      "acp-grok",
+      "acp-hermes-agent",
+    ]);
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerId,
+    ).toBe("pi");
+
+    preferences.defaultProviderId = "codex";
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerId,
+    ).toBe("codex");
+    preferences.defaultProviderId = "not-installed";
+    expect(
+      resolveCreateThreadExecutionDefaults(userRegistry, {
+        storedDefaults: null,
+      }).providerId,
+    ).toBe("pi");
   });
 
   it("discards stored defaults when the resolved provider changes", () => {
@@ -320,7 +347,7 @@ describe("resolveThreadDefaultPermissionMode", () => {
       resolveThreadDefaultPermissionMode(registry, {
         thread: makeThread({
           parentThreadId: "thr-parent-1",
-          providerId: "acp-my-agent",
+          providerId: "acp-cursor",
         }),
       }),
     ).toBe("full");
@@ -399,8 +426,6 @@ describe("resolveThreadExecutionPermissionMode", () => {
   });
 
   it("never upgrades an inherited mode past the parent for provider support", () => {
-    // Pi only supports full; the parent's mode stays the ceiling so provider
-    // validation rejects the pairing instead of silently granting full.
     expect(
       resolveThreadExecutionPermissionMode(registry, {
         parentThread: makeParentThread(),

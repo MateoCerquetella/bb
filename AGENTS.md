@@ -4,6 +4,10 @@
 
 - When renaming a domain concept, search project-wide for stale names in variables, files, query keys, constants, tests, and docs. TypeScript only catches type references.
 
+## Code Comments
+
+- Code comments are forbidden, except for semantic tool directives and Plugin SDK declaration comments.
+
 ## Types And Contracts
 
 - Validate and parse data at system boundaries, then pass typed values internally.
@@ -30,6 +34,7 @@
 ## Plugin API
 
 - Any new public plugin API member (a `@get-bb/plugin-sdk/app` export, an `app.slots.*` method, or a `BbPluginApi` property) ships with an `experimental_` name prefix and an entry in [docs/api_to_audit.md](docs/api_to_audit.md) describing what it does and what to audit before stabilizing. Dropping the prefix is the deliberate stabilization step: audit the entry, rename project-wide, and remove it from the doc in the same change.
+- The Plugin Guide (the `plugin-api-docs` plugin, rendering `packages/plugin-api-map`) is bb's only plugin API documentation. A new surface needs a card in `packages/plugin-api-map/src/surfaces.ts` naming its SDK symbols in the same change; `packages/plugin-api-map/test/api-sync.test.ts` fails the build when the map and the SDK drift apart.
 
 ## Data Access
 
@@ -56,6 +61,7 @@
 
 - Only write high quality tests that verify where there could be potential bugs. Avoid testing trivial getters/setters, framework wiring, or other code that is unlikely to break.
 - Pipe slow test output to a file, then read the file. Example: `pnpm exec turbo run test --filter=@bb/integration-tests --force > /tmp/test-out.txt 2>&1`.
+- Package `vitest.config.ts` files build their `projects` with `sharedWorkerProjects` from `vitest.shared.ts`. It runs node-environment test files in shared workers (`isolate: false`) and gives a file its own worker when it runs in a DOM environment (`jsdom`) or when the file, or a test helper it imports, mutates worker-global state (`vi.mock`, `vi.stubGlobal`, `process.env`, `globalThis.*` assignments, `Object.defineProperty` on a global). Re-importing the module graph per file was 80–90% of the big suites' CPU. Restore what a test changes anyway; the scan is a safety net, not a license.
 
 ## GitHub Issues And Pull Requests
 
@@ -64,10 +70,9 @@
 - When an agent creates a GitHub issue or pull request, add this line at the end of the body:
 
   ```
-  > AGENT GENERATED: by <model>
+  > AGENT GENERATED
   ```
 
-- Replace `<model>` with the name of the model that writes the text, for example `Claude Opus 5`.
 - Add this line to each new issue and pull request. It shows the readers that an agent made the content.
 
 ## Debugging And QA

@@ -3,34 +3,18 @@ import type { ProviderCliKey } from "@bb/host-daemon-contract";
 import { Icon } from "@bb/shared-ui/icon";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@bb/shared-ui/tooltip";
 import { cn } from "@bb/shared-ui/lib/utils";
+import { useProviderCliInstallRunner } from "@/components/provider-cli/provider-cli-install";
+import { providerCliJobKey } from "@/components/provider-cli/provider-cli-install-store";
 import { SidebarMenuItem } from "@/components/ui/sidebar.js";
+import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { useUpdateInventory } from "@/hooks/useUpdateInventory";
-import {
-  getProviderIconColorClass,
-  getProviderIconInfo,
-} from "@/lib/provider-icon";
+import { ProviderIconMark } from "@/components/settings/ProviderIconMark";
+import { getProviderIconInfo } from "@/lib/provider-icon";
 import { getSettingsRoutePath } from "@/lib/route-paths";
 
-export interface SidebarUpdatesBadgeProps {
+interface SidebarUpdatesBadgeProps {
   onNavigate?: () => void;
 }
-
-/**
- * Provider CLI keys are their own namespace (`claudeCode`), distinct from the
- * agent provider ids the icon registry is keyed by (`claude-code`).
- */
-const PROVIDER_CLI_AGENT_PROVIDER_ID = {
-  codex: "codex",
-  claudeCode: "claude-code",
-  cursor: "acp-cursor",
-} as const satisfies Record<ProviderCliKey, string>;
-
-/** Stable left-to-right order so the marks never reshuffle between polls. */
-const PROVIDER_CLI_DISPLAY_ORDER = [
-  "codex",
-  "claudeCode",
-  "cursor",
-] as const satisfies readonly ProviderCliKey[];
 
 const CHIP_CLASS = cn(
   "flex h-6 shrink-0 items-center gap-1.5 rounded-full border border-sidebar-border px-2",
@@ -49,21 +33,10 @@ interface StaleProvider {
   displayName: string;
 }
 
-/**
- * The quiet update affordance (BB-48): small outlined chips in the sidebar
- * footer's lower-right corner, rendered only while an update needs attention.
- * Updates split into the two buckets a user acts on separately — bb itself
- * (app release, downloaded desktop update, or a daemon stuck on an old
- * protocol) and the agent CLIs, which carry their own brand marks so it is
- * clear which agent is stale without hovering. Both chips open the
- * consolidated Settings → Updates view.
- *
- * A CLI that is not installed at all is not an update and gets no chip here:
- * there is no installed version to stale against, and the Settings → Updates
- * page already surfaces the install prompt for it.
- */
 export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
   const inventory = useUpdateInventory();
+  const providers = useSystemProviders().data;
+  const { runningJobKey } = useProviderCliInstallRunner();
 
   const stuckDaemonCount = inventory.machines.filter(
     (machine) => machine.canRetryDaemonUpdate,
@@ -73,9 +46,6 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
     (inventory.desktopUpdateReady ? 1 : 0) +
     stuckDaemonCount;
 
-  // One mark per provider, even when the same CLI is stale on several machines.
-  // Missing CLIs are install prompts, not updates: skip them so the chip never
-  // claims an update is available for a CLI that isn't installed.
   const staleProvidersByKey = new Map<ProviderCliKey, StaleProvider>();
   for (const machine of inventory.machines) {
     for (const issue of machine.issues) {
@@ -90,10 +60,14 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
       }
     }
   }
-  const staleProviders = PROVIDER_CLI_DISPLAY_ORDER.flatMap((provider) => {
-    const stale = staleProvidersByKey.get(provider);
-    return stale === undefined ? [] : [stale];
-  });
+  const staleProviders = [...staleProvidersByKey.values()];
+  const providerUpdateRunning = inventory.machines.some((machine) =>
+    machine.issues.some(
+      (issue) =>
+        issue.status.installed &&
+        runningJobKey === providerCliJobKey(machine.host.id, issue.provider),
+    ),
+  );
 
   if (bbUpdateCount === 0 && staleProviders.length === 0) {
     return null;
@@ -107,9 +81,6 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
   )} ${staleProviders.length === 1 ? "update" : "updates"} available`;
 
   return (
-    // Right-alignment on a single row comes from the flexible spacer the
-    // sidebar footer renders before this item, not from a margin here — a
-    // margin would also push the chips right on their own wrapped line.
     <SidebarMenuItem className="flex min-w-0 items-center gap-1">
       {bbUpdateCount > 0 ? (
         <Tooltip>
@@ -138,24 +109,43 @@ export function SidebarUpdatesBadge({ onNavigate }: SidebarUpdatesBadgeProps) {
               data-testid="sidebar-updates-badge-providers"
               className={CHIP_CLASS}
             >
-              <Icon name="Download" className="size-3 text-muted-foreground" />
+              <Icon
+                name={providerUpdateRunning ? "Loading" : "Download"}
+                className={cn(
+                  "size-3 text-muted-foreground",
+                  providerUpdateRunning && "animate-spin",
+                )}
+              />
               <span className="flex items-center gap-1">
                 {staleProviders.map((stale) => {
-                  const providerId =
-                    PROVIDER_CLI_AGENT_PROVIDER_ID[stale.provider];
-                  const iconInfo = getProviderIconInfo(providerId);
+                  const providerId = stale.provider;
+                  const provider = providers?.find(
+                    (candidate) => candidate.id === providerId,
+                  );
+                  const iconInfo = getProviderIconInfo(
+                    providerId,
+                    provider ?? null,
+                  );
                   if (iconInfo === undefined) {
                     return null;
                   }
-                  const { icon: ProviderIcon } = iconInfo;
                   return (
-                    <ProviderIcon
+                    <span
                       key={stale.provider}
-                      className={cn(
-                        "size-3",
-                        getProviderIconColorClass(providerId),
+                      data-provider-icon={providerId}
+                      aria-hidden
+                      className="flex size-3 shrink-0 items-center justify-center"
+                    >
+                      {provider === undefined ? (
+                        <iconInfo.icon className="size-3" />
+                      ) : (
+                        <ProviderIconMark
+                          provider={provider}
+                          icon={iconInfo.icon}
+                          className="size-3"
+                        />
                       )}
-                    />
+                    </span>
                   );
                 })}
               </span>

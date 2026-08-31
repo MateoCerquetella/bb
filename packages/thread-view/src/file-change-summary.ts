@@ -5,19 +5,19 @@ import {
 
 export type FileChangeAction = "created" | "deleted" | "renamed" | "edited";
 
-export interface FileChangeDiffStats {
+interface FileChangeDiffStats {
   added: number;
   removed: number;
 }
 
-export interface FileChangeLike {
+interface FileChangeLike {
   path: string;
   kind?: string | null;
   movePath?: string | null;
   diff?: string | null;
 }
 
-export interface FormatFileChangePathArgs {
+interface FormatFileChangePathArgs {
   change: FileChangeLike;
   mode: TimelinePathDisplayMode;
 }
@@ -69,9 +69,7 @@ export function getFileChangeAction(change: FileChangeLike): FileChangeAction {
   return "edited";
 }
 
-export function getFileChangeActionPastTense(
-  action: FileChangeAction,
-): string {
+export function getFileChangeActionPastTense(action: FileChangeAction): string {
   switch (action) {
     case "created":
       return "Created";

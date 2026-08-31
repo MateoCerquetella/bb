@@ -1,90 +1,22 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { UPDATE_ACTION_ICON } from "@bb/domain/update-state";
 import { Button } from "@bb/shared-ui/button";
 import { Icon } from "@bb/shared-ui/icon";
-import { PluginBannerBar } from "@/components/tools/plugin-detail-banner";
 import { appToast } from "@/components/ui/app-toast";
 import { invalidatePluginList } from "@/hooks/cache-owners/plugin-cache-owner";
 import { applyPluginUpdate } from "@/hooks/queries/plugin-catalog-queries";
 import type { PluginListItem } from "@/hooks/queries/plugin-settings-queries";
 import { pluginAdminErrorMessage } from "@/lib/plugin-admin-error";
-import { pluginUpdateAvailableVersion } from "./plugin-status";
-import {
-  DetailsDisclosure,
-  displayPluginVersion,
-  formatAbsoluteDate,
-} from "./plugin-ui";
+import { DetailsDisclosure, displayPluginVersion } from "./plugin-ui";
 import { UpdatePluginDialog } from "./UpdatePluginDialog";
 
-/**
- * Whether a plugin has any update surfaces at all.
- *
- * Bundled plugins — auto builtins and store-installed officials alike — are
- * pinned to the copy shipped inside the app and update with bb releases, so
- * none of these surfaces render for them.
- */
 export function pluginHasUpdateSurfaces(plugin: PluginListItem): boolean {
   if (plugin.source.startsWith("builtin:")) return false;
   return plugin.provenance === "direct" || plugin.provenance === "catalog";
 }
 
-export function PluginUpdateBanner({ plugin }: { plugin: PluginListItem }) {
-  const [updateOpen, setUpdateOpen] = useState(false);
-  const availableVersion = pluginUpdateAvailableVersion(plugin);
-  const failure = plugin.updateState.lastFailure;
-
-  if (!pluginHasUpdateSurfaces(plugin)) return null;
-
-  if (failure !== null) {
-    return (
-      <PluginBannerBar
-        tone="destructive"
-        icon="CircleX"
-        testId="plugin-update-failure-banner"
-        title={`Update to ${displayPluginVersion(failure.version)} failed — rolled back${
-          failure.at !== null ? ` on ${formatAbsoluteDate(failure.at)}` : ""
-        }`}
-        detail={
-          failure.detail.length > 0
-            ? failure.detail
-            : `Code and data were restored to ${displayPluginVersion(plugin.version)}.`
-        }
-      />
-    );
-  }
-
-  if (availableVersion === null) return null;
-
-  return (
-    <>
-      <PluginBannerBar
-        tone="success"
-        icon="PackageReceive"
-        testId="plugin-update-banner"
-        title={`Update to ${displayPluginVersion(availableVersion)}`}
-        detail="Compatible with your bb."
-        action={
-          <Button
-            type="button"
-            size="sm"
-            className="h-7 px-2.5 text-xs"
-            onClick={() => setUpdateOpen(true)}
-          >
-            Update
-          </Button>
-        }
-      />
-      <UpdatePluginDialog
-        plugin={plugin}
-        open={updateOpen}
-        onOpenChange={setUpdateOpen}
-      />
-    </>
-  );
-}
-
-/** The newest release that exists but cannot run on this bb version. */
-export function pluginCompatibilityBlockedVersion(
+function pluginCompatibilityBlockedVersion(
   plugin: PluginListItem,
 ): string | null {
   if (!pluginHasUpdateSurfaces(plugin)) return null;
@@ -99,14 +31,6 @@ function sentence(value: string): string {
   return /[.!?]$/u.test(capitalized) ? capitalized : `${capitalized}.`;
 }
 
-/**
- * Release action for the plugin detail section header.
- *
- * Updates describe the installed artifact, not the plugin's current ability
- * to operate. Keeping them in the Release section prevents routine update
- * availability and historical rollbacks from competing with activation or
- * present-tense health banners.
- */
 export function PluginDetailReleaseControl({
   plugin,
 }: {
@@ -180,7 +104,7 @@ export function PluginDetailReleaseControl({
         aria-label={`Update ${plugin.name ?? plugin.id} to ${displayPluginVersion(availableVersion)}`}
         onClick={() => setDetailsOpen(true)}
       >
-        <Icon name="PackageReceive" className="size-3.5" aria-hidden />
+        <Icon name={UPDATE_ACTION_ICON} className="size-3.5" aria-hidden />
         Update
       </Button>
       <UpdatePluginDialog
@@ -192,7 +116,6 @@ export function PluginDetailReleaseControl({
   );
 }
 
-/** Passive update context shown in the Release table. */
 export function PluginDetailReleaseStatus({
   plugin,
 }: {

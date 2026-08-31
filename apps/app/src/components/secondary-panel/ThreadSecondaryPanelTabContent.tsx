@@ -1,4 +1,5 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect } from "react";
+import type { DiffPresentation } from "@/components/code/code-rendering";
 import type { WorkspaceDiffTarget } from "@bb/domain";
 import type { MarkdownLinkRouting } from "@/components/ui/markdown-link-routing.js";
 import { Skeleton } from "@bb/shared-ui/skeleton";
@@ -12,6 +13,7 @@ import {
   useThreadHostFilePreview,
   useThreadStorageFilePreview,
 } from "@/hooks/queries/thread-queries";
+import { useHostFilePreview } from "@/hooks/queries/host-file-preview-query";
 import {
   buildRawFilesystemHtmlContentUrl,
   buildThreadWorktreeRawContentUrl,
@@ -20,7 +22,7 @@ import type {
   EnvironmentFilePreviewSource,
   FilePreviewLineRange,
   WorkspaceFilePreviewStatusLabel,
-} from "@/lib/file-preview";
+} from "@bb/client-core";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { DiffFilesPanel } from "./git-diff/DiffFilesPanel";
 import { clearDiffFileCardStates } from "./git-diff/diffFilesStore";
@@ -35,22 +37,12 @@ const GIT_DIFF_SKELETON_FILE_COUNT = 3;
 const PANEL_SCROLL_SLOT_CLASS =
   "min-h-0 flex-1 overflow-x-auto overflow-y-auto";
 
-interface ThreadDiffSkeletonProps {
-  count?: number;
-}
-
-export interface GitDiffTabContentProps {
+interface GitDiffTabContentProps {
   environmentId?: string;
   target: WorkspaceDiffTarget | undefined;
   isDiffPanelActive: boolean;
-  /**
-   * Whether the secondary panel is currently open. The body stays mounted
-   * while the panel is closed so reopening is instant, but its TOC / patch
-   * fetches pause: realtime workspace events keep invalidating the diff cache,
-   * and refetching into an off-screen panel is wasted network and diff work.
-   */
   isPanelOpen: boolean;
-  gitDiffViewOptions: Record<string, string | boolean | number>;
+  gitDiffPresentation: DiffPresentation;
   onClearPendingGitDiffIntent?: () => void;
   onOpenFileInEditor?: (path: string) => void;
   onOpenFilePreview?: (path: string) => void;
@@ -59,20 +51,8 @@ export interface GitDiffTabContentProps {
   workspaceRootPath?: string | null;
 }
 
-export interface ThreadInfoTabContentProps {
-  metadataContent: ReactNode;
-}
-
-export interface WorkspaceFilePreviewTabContentProps {
+interface WorkspaceFilePreviewTabContentProps {
   activePath: string;
-  /**
-   * Whether the secondary panel is open. The preview stays mounted while the
-   * panel is closed (retained drawer content / desktop subtree), but its
-   * content query pauses: every workspace write invalidates the preview cache,
-   * and a live observer would refetch and remount the highlighted file into an
-   * off-screen panel. A closed panel keeps its cached preview and refetches
-   * once on reopen.
-   */
   isPanelOpen: boolean;
   copyPath?: string | null;
   environmentId?: string | null;
@@ -85,16 +65,8 @@ export interface WorkspaceFilePreviewTabContentProps {
   threadId?: string | null;
 }
 
-export interface ProjectFilePreviewTabContentProps {
+interface ProjectFilePreviewTabContentProps {
   activePath: string;
-  /**
-   * Whether the secondary panel is open. The preview stays mounted while the
-   * panel is closed (retained drawer content / desktop subtree), but its
-   * content query pauses: every workspace write invalidates the preview cache,
-   * and a live observer would refetch and remount the highlighted file into an
-   * off-screen panel. A closed panel keeps its cached preview and refetches
-   * once on reopen.
-   */
   isPanelOpen: boolean;
   copyPath?: string | null;
   environmentId: string | null;
@@ -105,16 +77,8 @@ export interface ProjectFilePreviewTabContentProps {
   projectId: string;
 }
 
-export interface HostFilePreviewTabContentProps {
+interface HostFilePreviewTabContentProps {
   activePath: string;
-  /**
-   * Whether the secondary panel is open. The preview stays mounted while the
-   * panel is closed (retained drawer content / desktop subtree), but its
-   * content query pauses: every workspace write invalidates the preview cache,
-   * and a live observer would refetch and remount the highlighted file into an
-   * off-screen panel. A closed panel keeps its cached preview and refetches
-   * once on reopen.
-   */
   isPanelOpen: boolean;
   copyPath: string;
   environmentId?: string | null;
@@ -125,16 +89,16 @@ export interface HostFilePreviewTabContentProps {
   threadId: string;
 }
 
-export interface ThreadStorageFilePreviewTabContentProps {
+interface HostScopedFilePreviewTabContentProps {
   activePath: string;
-  /**
-   * Whether the secondary panel is open. The preview stays mounted while the
-   * panel is closed (retained drawer content / desktop subtree), but its
-   * content query pauses: every workspace write invalidates the preview cache,
-   * and a live observer would refetch and remount the highlighted file into an
-   * off-screen panel. A closed panel keeps its cached preview and refetches
-   * once on reopen.
-   */
+  hostId: string;
+  isPanelOpen: boolean;
+  lineRange: FilePreviewLineRange | null;
+  onOpenInEditor?: (path: string) => void;
+}
+
+interface ThreadStorageFilePreviewTabContentProps {
+  activePath: string;
   isPanelOpen: boolean;
   copyPath?: string | null;
   lineRange: FilePreviewLineRange | null;
@@ -144,12 +108,10 @@ export interface ThreadStorageFilePreviewTabContentProps {
   threadId: string;
 }
 
-function ThreadDiffSkeleton({
-  count = GIT_DIFF_SKELETON_FILE_COUNT,
-}: ThreadDiffSkeletonProps) {
+function ThreadDiffSkeleton() {
   return (
     <div className="space-y-2 pt-2">
-      {Array.from({ length: count }).map((_, index) => (
+      {Array.from({ length: GIT_DIFF_SKELETON_FILE_COUNT }).map((_, index) => (
         <div
           key={`git-diff-skeleton-${index}`}
           className="rounded-lg border border-border bg-surface-raised"
@@ -175,20 +137,12 @@ function ThreadDiffSkeleton({
   );
 }
 
-/**
- * The diff tab body. Fetches the diff's table of contents
- * ({@link useEnvironmentDiffFiles}) and renders it through the virtualized
- * {@link DiffFilesPanel}, which fetches per-file patches on demand as rows
- * scroll into view. Handles the TOC's loading / empty / `not_applicable` /
- * `unavailable` states; per-file patch errors surface as retryable card errors
- * inside the panel.
- */
 export function GitDiffTabContent({
   environmentId,
   target,
   isDiffPanelActive,
   isPanelOpen,
-  gitDiffViewOptions,
+  gitDiffPresentation,
   onClearPendingGitDiffIntent,
   onOpenFileInEditor,
   onOpenFilePreview,
@@ -227,17 +181,13 @@ export function GitDiffTabContent({
     mergeBaseRef,
   });
 
-  // Drop per-card UI state belonging to any other diff slice once a new target
-  // / environment resolves, so collapse defaults are re-derived fresh rather
-  // than inheriting a previous diff's choices at a shared path.
   useEffect(() => {
     clearDiffFileCardStates(diffIdentity);
   }, [diffIdentity]);
 
   const isPreparing =
     isQueryEnabled &&
-    (target === undefined ||
-      isDiffFilesLoading ||
+    (isDiffFilesLoading ||
       (diffFilesResponse === undefined && diffFilesError === null));
 
   if (isPreparing) {
@@ -303,8 +253,6 @@ export function GitDiffTabContent({
     );
   }
 
-  // The panel needs a concrete target to drive its patch fetches; `isQueryEnabled`
-  // above already guarantees both once an `available` outcome resolved.
   if (!environmentId || target === undefined) {
     return (
       <div className={cn(PANEL_SCROLL_SLOT_CLASS, "px-4 pb-3")}>
@@ -333,7 +281,7 @@ export function GitDiffTabContent({
         files={diffFilesResponse.files}
         initialPatches={diffFilesResponse.initialPatches}
         filesUpdatedAt={diffFilesUpdatedAt}
-        diffViewOptions={gitDiffViewOptions}
+        presentation={gitDiffPresentation}
         filePathRoot={workspaceRootPath}
         isPanelOpen={isPanelOpen}
         isPlaceholderData={isDiffFilesPlaceholder}
@@ -346,12 +294,6 @@ export function GitDiffTabContent({
       />
     </div>
   );
-}
-
-export function ThreadInfoTabContent({
-  metadataContent,
-}: ThreadInfoTabContentProps) {
-  return <div className="flex min-h-0 flex-1 flex-col">{metadataContent}</div>;
 }
 
 export function WorkspaceFilePreviewTabContent({
@@ -476,6 +418,37 @@ export function HostFilePreviewTabContent({
       onSelectionAddToChat={onSelectionAddToChat}
       onOpenInEditor={onOpenInEditor}
       onRefresh={() => void refetchHostFilePreview()}
+      statusLabel={null}
+    />
+  );
+}
+
+export function HostScopedFilePreviewTabContent({
+  activePath,
+  hostId,
+  isPanelOpen,
+  lineRange,
+  onOpenInEditor,
+}: HostScopedFilePreviewTabContentProps) {
+  const {
+    data: hostFilePreview,
+    error,
+    isFetching,
+    isLoading,
+    refetch,
+  } = useHostFilePreview(hostId, activePath, { enabled: isPanelOpen });
+  return (
+    <SecondaryPanelFilePreview
+      activePath={activePath}
+      copyPath={activePath}
+      error={error}
+      filePreview={hostFilePreview}
+      htmlPreviewUrl={hostFilePreview?.url ?? null}
+      isLoading={isLoading}
+      isRefreshing={isFetching}
+      lineRange={lineRange}
+      onOpenInEditor={onOpenInEditor}
+      onRefresh={() => void refetch()}
       statusLabel={null}
     />
   );

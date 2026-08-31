@@ -4,6 +4,7 @@ import {
   WorkspaceError,
   type HostWorkspace,
 } from "@bb/host-workspace";
+import { createDeferredPromise } from "@bb/test-helpers";
 import { dispatchCommand } from "../../src/command-dispatch.js";
 import type { EventSinkInput } from "../../src/event-sink.js";
 import {
@@ -26,12 +27,6 @@ import {
 import { RuntimeManager } from "../../src/runtime-manager.js";
 
 const DEFAULT_TERMINAL_START = { mode: "shell" } as const;
-
-interface Deferred<TValue> {
-  promise: Promise<TValue>;
-  resolve: (value: TValue | PromiseLike<TValue>) => void;
-  reject: (reason?: Error) => void;
-}
 
 interface ResizeCall {
   cols: number;
@@ -58,16 +53,6 @@ type TerminalExitListener = (event: TerminalPtyExit) => void;
 
 afterEach(cleanupTempDirs);
 
-function createDeferred<TValue>(): Deferred<TValue> {
-  let resolve!: Deferred<TValue>["resolve"];
-  let reject!: Deferred<TValue>["reject"];
-  const promise = new Promise<TValue>((innerResolve, innerReject) => {
-    resolve = innerResolve;
-    reject = innerReject;
-  });
-  return { promise, reject, resolve };
-}
-
 class FakeTerminalPty implements TerminalPtyProcess {
   readonly killCalls: (string | null)[];
   readonly resizeCalls: ResizeCall[];
@@ -82,6 +67,8 @@ class FakeTerminalPty implements TerminalPtyProcess {
     this.dataListeners = [];
     this.exitListeners = [];
   }
+
+  dispose(): void {}
 
   kill(signal?: string): void {
     this.killCalls.push(signal ?? null);
@@ -641,7 +628,6 @@ describe("environment command dispatch", () => {
     const harness = createHarness({ workspacePath: "/tmp/idempotent" });
     const sourcePath = await makeTempDir("bb-dispatch-idempotent-");
 
-    // First provision
     await dispatchCommand(
       {
         type: "environment.provision",
@@ -653,7 +639,6 @@ describe("environment command dispatch", () => {
       harness.dispatchOptions(),
     );
 
-    // Second provision — same environment
     const result = await dispatchCommand(
       {
         type: "environment.provision",
@@ -683,6 +668,7 @@ describe("environment command dispatch", () => {
       {
         type: "environment.destroy",
         environmentId: "env-1",
+        teardownTimeoutMs: 900000,
         workspaceContext: {
           workspacePath: "/tmp/env-1",
           workspaceProvisionType: "managed-worktree",
@@ -694,7 +680,7 @@ describe("environment command dispatch", () => {
       }),
     );
 
-    expect(result).toEqual({});
+    expect(result).toEqual({ transcript: [] });
     expect(closeEnvironmentTerminals).toHaveBeenCalledWith({
       environmentId: "env-1",
       reason: "environment-destroyed",
@@ -703,9 +689,50 @@ describe("environment command dispatch", () => {
     expect(harness.workspaceState.destroyed).toBe(true);
   });
 
+  it("returns the teardown transcript from environment.destroy", async () => {
+    const harness = createHarness();
+    await harness.manager.ensureEnvironment({
+      environmentId: "env-teardown",
+      workspacePath: "/tmp/env-1",
+    });
+    harness.workspace.destroy = async (args) => {
+      expect(args.timeoutMs).toBe(1234);
+      args.onProgress?.({
+        type: "step",
+        key: "teardown-completed",
+        text: ".bb-env-teardown.sh finished",
+        status: "completed",
+        startedAt: 100,
+      });
+    };
+
+    const result = await dispatchCommand(
+      {
+        type: "environment.destroy",
+        environmentId: "env-teardown",
+        teardownTimeoutMs: 1234,
+        workspaceContext: {
+          workspacePath: "/tmp/env-1",
+          workspaceProvisionType: "managed-worktree",
+        },
+      },
+      makeDispatchOptions({ runtimeManager: harness.manager }),
+    );
+
+    expect(result.transcript).toEqual([
+      {
+        type: "step",
+        key: "teardown-completed",
+        text: ".bb-env-teardown.sh finished",
+        status: "completed",
+        startedAt: 100,
+      },
+    ]);
+  });
+
   it("waits for terminal closes before destroying an environment", async () => {
     const harness = createHarness();
-    const terminalClose = createDeferred<void>();
+    const terminalClose = createDeferredPromise<void>();
     const closeEnvironmentTerminals = vi.fn(() => terminalClose.promise);
     await harness.manager.ensureEnvironment({
       environmentId: "env-1",
@@ -717,6 +744,7 @@ describe("environment command dispatch", () => {
       {
         type: "environment.destroy",
         environmentId: "env-1",
+        teardownTimeoutMs: 900000,
         workspaceContext: {
           workspacePath: "/tmp/env-1",
           workspaceProvisionType: "managed-worktree",
@@ -742,7 +770,7 @@ describe("environment command dispatch", () => {
     expect(harness.workspaceState.destroyed).toBe(false);
 
     terminalClose.resolve(undefined);
-    await expect(destroyPromise).resolves.toEqual({});
+    await expect(destroyPromise).resolves.toEqual({ transcript: [] });
     expect(destroyResolved).toBe(true);
     expect(harness.runtimeState.shutdownCount).toBe(1);
     expect(harness.workspaceState.destroyed).toBe(true);
@@ -750,7 +778,7 @@ describe("environment command dispatch", () => {
 
   it("waits for in-progress terminal opens to close before destroying an environment", async () => {
     const harness = createHarness();
-    const shell = createDeferred<string>();
+    const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
     const terminalFixture = createTerminalManager({
       manager: harness.manager,
@@ -788,6 +816,7 @@ describe("environment command dispatch", () => {
       {
         type: "environment.destroy",
         environmentId: "env-1",
+        teardownTimeoutMs: 900000,
         workspaceContext: {
           workspacePath: "/tmp/env-1",
           workspaceProvisionType: "managed-worktree",
@@ -820,12 +849,11 @@ describe("environment command dispatch", () => {
 
   it("destroys a managed environment after daemon restart (not in memory)", async () => {
     const harness = createHarness();
-    // Environment is NOT in memory — simulates daemon restart.
-    // The destroy command must reconnect using workspaceContext before destroying.
     const result = await dispatchCommand(
       {
         type: "environment.destroy",
         environmentId: "env-restart",
+        teardownTimeoutMs: 900000,
         workspaceContext: {
           workspacePath: "/tmp/env-1",
           workspaceProvisionType: "managed-worktree",
@@ -834,8 +862,7 @@ describe("environment command dispatch", () => {
       makeDispatchOptions({ runtimeManager: harness.manager }),
     );
 
-    expect(result).toEqual({});
-    // The workspace was reconnected (lazy provision) then destroyed
+    expect(result).toEqual({ transcript: [] });
     expect(harness.workspaceState.destroyed).toBe(true);
     expect(harness.provisions).toEqual([
       {
@@ -847,8 +874,6 @@ describe("environment command dispatch", () => {
   });
 
   it("treats a retry as success when the workspace was already removed", async () => {
-    // Simulate: first destroy succeeds and removes the workspace,
-    // then daemon crashes before reporting. On retry, the path is gone.
     let callCount = 0;
     const { workspace } = createFakeWorkspace("/tmp/env-retry");
     const { runtime } = createFakeRuntime();
@@ -866,11 +891,11 @@ describe("environment command dispatch", () => {
       createRuntime: () => runtime,
     });
 
-    // First destroy: succeeds (workspace exists in memory after reconnect)
     await dispatchCommand(
       {
         type: "environment.destroy",
         environmentId: "env-retry",
+        teardownTimeoutMs: 900000,
         workspaceContext: {
           workspacePath: "/tmp/env-retry",
           workspaceProvisionType: "managed-worktree",
@@ -879,11 +904,11 @@ describe("environment command dispatch", () => {
       makeDispatchOptions({ runtimeManager: manager }),
     );
 
-    // Second destroy (retry): workspace path is gone, should succeed (idempotent)
     const retryResult = await dispatchCommand(
       {
         type: "environment.destroy",
         environmentId: "env-retry",
+        teardownTimeoutMs: 900000,
         workspaceContext: {
           workspacePath: "/tmp/env-retry",
           workspaceProvisionType: "managed-worktree",
@@ -892,6 +917,6 @@ describe("environment command dispatch", () => {
       makeDispatchOptions({ runtimeManager: manager }),
     );
 
-    expect(retryResult).toEqual({});
+    expect(retryResult).toEqual({ transcript: [] });
   });
 });

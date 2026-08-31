@@ -1,14 +1,5 @@
 // @vitest-environment jsdom
 
-/**
- * Round-trip guarantee of the `default*` seed props: submitting a seeded,
- * untouched composer must reproduce the request the seeds came from, and a
- * seed change after mount must re-seed even user-touched selections. This is
- * what lets a plugin store a `NewThreadRequest`, re-open it for editing, and
- * save without silently resetting the user's provider/model/permission/
- * environment to project defaults.
- */
-
 import { useEffect, type ReactNode } from "react";
 import { Provider } from "jotai";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -38,7 +29,7 @@ import {
 } from "@/components/pickers/environment-picker-value";
 import { useRootComposeReuseEnvironment } from "@/lib/root-compose-selection";
 import { getPromptDraftAccessor } from "@/hooks/usePromptDraftStorage";
-import { buildThreadHandoffLocationState } from "@/lib/thread-handoff-request";
+import { buildThreadHandoffLocationState } from "@bb/client-core";
 import { makeThreadListEntry } from "@/test/fixtures/thread-list-entries";
 import { RootComposeView } from "@/views/RootComposeView";
 import { PluginNewThreadComposer } from "./PluginNewThreadComposer";
@@ -49,6 +40,8 @@ const mocks = vi.hoisted(() => ({
   uploadAttachment: vi.fn(),
   projectThreads: [] as ThreadListEntry[],
   sidebarNavigationSettled: true,
+  sidebarNavigationReplayed: false,
+  extraProjects: [] as Array<Record<string, unknown>>,
   promptHistoryQueryOptions: [] as Array<{ enabled?: boolean } | undefined>,
 }));
 
@@ -88,8 +81,6 @@ const PROJECT = {
   threads: [],
 };
 
-// A second project on the same host, so a record switch can differ ONLY by
-// project id.
 const OTHER_PROJECT = {
   ...PROJECT,
   id: "proj_2",
@@ -105,6 +96,7 @@ vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
             projects: [
               { ...PROJECT, threads: mocks.projectThreads },
               OTHER_PROJECT,
+              ...mocks.extraProjects,
             ],
             personalProject: {
               id: "personal",
@@ -116,8 +108,15 @@ vi.mock("@/hooks/queries/sidebar-navigation-query", () => ({
           isError: false,
           isLoading: false,
           isSuccess: true,
+          isPlaceholderData: mocks.sidebarNavigationReplayed,
         }
-      : { data: undefined, isError: false, isLoading: true, isSuccess: false },
+      : {
+          data: undefined,
+          isError: false,
+          isLoading: true,
+          isSuccess: false,
+          isPlaceholderData: false,
+        },
 }));
 
 vi.mock("@/hooks/queries/host-queries", () => ({
@@ -129,7 +128,8 @@ vi.mock("@/hooks/queries/host-queries", () => ({
 }));
 
 vi.mock("@/hooks/queries/system-queries", () => ({
-  useOnboardingAgents: () => ({ data: undefined, isPending: false }),
+  useSystemProviderStates: () => ({ data: undefined, isPending: false }),
+  useKnownProviderModelCatalogScope: () => undefined,
   useHostProviderCliStatus: () => ({ data: undefined }),
   useSystemConfig: () => ({ data: { primaryHostId: "host_1" } }),
   useSystemExecutionOptions: () => ({
@@ -315,9 +315,7 @@ function ForkSeedSurface({ composer }: { composer: NewThreadComposerState }) {
   useEffect(() => {
     seedEnvironmentSelectionValue(encodeReuseValue("env-source"));
   }, [seedEnvironmentSelectionValue]);
-  return composer.renderPromptBox({
-    zenModeStorageKey: "bb.promptbox.zen-mode.test-root-fork",
-  });
+  return composer.renderPromptBox({});
 }
 
 function composerElement(
@@ -357,9 +355,6 @@ const STORED_REQUEST: NewThreadRequest = {
   model: "gpt-5.6-sol",
   reasoningLevel: "high",
   permissionMode: "full",
-  // Every seeded field must carry caller-explicit provenance. Without it the
-  // server drops the requested providerId/model and re-derives them from the
-  // project's stored defaults, undoing the seed.
   executionInputSources: {
     providerId: "explicit",
     model: "explicit",
@@ -391,6 +386,8 @@ describe("PluginNewThreadComposer seeding", () => {
     mocks.uploadAttachment.mockReset();
     mocks.projectThreads = [];
     mocks.sidebarNavigationSettled = true;
+    mocks.sidebarNavigationReplayed = false;
+    mocks.extraProjects = [];
     window.localStorage.clear();
     getPromptDraftAccessor({ kind: "new-thread" }).setDraft({
       text: "",
@@ -449,6 +446,57 @@ describe("PluginNewThreadComposer seeding", () => {
     });
   });
 
+  it("does not demote a project the replayed bootstrap does not know yet", async () => {
+    mocks.sidebarNavigationReplayed = true;
+    const submitted: NewThreadRequest[] = [];
+    const onSubmit = (request: NewThreadRequest) => {
+      submitted.push(request);
+    };
+    const seed = { ...STORED_REQUEST, projectId: "proj_new" };
+    const { rerender } = render(
+      composerElement(seed, onSubmit, "replay-unknown-project"),
+    );
+
+    await waitFor(() => {
+      expect(latestPromptBoxProps().project.value).toBe("proj_new");
+    });
+    expect(latestPromptBoxProps().project.isLoading).toBe(true);
+    expect(latestPromptBoxProps().disabled).toBe(true);
+
+    mocks.sidebarNavigationReplayed = false;
+    mocks.extraProjects = [
+      {
+        ...PROJECT,
+        id: "proj_new",
+        name: "Project New",
+        sources: [
+          { ...PROJECT.sources[0], id: "src_new", projectId: "proj_new" },
+        ],
+      },
+    ];
+    rerender(composerElement(seed, onSubmit, "replay-unknown-project"));
+
+    await waitFor(() => {
+      expect(latestPromptBoxProps().project.isLoading).toBe(false);
+      expect(latestPromptBoxProps().disabled).toBe(false);
+    });
+    await submit();
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]?.projectId).toBe("proj_new");
+  });
+
+  it("treats a replayed bootstrap that knows the project as settled", async () => {
+    mocks.sidebarNavigationReplayed = true;
+    renderComposer(STORED_REQUEST, () => {}, "replay-known-project");
+
+    await waitFor(() => {
+      expect(latestPromptBoxProps().disabled).toBe(false);
+    });
+    expect(latestPromptBoxProps().project.isLoading).toBe(false);
+    expect(latestPromptBoxProps().project.value).toBe("proj_1");
+  });
+
   it("allows submitting a projectless thread", async () => {
     const submitted: NewThreadRequest[] = [];
     renderComposer(
@@ -496,7 +544,6 @@ describe("PluginNewThreadComposer seeding", () => {
       expect(latestPromptBoxProps().disabled).toBe(false);
     });
 
-    // The user touches the model, then switches to another saved record.
     await act(async () => {
       latestPromptBoxProps().execution.model.onChange("gpt-5.6");
     });
@@ -544,12 +591,10 @@ describe("PluginNewThreadComposer seeding", () => {
       expect(latestPromptBoxProps().disabled).toBe(false);
     });
 
-    // The user clears the seeded branch on record one.
     await act(async () => {
       latestPromptBoxProps().modeConfig.branch.onClear();
     });
 
-    // Record two: identical seeds except the project.
     const otherProjectRecord: NewThreadRequest = {
       ...STORED_REQUEST,
       projectId: "proj_2",
@@ -562,8 +607,6 @@ describe("PluginNewThreadComposer seeding", () => {
     });
     await submit();
 
-    // The previous record's "cleared" state must not leak: record two keeps
-    // its own seeded base branch.
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toEqual(otherProjectRecord);
   });
@@ -581,7 +624,6 @@ describe("PluginNewThreadComposer seeding", () => {
       expect(latestPromptBoxProps().disabled).toBe(false);
     });
 
-    // Away to working-locally, then back to the seeded worktree environment.
     await act(async () => {
       latestPromptBoxProps().modeConfig.environment.onChange(
         "host:host_1:local",
@@ -598,14 +640,12 @@ describe("PluginNewThreadComposer seeding", () => {
     await submit();
 
     expect(submitted).toHaveLength(1);
-    // Back in worktree mode, but the retired seed no longer pins "release" —
-    // the base branch falls to the environment's own default.
     expect(submitted[0].environment).toEqual({
       type: "host",
       hostId: "host_1",
       workspace: {
         type: "managed-worktree",
-        baseBranch: { kind: "default" },
+        baseBranch: { kind: "named", name: "main" },
       },
     });
   });
@@ -680,9 +720,6 @@ describe("PluginNewThreadComposer seeding", () => {
   });
 
   it("derives reuse options from the sidebar bootstrap so a fork keeps its seeded worktree", async () => {
-    // No separate `GET /threads?projectId=` backs the worktree picker: the
-    // sidebar bootstrap rows are the source, so the seeded reuse environment
-    // resolves as soon as the bootstrap holds the source thread.
     mocks.projectThreads = [
       makeThreadListEntry({
         id: "thr_source",
@@ -751,14 +788,8 @@ describe("PluginNewThreadComposer seeding", () => {
       </Provider>,
     );
 
-    // The composer is on screen immediately (no "Loading…" gate) ...
     expect(screen.getByTestId("new-thread-prompt-box")).toBeTruthy();
     expect(latestPromptBoxProps().project.isLoading).toBe(true);
-    // ... while the projectId-keyed prompt-history query waits for the
-    // settled project id, so a cold start never fetches history for a
-    // candidate project that may fall back to Personal once the bootstrap
-    // lands. (Worktree-reuse options derive from the bootstrap itself, so
-    // there is no separate threads request to gate.)
     expect(mocks.promptHistoryQueryOptions.length).toBeGreaterThan(0);
     expect(
       mocks.promptHistoryQueryOptions.every(
@@ -768,10 +799,6 @@ describe("PluginNewThreadComposer seeding", () => {
   });
 
   it("keeps a seeded fork's reuse selection pending until the sidebar bootstrap settles", async () => {
-    // The worktree picker's reuse options come from the sidebar bootstrap.
-    // While it is in flight the options are "loading", not "empty": a seeded
-    // reuse selection must stay pending (`reuse`) instead of being discarded
-    // as unknown, then resolve once the bootstrap holds the source thread.
     mocks.sidebarNavigationSettled = false;
     const submitted: NewThreadRequest[] = [];
     const seed = {
@@ -781,8 +808,6 @@ describe("PluginNewThreadComposer seeding", () => {
     const onSubmit = (request: NewThreadRequest) => {
       submitted.push(request);
     };
-    // A fresh element per render so React re-renders the composer (an
-    // identical element reference would bail out) and re-reads the mocks.
     const element = () => (
       <Provider>
         <MemoryRouter>
@@ -914,9 +939,6 @@ describe("PluginNewThreadComposer seeding", () => {
     await waitFor(() => {
       expect(router.state.location.state).toBeNull();
     });
-    // The snapshotting environment setter can reattach the old file for one
-    // render before the route settles, so checking only the last render would
-    // let the real RootComposeView wiring regress unnoticed.
     expect(
       mocks.promptBoxProps.some(
         (props) =>
@@ -927,11 +949,6 @@ describe("PluginNewThreadComposer seeding", () => {
     expect(latestPromptBoxProps().attachments.items).toEqual([]);
   });
 
-  // Installed → New plugin → an example lands on the root composer with a
-  // `replaceInitialPrompt` seed. Applying it writes the draft store, which
-  // re-renders the view synchronously before the router's transition clears
-  // the location state; the effect must not re-apply the seed on that render
-  // or the two updates starve each other until React aborts the loop.
   it("applies a replacing initial prompt from location state exactly once", async () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false } },
@@ -1005,14 +1022,21 @@ describe("PluginNewThreadComposer seeding", () => {
       latestPromptBoxProps().onSubmit();
     });
     expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(latestPromptBoxProps().value).toBe("");
 
     await act(async () => {
       finishSubmit?.();
     });
   });
 
-  it("preserves the draft when submission fails", async () => {
-    const onSubmit = vi.fn().mockRejectedValue(new Error("create failed"));
+  it("restores the optimistically cleared draft when submission fails", async () => {
+    let failSubmit: (() => void) | null = null;
+    const onSubmit = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          failSubmit = () => reject(new Error("create failed"));
+        }),
+    );
     renderComposer(STORED_REQUEST, onSubmit, "failed-submit");
     await waitFor(() => {
       expect(latestPromptBoxProps().disabled).toBe(false);
@@ -1020,10 +1044,41 @@ describe("PluginNewThreadComposer seeding", () => {
 
     act(() => latestPromptBoxProps().onSubmit());
     await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(latestPromptBoxProps().value).toBe("");
+    await act(async () => {
+      failSubmit?.();
+    });
     await waitFor(() => {
       expect(latestPromptBoxProps().isSubmitting).toBe(false);
     });
     expect(latestPromptBoxProps().value).toBe("review every PR for slop");
+  });
+
+  it("does not replace a new draft when submission fails", async () => {
+    let failSubmit: (() => void) | null = null;
+    const onSubmit = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          failSubmit = () => reject(new Error("create failed"));
+        }),
+    );
+    renderComposer(STORED_REQUEST, onSubmit, "failed-submit-new-draft");
+    await waitFor(() => {
+      expect(latestPromptBoxProps().disabled).toBe(false);
+    });
+
+    act(() => latestPromptBoxProps().onSubmit());
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledTimes(1));
+    expect(latestPromptBoxProps().value).toBe("");
+    act(() => latestPromptBoxProps().onChange("next thread", []));
+    await act(async () => {
+      failSubmit?.();
+    });
+
+    await waitFor(() => {
+      expect(latestPromptBoxProps().isSubmitting).toBe(false);
+    });
+    expect(latestPromptBoxProps().value).toBe("next thread");
   });
 
   it("keeps the old project when attachment copying fails", async () => {

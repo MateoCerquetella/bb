@@ -7,27 +7,12 @@ import {
   DEFAULT_ENV_SETUP_SCRIPT_NAME,
   type ProvisioningTranscriptEntry,
 } from "@bb/domain";
+import { createDeferredPromise } from "@bb/test-helpers";
 import { provisionWorkspace } from "../src/index.js";
-import { runGit } from "../src/git.js";
+import { listBranches, runGit } from "../src/git.js";
 import { withCheckoutMutationLock } from "../src/checkout-mutation-lock.js";
 
 const tempDirs: string[] = [];
-
-type Deferred = {
-  promise: Promise<void>;
-  resolve: () => void;
-};
-
-function createDeferred(): Deferred {
-  let resolveDeferred = (): void => undefined;
-  const promise = new Promise<void>((resolve) => {
-    resolveDeferred = resolve;
-  });
-  return {
-    promise,
-    resolve: resolveDeferred,
-  };
-}
 
 async function makeTempDir(prefix: string): Promise<string> {
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), prefix));
@@ -116,7 +101,7 @@ describe("provisionWorkspace", () => {
 
       expect(ws.isGitRepo).toBe(true);
       expect(await ws.getCurrentBranch()).toBe("feature-new");
-      expect(await ws.listBranches()).toContain("feature-new");
+      expect(await listBranches(ws.path)).toContain("feature-new");
     });
 
     it("creates unmanaged checkout branches from the requested base branch", async () => {
@@ -333,9 +318,8 @@ describe("provisionWorkspace", () => {
         path: repoPath,
       });
 
-      await ws.destroy();
+      await ws.destroy({ timeoutMs: 900000 });
 
-      // Path still exists
       await expect(fs.stat(repoPath)).resolves.toBeDefined();
     });
 
@@ -344,16 +328,16 @@ describe("provisionWorkspace", () => {
       await runGit(["branch", "feature-a"], { cwd: repoPath });
       await runGit(["branch", "feature-b"], { cwd: repoPath });
 
-      const lockEntered = createDeferred();
-      const releaseLock = createDeferred();
+      const lockEntered = createDeferredPromise<void>();
+      const releaseLock = createDeferredPromise<void>();
       const heldLock = withCheckoutMutationLock(repoPath, async () => {
         lockEntered.resolve();
         await releaseLock.promise;
       });
       await lockEntered.promise;
 
-      const firstCheckoutWaiting = createDeferred();
-      const secondCheckoutWaiting = createDeferred();
+      const firstCheckoutWaiting = createDeferredPromise<void>();
+      const secondCheckoutWaiting = createDeferredPromise<void>();
       let firstCompleted = false;
       let secondCompleted = false;
       let lockReleased = false;
@@ -533,11 +517,10 @@ describe("provisionWorkspace", () => {
         timeoutMs: 900000,
       });
 
-      await ws.destroy();
+      await ws.destroy({ timeoutMs: 900000 });
 
       await expect(fs.stat(targetPath)).rejects.toThrow();
       await expect(fs.stat(envDir)).rejects.toThrow();
-      // Worktree should be removed from git's list
       const worktrees = await runGit(["worktree", "list", "--porcelain"], {
         cwd: repoPath,
       });
@@ -599,11 +582,9 @@ describe("provisionWorkspace", () => {
         path: repoPath,
       });
 
-      // getStatus
       const status = await ws.getStatus();
       expect(status.workingTree.state).toBe("clean");
 
-      // commit
       await fs.writeFile(path.join(repoPath, "new.txt"), "data\n", "utf8");
       const result = await ws.commit({
         message: "Test commit",
@@ -611,17 +592,14 @@ describe("provisionWorkspace", () => {
       });
       expect(result.commitSha).toBeTruthy();
 
-      // reset
       await fs.writeFile(path.join(repoPath, "dirty.txt"), "dirty\n", "utf8");
       await ws.reset();
       const statusAfter = await ws.getStatus();
       expect(statusAfter.workingTree.state).toBe("clean");
 
-      // getBranches
-      const branches = await ws.listBranches();
+      const branches = await listBranches(ws.path);
       expect(branches).toContain("main");
 
-      // getDiff
       const diff = await ws.getDiff();
       expect(typeof diff.diff).toBe("string");
     });
@@ -647,7 +625,7 @@ describe("provisionWorkspace", () => {
       expect(ws.isWorktree).toBe(false);
       expect((await fs.stat(targetPath)).isDirectory()).toBe(true);
 
-      await ws.destroy();
+      await ws.destroy({ timeoutMs: 900000 });
       await expect(fs.stat(targetPath)).rejects.toThrow();
     });
 
@@ -755,7 +733,7 @@ describe("provisionWorkspace", () => {
       expect(ws.isGitRepo).toBe(true);
       expect(ws.isWorktree).toBe(true);
 
-      await ws.destroy();
+      await ws.destroy({ timeoutMs: 900000 });
       await expect(fs.stat(wtPath)).rejects.toThrow();
       await expect(fs.stat(envDir)).rejects.toThrow();
     });

@@ -2,27 +2,13 @@ import type { AriaRole, ReactNode } from "react";
 import { Icon, type IconName } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
 
-export type PluginBannerTone = "destructive" | "warning" | "success";
+type PluginBannerTone = "destructive" | "warning";
 
 const TONE_ICON: Record<PluginBannerTone, string> = {
   destructive: "text-destructive",
   warning: "text-warning",
-  success: "text-success",
 };
 
-/**
- * A page-level notification bar.
- *
- * These span the pane and sit above the detail page rather than inside it. As
- * inset cards in the centered column they read as content — one more block
- * among the sections — when the whole point is that they are conditions on the
- * page, not part of it. The neutral surface runs edge to edge; only the icon
- * carries semantic color, and the text lines up with the page gutter so a
- * banner and a section heading share a left edge.
- *
- * `maxWidthClassName` and the padding mirror ToolsScrollPage (ToolsView.tsx:87)
- * so that alignment holds.
- */
 export function PluginBannerBar({
   tone,
   icon,
@@ -30,7 +16,6 @@ export function PluginBannerBar({
   detail,
   action,
   separator = true,
-  testId,
   role,
 }: {
   tone: PluginBannerTone;
@@ -39,13 +24,11 @@ export function PluginBannerBar({
   detail?: ReactNode;
   action?: ReactNode;
   separator?: boolean;
-  testId?: string;
   role?: AriaRole;
 }) {
   return (
     <div
       role={role}
-      data-testid={testId}
       className={cn(
         "bg-surface-recessed/55",
         separator && "border-b border-border",

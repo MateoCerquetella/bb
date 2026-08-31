@@ -1,14 +1,14 @@
 import { fuzzyMatchText } from "@bb/fuzzy-match";
 import { PERSONAL_PROJECT_ID, type Thread } from "@bb/domain";
-import type { PromptMentionSuggestion } from "@/components/promptbox/mentions/types";
-import { compareCodepoint } from "@/lib/codepoint-compare";
+import type { PromptMentionSuggestion } from "@bb/client-core";
+import { compareCodepoint } from "@bb/client-core";
 
-export type ThreadMentionSuggestion = Extract<
+type ThreadMentionSuggestion = Extract<
   PromptMentionSuggestion,
   { kind: "thread" }
 >;
 
-export interface BuildThreadMentionSuggestionsArgs {
+interface BuildThreadMentionSuggestionsArgs {
   threads: readonly Thread[];
   query: string;
   currentProjectId?: string;
@@ -55,7 +55,6 @@ function canSuggestThread(
   thread: Thread,
   args: BuildThreadMentionSuggestionsArgs,
 ): boolean {
-  // A hidden thread (a side chat, say) is not a mentionable navigation target.
   return thread.id !== args.currentThreadId && thread.visibility !== "hidden";
 }
 

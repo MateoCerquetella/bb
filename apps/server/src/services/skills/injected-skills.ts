@@ -7,6 +7,7 @@ import { resolveDataDirSkillsRootPath } from "@bb/config/skill-storage-paths";
 import type { HostDaemonInjectedSkillSource } from "@bb/host-daemon-contract";
 import { z } from "zod";
 import type { ServerLogger } from "../../types.js";
+import { isFsErrorWithCode } from "../lib/fs-errors.js";
 import { REGISTRY_SKILL_PROVENANCE_FILE_NAME } from "./registry-skill-provenance.js";
 
 const SKILL_FILE_NAME = "SKILL.md";
@@ -35,15 +36,7 @@ export interface ResolveInjectedSkillSourcesArgs {
   additionalSkillsRootPaths?: readonly string[];
   builtinSkillsRootPath: string;
   dataDir: string;
-  /**
-   * Skills roots contributed by running plugins (design §4.4). Their own
-   * precedence tier: overridden by project and user (data-dir/inherited)
-   * skills by name, and overriding built-ins by name. Earlier roots win
-   * plugin-vs-plugin name collisions.
-   */
   pluginSkillRoots?: readonly PluginSkillRoot[];
-  /** Configured plugins only: restrict their otherwise static skill roots to
-   * these frontmatter names for this resolution. */
   pluginSkillSelections?: ReadonlyMap<string, ReadonlySet<string>>;
   projectSkillSources?: readonly ProjectInjectedSkillSource[];
   projectSkillsRootPath?: string;
@@ -51,7 +44,7 @@ export interface ResolveInjectedSkillSourcesArgs {
   skillTreeRegistry: SkillTreeRegistry;
 }
 
-export interface PluginSkillRoot {
+interface PluginSkillRoot {
   pluginId: string;
   rootPath: string;
 }
@@ -84,7 +77,7 @@ export function discoverPluginSkillIds(
   );
 }
 
-export type SkillCatalogProvenance =
+type SkillCatalogProvenance =
   | { kind: "builtin" }
   | { kind: "plugin"; pluginId: string }
   | { kind: "project" }
@@ -95,7 +88,7 @@ export interface ResolvedSkillCatalogEntry {
   runtimeSource: HostDaemonInjectedSkillSource;
 }
 
-export interface ResolveServerOwnedSkillCatalogEntriesArgs {
+interface ResolveServerOwnedSkillCatalogEntriesArgs {
   builtinSkillsRootPath: string;
   dataDir: string;
   logger: ServerLogger;
@@ -117,7 +110,7 @@ export interface SkillTreeEntry {
   path: string;
 }
 
-export interface SkillTreeManifest {
+interface SkillTreeManifest {
   entries: readonly SkillTreeEntry[];
   treeHash: string;
 }
@@ -164,10 +157,6 @@ interface SkillCollisionLogArgs {
   colliding: readonly HostDaemonInjectedSkillSource[];
   logger: ServerLogger;
   name: string;
-}
-
-function isFsErrorWithCode(error: Error, code: string): boolean {
-  return "code" in error && error.code === code;
 }
 
 function compactZodIssues(issues: z.ZodIssue[]): string {
@@ -533,12 +522,6 @@ function readSkillsRoot(
   return sources;
 }
 
-/**
- * Resolve the two roots whose lifecycle is owned by the server process. Unlike
- * runtime catalog resolution, this intentionally preserves both rows when a
- * user skill shadows a built-in: the management surface describes installed
- * resources, while runtime precedence is applied separately.
- */
 export function resolveServerOwnedSkillCatalogEntries(
   args: ResolveServerOwnedSkillCatalogEntriesArgs,
 ): ResolvedSkillCatalogEntry[] {
@@ -573,11 +556,6 @@ interface ExcludeOverriddenLowerPriorityUserSourcesArgs {
   lowerPrioritySources: readonly HostDaemonInjectedSkillSource[];
 }
 
-/**
- * A data-dir skill that reuses a built-in skill's name overrides the built-in
- * copy, even when user sources later collide each other out: a user touching a
- * name always silences the built-in.
- */
 function excludeOverriddenBuiltins(
   logger: ServerLogger,
   args: ExcludeOverriddenBuiltinsArgs,
@@ -654,17 +632,6 @@ function excludeCollisions(
   );
 }
 
-/**
- * Discovers the injected skills for a thread command from built-in skills
- * bundled with the server, data-dir skills under `<dataDir>/skills`, and
- * plugin skills roots. Precedence by name: project > data-dir/inherited
- * user skills > plugin > builtin. Inherited roots are ordered by priority,
- * so earlier roots override later roots.
- *
- * Server-owned sources are registered as content-addressed trees. Project
- * sources remain workspace paths so the target daemon stages their full trees
- * directly from its workspace after the server enumerates their metadata.
- */
 export function resolveSkillCatalogEntries(
   logger: ServerLogger,
   args: ResolveInjectedSkillSourcesArgs,
@@ -736,9 +703,6 @@ export function resolveSkillCatalogEntries(
     ],
     configuredUserSources,
   );
-  // The plugin tier (design §4.4): sources ride the "data-dir" wire label —
-  // the daemon stages every sourceType identically, so the tier is purely a
-  // server-side precedence concept and needs no daemon-contract change.
   const pluginSourceGroups = (args.pluginSkillRoots ?? []).map(
     ({ pluginId, rootPath }) => ({
       pluginId,

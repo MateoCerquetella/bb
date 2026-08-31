@@ -19,10 +19,6 @@ const OPENER_TAB_BASE = {
   title: "readme.md",
 } as const;
 
-/**
- * The three owner shapes a plugin file opener can divert, mirroring the app's
- * `ownerRequestForOpenRequest` branches.
- */
 const OWNERS = [
   {
     environmentId: "env_docs",
@@ -38,6 +34,7 @@ const OWNERS = [
   },
   {
     environmentId: "env_docs",
+    hostId: null,
     kind: "host-file-preview",
     tab: { lineRange: null, path: "/Users/dev/notes.md" },
     threadId: "thr_docs",
@@ -84,12 +81,25 @@ describe("thread tab file-opener owner", () => {
     const result = threadTabsSchema.safeParse([
       {
         ...OPENER_TAB_BASE,
-        // `host-file-preview` owners require a concrete environment id.
         fileOpenerOwner: { ...OWNERS[1], environmentId: null },
       },
     ]);
 
     expect(result.success).toBe(false);
+  });
+
+  it("accepts an explicit host owner without ambient thread context", () => {
+    const fileOpenerOwner = {
+      ...OWNERS[1],
+      environmentId: null,
+      hostId: "host_docs",
+      threadId: null,
+    };
+    const parsed = threadTabsSchema.parse([
+      { ...OPENER_TAB_BASE, fileOpenerOwner },
+    ]);
+
+    expect(parsed[0]).toEqual({ ...OPENER_TAB_BASE, fileOpenerOwner });
   });
 });
 
@@ -99,7 +109,6 @@ const TERMINAL_TAB_BASE = {
   terminalId: "term_abc",
 } as const;
 
-/** Every target a nav-panel right panel can open a terminal against. */
 const TERMINAL_TARGETS: readonly TerminalCreateTarget[] = [
   { kind: "thread", threadId: "thr_docs" },
   { kind: "environment", environmentId: "env_docs" },

@@ -17,19 +17,21 @@ import { ToolCallDetailBlock } from "./ToolCallDetailBlock.js";
 import { QuestionWorkRowBody } from "./QuestionWorkRowBody.js";
 import { WorkflowWorkRowBody } from "./WorkflowWorkRowBody.js";
 import {
+  PlanStepsWorkRowBody,
+  PresentationDetail,
+} from "./PresentationWorkRowBodies.js";
+import {
   useTimelineWorkRowFullOutput,
   type TimelinePreviewableWorkRow,
   type TimelineWorkRowFullOutput,
   type TimelineWorkRowFullOutputState,
 } from "./useTimelineWorkRowFullOutput.js";
 import { buildThreadHostFileContentUrl } from "@/lib/file-content-urls";
-import type { ThreadTimelineTheme } from "./types.js";
 import type { ThreadTimelineImageViewSrcResolver } from "./types.js";
 
-export interface WorkRowBodyProps {
+interface WorkRowBodyProps {
   resolveImageViewSrc?: ThreadTimelineImageViewSrcResolver;
   row: TimelineViewWorkRow;
-  themeType: ThreadTimelineTheme;
   workspaceRootPath: string | undefined;
 }
 
@@ -153,15 +155,7 @@ function outputPreviewNoteText({
   }
 }
 
-/**
- * Footer under a previewed command/tool output. Says why the body is short
- * and offers a retry when the full-output load failed. Nothing renders once
- * the full output is in place.
- */
-function OutputPreviewNote({
-  fullOutput,
-  row,
-}: OutputPreviewNoteProps) {
+function OutputPreviewNote({ fullOutput, row }: OutputPreviewNoteProps) {
   if (row.outputPreview === undefined) {
     return null;
   }
@@ -216,6 +210,7 @@ function ToolWorkRowBody({ row }: ToolWorkRowBodyProps) {
   const fullOutput = useTimelineWorkRowFullOutput(row);
   return (
     <div className="space-y-1">
+      <PresentationDetail presentation={row.presentation} />
       <ToolCallDetailBlock
         toolName={row.toolName}
         args={row.toolArgs}
@@ -230,7 +225,6 @@ function ToolWorkRowBody({ row }: ToolWorkRowBodyProps) {
 export function WorkRowBody({
   resolveImageViewSrc,
   row,
-  themeType,
   workspaceRootPath,
 }: WorkRowBodyProps) {
   switch (row.workKind) {
@@ -243,7 +237,6 @@ export function WorkRowBody({
         <div className="space-y-2">
           <LazyTimelineFileDiffBlock
             change={row.change}
-            themeType={themeType}
             workspaceRootPath={workspaceRootPath}
           />
           {row.stderr ? (
@@ -263,15 +256,20 @@ export function WorkRowBody({
         </div>
       );
     case "delegation":
-      // Delegation expanded bodies are dispatched by `TimelineExpandableBody`
-      // (in `ThreadTimelineRows.tsx`), which wraps childRows + output text in
-      // a delegation-tier scroll container. This branch is unreachable for
-      // the App renderer; kept exhaustive for the type.
       return null;
     case "question":
       return <QuestionWorkRowBody row={row} />;
     case "workflow":
-      return <WorkflowWorkRowBody row={row} />;
+      return (
+        <div className="space-y-2">
+          <PresentationDetail presentation={row.presentation} />
+          <WorkflowWorkRowBody row={row} />
+        </div>
+      );
+    case "plan-steps":
+      return <PlanStepsWorkRowBody row={row} />;
+    case "extension":
+      return <PresentationDetail presentation={row.presentation} />;
     case "image-view":
       return (
         <ImageViewWorkRowBody
@@ -282,6 +280,8 @@ export function WorkRowBody({
     case "approval":
     case "web-search":
     case "web-fetch":
+    case "file-read":
+    case "search":
       return null;
     default:
       return assertNever(row);

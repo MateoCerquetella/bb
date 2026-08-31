@@ -1,14 +1,24 @@
 import type { PromptInput, ThreadEvent } from "@bb/domain";
 import {
+  getThreadEventScopeTurnId,
+  isThreadEventWithItem,
+  parseNamespacedGlyph,
+  threadEventSchema,
+} from "@bb/domain";
+import { z } from "zod";
+import {
   BRIDGE_JSON_RPC_ERRORS,
   BRIDGE_REQUEST_METHODS,
+  bridgeErrorDataSchema,
   initializeResultSchema,
-  threadEventNotificationSchema,
+  negotiateGrammarVersion,
   threadIdentityResultSchema,
   PROVIDER_BRIDGE_PROTOCOL_VERSION,
   ThreadEventGrammar,
   THREAD_EVENT_GRAMMAR_RULES,
+  type BridgeCapabilities,
 } from "../index.js";
+import { ASSEMBLER_GRAMMAR_VERSIONS } from "../assembler/delta-assembler.js";
 import {
   ConformanceClient,
   nextConformanceClientRequestId,
@@ -17,31 +27,34 @@ import {
 import type { ConformanceCheckResult } from "./types.js";
 
 export interface ConformanceSessionFixture {
-  /** Workspace directory for the session under test. */
   cwd: string;
-  /** Prompt expected to elicit at least one assistant-message item. */
   promptInput: PromptInput[];
-  /**
-   * A prompt this provider accepts and completes locally, without producing
-   * any of the activity that opens a bb turn — Claude Code's `/clear` is the
-   * canonical example (#1431). Opting in enables
-   * `turn/settles-without-activity`.
-   *
-   * The kit cannot elicit this shape generically: only the bridge knows what
-   * its provider handles as zero work. A fixture that omits it produces no
-   * result for that rule rather than a skip, so bridges that have not opted in
-   * keep a fully green report.
-   */
   zeroWorkPromptInput?: PromptInput[];
-  /** Execution options for the session; the kit defaults to full mode. */
+  interruptiblePromptInput?: PromptInput[];
   options?: Record<string, unknown>;
+  icons?: { pluginId: string; names: readonly string[] };
 }
 
 interface ScenarioContext {
   client: ConformanceClient;
   fixture: ConformanceSessionFixture;
-  /** Set by session/start-identity for later scenarios. */
+  resolveProviderTurnId: (
+    threadId: string,
+    bbTurnId: string,
+  ) => string | undefined;
+  fork: BridgeCapabilities["fork"];
   providerThreadId?: string;
+}
+
+const IDENTITY_RESULT_SHAPE = "{ providerThreadId, sessionRestorable? }";
+
+function identityProblem(
+  parsed: z.ZodSafeParseError<unknown>,
+  result: unknown,
+): string {
+  return `the result must be ${IDENTITY_RESULT_SHAPE} — the runtime adopts no session without providerThreadId on the result (a thread/identity notification does not substitute for it); issues: ${parsed.error.issues
+    .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+    .join("; ")} (got ${JSON.stringify(result)})`;
 }
 
 function pass(id: string, title: string): ConformanceCheckResult {
@@ -82,15 +95,15 @@ function threadEvents(
   threadId: string,
 ): ThreadEvent[] {
   context.client.drainIntoLog();
-  const events: ThreadEvent[] = [];
-  for (const message of context.client.notifications("thread/event")) {
-    const parsed = threadEventNotificationSchema.safeParse(message.params);
-    if (parsed.success && parsed.data.threadId === threadId) {
-      events.push(parsed.data.event);
-    }
-  }
-  return events;
+  return context.client.events
+    .filter((entry) => entry.threadId === threadId)
+    .map((entry) => entry.event);
 }
+
+const persistedEventSchema = z.preprocess(
+  (event) => JSON.parse(JSON.stringify(event)),
+  threadEventSchema,
+);
 
 function errorCode(message: JsonRpcWireMessage | null): number | undefined {
   const code = message?.error?.code;
@@ -100,12 +113,6 @@ function errorCode(message: JsonRpcWireMessage | null): number | undefined {
 const ITEM_OPENS_BEFORE_DELTA_TITLE =
   "every item's first event is item/started";
 
-/**
- * item/opens-before-delta: no event may stream into an item id that no
- * item/started has opened yet. Pure over an event log so it is unit-testable
- * without a live bridge — the streaming grammar machine the host runs live,
- * fed a recording and filtered to this one rule.
- */
 export function checkItemOpensBeforeDelta(
   events: ThreadEvent[],
 ): ConformanceCheckResult {
@@ -133,21 +140,63 @@ export function checkItemOpensBeforeDelta(
   return pass("item/opens-before-delta", ITEM_OPENS_BEFORE_DELTA_TITLE);
 }
 
-// ---------------------------------------------------------------------------
-// Scenarios. Order matters: hygiene first (no session), then handshake, then
-// one shared session lifecycle. A lifecycle scenario whose prerequisite
-// failed reports "skipped" with the reason rather than cascading failures.
-// ---------------------------------------------------------------------------
+const PRESENTATION_ICONS_DECLARED_ID = "presentation/icon-namespaced-declared";
+const PRESENTATION_ICONS_DECLARED_TITLE =
+  "every namespaced presentation glyph names one of the plugin's declared icons";
+
+export function checkPresentationIconsDeclared(
+  events: ThreadEvent[],
+  icons: { pluginId: string; names: readonly string[] },
+): ConformanceCheckResult {
+  const declared = new Set(icons.names);
+  let inspected = 0;
+  for (const event of events) {
+    if (!isThreadEventWithItem(event)) {
+      continue;
+    }
+    if (event.item.type === "toolCall" && event.item.server === "bb") {
+      continue;
+    }
+    const glyph =
+      "presentation" in event.item
+        ? event.item.presentation?.icon.glyph
+        : undefined;
+    if (glyph === undefined) {
+      continue;
+    }
+    inspected += 1;
+    const parsed = parseNamespacedGlyph(glyph);
+    if (parsed === null) {
+      continue;
+    }
+    if (parsed.pluginId !== icons.pluginId || !declared.has(parsed.name)) {
+      return fail(
+        PRESENTATION_ICONS_DECLARED_ID,
+        PRESENTATION_ICONS_DECLARED_TITLE,
+        `${event.type} ${event.item.type} "${event.item.id}" names presentation.icon "${glyph}", which is not an icon declared by plugin "${icons.pluginId}" (declared: ${
+          icons.names.length === 0 ? "none" : icons.names.join(", ")
+        }); the server would persist it as provider/unhandled`,
+      );
+    }
+  }
+  if (inspected === 0) {
+    return skipped(
+      PRESENTATION_ICONS_DECLARED_ID,
+      PRESENTATION_ICONS_DECLARED_TITLE,
+      "no item carried a presentation to inspect",
+    );
+  }
+  return pass(
+    PRESENTATION_ICONS_DECLARED_ID,
+    PRESENTATION_ICONS_DECLARED_TITLE,
+  );
+}
 
 export async function runRpcHygieneScenarios(
   client: ConformanceClient,
 ): Promise<ConformanceCheckResult[]> {
   const results: ConformanceCheckResult[] = [];
 
-  // Whether unknown methods are answered decides how the remaining hygiene
-  // probes can work: the aliveness probe is an unknown method, so on a bridge
-  // that drops unknowns (the pre-migration state) aliveness is indeterminate
-  // and dependent checks report skipped rather than false failures.
   let unknownMethodsAnswered = false;
   {
     const id = client.request("bb/conformance/definitely-unknown-method", {});
@@ -257,33 +306,108 @@ export async function runRpcHygieneScenarios(
   return results;
 }
 
+export interface HandshakeScenarioOutcome {
+  results: ConformanceCheckResult[];
+  capabilities: BridgeCapabilities | null;
+}
+
 export async function runHandshakeScenario(
   client: ConformanceClient,
-): Promise<ConformanceCheckResult[]> {
+): Promise<HandshakeScenarioOutcome> {
   const id = client.request(BRIDGE_REQUEST_METHODS.initialize, {
     protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
     client: { name: "bb-conformance", version: "0.0.1" },
+    grammarVersions: ASSEMBLER_GRAMMAR_VERSIONS,
   });
   const response = await client.waitForResponse(id);
   const title = "initialize answers a versioned handshake with capabilities";
+  const failed = (detail: string): HandshakeScenarioOutcome => ({
+    results: [fail("handshake/initialize", title, detail)],
+    capabilities: null,
+  });
   if (response === null) {
-    return [fail("handshake/initialize", title, "no response")];
+    return failed("no response");
   }
   const parsed = initializeResultSchema.safeParse(response.result);
   if (!parsed.success) {
+    return failed(
+      `result did not parse: ${parsed.error.issues
+        .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
+        .join(
+          "; ",
+        )} (got ${JSON.stringify(response.result ?? response.error)})`,
+    );
+  }
+  if (parsed.data.protocolVersion !== PROVIDER_BRIDGE_PROTOCOL_VERSION) {
+    return failed(
+      `bridge answered protocol version ${parsed.data.protocolVersion}; this kit (and the runtime) require ${PROVIDER_BRIDGE_PROTOCOL_VERSION}`,
+    );
+  }
+  const [bridgeMin, bridgeMax] = parsed.data.capabilities.grammarVersions;
+  if (
+    negotiateGrammarVersion(
+      ASSEMBLER_GRAMMAR_VERSIONS,
+      parsed.data.capabilities.grammarVersions,
+    ) === null
+  ) {
+    const [runtimeMin, runtimeMax] = ASSEMBLER_GRAMMAR_VERSIONS;
+    return failed(
+      `bridge reported grammarVersions [${bridgeMin}, ${bridgeMax}]; the runtime's assembler speaks [${runtimeMin}, ${runtimeMax}], so the handshake would be refused`,
+    );
+  }
+  return {
+    results: [
+      pass("handshake/initialize", title),
+      ...(await runSkillsConfigureDeclaredScenario(
+        client,
+        parsed.data.capabilities.skills.configure,
+      )),
+    ],
+    capabilities: parsed.data.capabilities,
+  };
+}
+
+const SKILLS_CONFIGURE_DECLARED_ID = "skills/configure-declared";
+const SKILLS_CONFIGURE_DECLARED_TITLE =
+  "skills/configure is handled iff the handshake declares skills.configure";
+
+async function runSkillsConfigureDeclaredScenario(
+  client: ConformanceClient,
+  declared: boolean,
+): Promise<ConformanceCheckResult[]> {
+  const id = client.request(BRIDGE_REQUEST_METHODS.skillsConfigure, {
+    roots: [],
+  });
+  const response = await client.waitForResponse(id);
+  if (response === null) {
     return [
       fail(
-        "handshake/initialize",
-        title,
-        `result did not parse: ${parsed.error.issues
-          .map((issue) => `${issue.path.join(".")}: ${issue.message}`)
-          .join(
-            "; ",
-          )} (got ${JSON.stringify(response.result ?? response.error)})`,
+        SKILLS_CONFIGURE_DECLARED_ID,
+        SKILLS_CONFIGURE_DECLARED_TITLE,
+        "skills/configure was not answered",
       ),
     ];
   }
-  return [pass("handshake/initialize", title)];
+  if (declared) {
+    return response.error === undefined
+      ? [pass(SKILLS_CONFIGURE_DECLARED_ID, SKILLS_CONFIGURE_DECLARED_TITLE)]
+      : [
+          fail(
+            SKILLS_CONFIGURE_DECLARED_ID,
+            SKILLS_CONFIGURE_DECLARED_TITLE,
+            `the handshake declares skills.configure but the request failed: ${JSON.stringify(response.error)}`,
+          ),
+        ];
+  }
+  return errorCode(response) === BRIDGE_JSON_RPC_ERRORS.METHOD_NOT_FOUND
+    ? [pass(SKILLS_CONFIGURE_DECLARED_ID, SKILLS_CONFIGURE_DECLARED_TITLE)]
+    : [
+        fail(
+          SKILLS_CONFIGURE_DECLARED_ID,
+          SKILLS_CONFIGURE_DECLARED_TITLE,
+          `the handshake does not declare skills.configure, yet the bridge answered the request with ${JSON.stringify(response.error ?? response.result)}; declare it (the runtime never sends an undeclared request)`,
+        ),
+      ];
 }
 
 export async function runSessionLifecycleScenarios(
@@ -293,7 +417,6 @@ export async function runSessionLifecycleScenarios(
   const results: ConformanceCheckResult[] = [];
   const threadId = "thr_conformance_1";
 
-  // session/start-identity
   {
     const id = client.request(BRIDGE_REQUEST_METHODS.threadStart, {
       threadId,
@@ -320,7 +443,7 @@ export async function runSessionLifecycleScenarios(
           fail(
             "session/start-identity",
             title,
-            `result did not parse: ${JSON.stringify(response.result)}`,
+            identityProblem(parsed, response.result),
           ),
         );
       } else {
@@ -332,7 +455,6 @@ export async function runSessionLifecycleScenarios(
 
   const startSkipDetail = "prerequisite session/start-identity failed";
 
-  // turn/lifecycle + events/schema-valid + item/opens-before-delta
   if (context.providerThreadId === undefined) {
     results.push(
       skipped(
@@ -342,7 +464,7 @@ export async function runSessionLifecycleScenarios(
       ),
       skipped(
         "events/schema-valid",
-        "every thread/event payload is a valid ThreadEvent",
+        "every assembled event is a valid ThreadEvent",
         startSkipDetail,
       ),
       skipped(
@@ -375,7 +497,7 @@ export async function runSessionLifecycleScenarios(
     const title = "an accepted turn starts and settles";
     if (started === undefined || started === null) {
       results.push(
-        fail("turn/lifecycle", title, "no turn/started thread/event arrived"),
+        fail("turn/lifecycle", title, "no turn/started event arrived"),
       );
     } else if (completed === undefined || completed === null) {
       results.push(
@@ -385,32 +507,35 @@ export async function runSessionLifecycleScenarios(
       results.push(pass("turn/lifecycle", title));
     }
 
-    // events/schema-valid: every thread/event notification for this thread
-    // must parse; count the ones that did not.
     {
       client.drainIntoLog();
-      const raw = client.notifications("thread/event");
-      const invalid = raw.filter(
-        (message) =>
-          !threadEventNotificationSchema.safeParse(message.params).success,
+      const invalid = client.events.filter(
+        (entry) => !persistedEventSchema.safeParse(entry.event).success,
       );
-      const title2 = "every thread/event payload is a valid ThreadEvent";
+      const title2 = "every assembled event is a valid ThreadEvent";
       results.push(
         invalid.length === 0
           ? pass("events/schema-valid", title2)
           : fail(
               "events/schema-valid",
               title2,
-              `${invalid.length} thread/event notification(s) failed validation; first: ${JSON.stringify(invalid[0]?.params).slice(0, 400)}`,
+              `${invalid.length} assembled event(s) failed validation; first: ${JSON.stringify(invalid[0]?.event).slice(0, 400)}`,
             ),
       );
     }
 
-    // item/opens-before-delta
     results.push(checkItemOpensBeforeDelta(threadEvents(context, threadId)));
+
+    if (fixture.icons !== undefined) {
+      results.push(
+        checkPresentationIconsDeclared(
+          threadEvents(context, threadId),
+          fixture.icons,
+        ),
+      );
+    }
   }
 
-  // stop/release-not-interrupted
   if (context.providerThreadId === undefined) {
     results.push(
       skipped(
@@ -465,14 +590,11 @@ export async function runSessionLifecycleScenarios(
     }
   }
 
-  // session/resume-id-uniqueness
+  const uniquenessTitle = "turn and item ids never repeat across a resume";
   if (context.providerThreadId === undefined) {
     results.push(
-      skipped(
-        "session/resume-id-uniqueness",
-        "turn and item ids never repeat across a resume",
-        startSkipDetail,
-      ),
+      skipped(RESUME_IDENTITY_ID, RESUME_IDENTITY_TITLE, startSkipDetail),
+      skipped("session/resume-id-uniqueness", uniquenessTitle, startSkipDetail),
     );
   } else {
     const resumeId = client.request(BRIDGE_REQUEST_METHODS.threadResume, {
@@ -483,18 +605,36 @@ export async function runSessionLifecycleScenarios(
       instructionMode: "append",
     });
     const resumeResponse = await client.waitForResponse(resumeId);
-    const title = "turn and item ids never repeat across a resume";
-    if (resumeResponse === null || resumeResponse.error !== undefined) {
+    const title = uniquenessTitle;
+    const resumed =
+      resumeResponse === null || resumeResponse.error !== undefined
+        ? null
+        : threadIdentityResultSchema.safeParse(resumeResponse.result);
+    if (resumed === null) {
+      const detail =
+        resumeResponse === null
+          ? "thread/resume was not answered"
+          : `thread/resume failed: ${JSON.stringify(resumeResponse.error)}`;
       results.push(
+        skipped(RESUME_IDENTITY_ID, RESUME_IDENTITY_TITLE, detail),
+        skipped("session/resume-id-uniqueness", title, detail),
+      );
+    } else if (!resumed.success) {
+      results.push(
+        fail(
+          RESUME_IDENTITY_ID,
+          RESUME_IDENTITY_TITLE,
+          identityProblem(resumed, resumeResponse?.result),
+        ),
         skipped(
           "session/resume-id-uniqueness",
           title,
-          resumeResponse === null
-            ? "thread/resume was not answered"
-            : `thread/resume failed: ${JSON.stringify(resumeResponse.error)}`,
+          "prerequisite session/resume-identity failed",
         ),
       );
     } else {
+      context.providerThreadId = resumed.data.providerThreadId;
+      results.push(pass(RESUME_IDENTITY_ID, RESUME_IDENTITY_TITLE));
       const turnId = client.request(BRIDGE_REQUEST_METHODS.turnStart, {
         threadId,
         providerThreadId: context.providerThreadId,
@@ -561,26 +701,453 @@ export async function runSessionLifecycleScenarios(
     }
   }
 
+  results.push(...(await runForkIdentityScenario(context, threadId)));
   results.push(...(await runZeroWorkTurnScenario(context, threadId)));
+  results.push(...(await runArchivedResumeRecoveryScenario(context, threadId)));
+  results.push(...(await runThreadsIndependentScenario(context, threadId)));
+  results.push(...(await runInterruptStopScenario(context, threadId)));
+
+  if (context.providerThreadId !== undefined) {
+    const releaseId = client.request(BRIDGE_REQUEST_METHODS.threadStop, {
+      threadId,
+      providerThreadId: context.providerThreadId,
+      intent: "release",
+      activeTurnId: null,
+    });
+    await client.waitForResponse(releaseId);
+  }
 
   return results;
+}
+
+const RESUME_IDENTITY_ID = "session/resume-identity";
+const RESUME_IDENTITY_TITLE =
+  "thread/resume returns a provider thread identity";
+
+const FORK_IDENTITY_ID = "session/fork-identity";
+const FORK_IDENTITY_TITLE =
+  "thread/fork returns a provider thread identity for the forked session";
+
+async function runForkIdentityScenario(
+  context: ScenarioContext,
+  threadId: string,
+): Promise<ConformanceCheckResult[]> {
+  const { client, fixture } = context;
+  if (context.fork === "none") {
+    return [];
+  }
+  if (context.providerThreadId === undefined) {
+    return [
+      skipped(
+        FORK_IDENTITY_ID,
+        FORK_IDENTITY_TITLE,
+        "prerequisite session/start-identity failed",
+      ),
+    ];
+  }
+  const forkThreadId = `${threadId}_fork`;
+  const forkId = client.request(BRIDGE_REQUEST_METHODS.threadFork, {
+    threadId: forkThreadId,
+    cwd: fixture.cwd,
+    sourceProviderThreadId: context.providerThreadId,
+    options: defaultOptions(fixture),
+    instructionMode: "append",
+  });
+  const response = await client.waitForResponse(forkId);
+  if (response === null) {
+    return [
+      fail(
+        FORK_IDENTITY_ID,
+        FORK_IDENTITY_TITLE,
+        "thread/fork was not answered",
+      ),
+    ];
+  }
+  if (response.error !== undefined) {
+    return [
+      fail(
+        FORK_IDENTITY_ID,
+        FORK_IDENTITY_TITLE,
+        `the handshake declares fork "${context.fork}", yet forking the lifecycle session at its tip failed: ${JSON.stringify(response.error)}`,
+      ),
+    ];
+  }
+  const parsed = threadIdentityResultSchema.safeParse(response.result);
+  if (!parsed.success) {
+    return [
+      fail(
+        FORK_IDENTITY_ID,
+        FORK_IDENTITY_TITLE,
+        identityProblem(parsed, response.result),
+      ),
+    ];
+  }
+  const releaseId = client.request(BRIDGE_REQUEST_METHODS.threadStop, {
+    threadId: forkThreadId,
+    providerThreadId: parsed.data.providerThreadId,
+    intent: "release",
+    activeTurnId: null,
+  });
+  await client.waitForResponse(releaseId);
+  return [pass(FORK_IDENTITY_ID, FORK_IDENTITY_TITLE)];
+}
+
+const THREADS_INDEPENDENT_ID = "session/threads-independent";
+const THREADS_INDEPENDENT_TITLE =
+  "requests on different threads are independent";
+
+async function runThreadsIndependentScenario(
+  context: ScenarioContext,
+  threadId: string,
+): Promise<ConformanceCheckResult[]> {
+  const { client, fixture } = context;
+  const interruptiblePromptInput = fixture.interruptiblePromptInput;
+  if (interruptiblePromptInput === undefined) {
+    return [];
+  }
+  if (context.providerThreadId === undefined) {
+    return [
+      skipped(
+        THREADS_INDEPENDENT_ID,
+        THREADS_INDEPENDENT_TITLE,
+        "prerequisite session/start-identity failed",
+      ),
+    ];
+  }
+  const startedBefore = threadEvents(context, threadId).filter(
+    (event) => event.type === "turn/started",
+  ).length;
+  const holdId = client.request(BRIDGE_REQUEST_METHODS.turnStart, {
+    threadId,
+    providerThreadId: context.providerThreadId,
+    input: interruptiblePromptInput,
+    clientRequestId: nextConformanceClientRequestId(),
+    options: defaultOptions(fixture),
+  });
+  const held = await client.waitFor(() => {
+    const starts = threadEvents(context, threadId).filter(
+      (event) => event.type === "turn/started",
+    );
+    return starts.length > startedBefore ? starts[startedBefore] : undefined;
+  });
+  await client.waitForResponse(holdId);
+  if (held === null) {
+    return [
+      fail(
+        THREADS_INDEPENDENT_ID,
+        THREADS_INDEPENDENT_TITLE,
+        "the interruptible prompt never opened a turn",
+      ),
+    ];
+  }
+
+  const otherThreadId = `${threadId}_other`;
+  const startId = client.request(BRIDGE_REQUEST_METHODS.threadStart, {
+    threadId: otherThreadId,
+    cwd: fixture.cwd,
+    options: defaultOptions(fixture),
+    instructionMode: "append",
+  });
+  const startResponse = await client.waitForResponse(startId);
+  const startResult = threadIdentityResultSchema.safeParse(
+    startResponse?.result,
+  );
+  if (startResponse === null || !startResult.success) {
+    return [
+      fail(
+        THREADS_INDEPENDENT_ID,
+        THREADS_INDEPENDENT_TITLE,
+        `the second thread did not start while the first held a turn: ${JSON.stringify(startResponse?.error ?? startResponse?.result)}`,
+      ),
+    ];
+  }
+  const turnId = client.request(BRIDGE_REQUEST_METHODS.turnStart, {
+    threadId: otherThreadId,
+    providerThreadId: startResult.data.providerThreadId,
+    input: fixture.promptInput,
+    clientRequestId: nextConformanceClientRequestId(),
+    options: defaultOptions(fixture),
+  });
+  const completed = await client.waitFor(() =>
+    threadEvents(context, otherThreadId).find(
+      (event) => event.type === "turn/completed",
+    ),
+  );
+  await client.waitForResponse(turnId);
+  const stopId = client.request(BRIDGE_REQUEST_METHODS.threadStop, {
+    threadId: otherThreadId,
+    providerThreadId: startResult.data.providerThreadId,
+    intent: "release",
+    activeTurnId: null,
+  });
+  await client.waitForResponse(stopId);
+
+  if (completed === null) {
+    return [
+      fail(
+        THREADS_INDEPENDENT_ID,
+        THREADS_INDEPENDENT_TITLE,
+        "the second thread's turn never completed while the first thread held a turn",
+      ),
+    ];
+  }
+  const firstStillOpen = !threadEvents(context, threadId).some(
+    (event) =>
+      event.type === "turn/completed" &&
+      getThreadEventScopeTurnId(event.scope) ===
+        getThreadEventScopeTurnId(held.scope),
+  );
+  if (!firstStillOpen) {
+    return [
+      fail(
+        THREADS_INDEPENDENT_ID,
+        THREADS_INDEPENDENT_TITLE,
+        "the held turn on the first thread settled while the second thread ran",
+      ),
+    ];
+  }
+  return [pass(THREADS_INDEPENDENT_ID, THREADS_INDEPENDENT_TITLE)];
+}
+
+const INTERRUPT_SETTLES_ID = "stop/interrupt-settles-before-result";
+const INTERRUPT_SETTLES_TITLE =
+  "thread/stop {interrupt} settles the turn before it is answered";
+
+async function runInterruptStopScenario(
+  context: ScenarioContext,
+  threadId: string,
+): Promise<ConformanceCheckResult[]> {
+  const { client, fixture } = context;
+  const interruptiblePromptInput = fixture.interruptiblePromptInput;
+  if (interruptiblePromptInput === undefined) {
+    return [];
+  }
+  if (context.providerThreadId === undefined) {
+    return [
+      skipped(
+        INTERRUPT_SETTLES_ID,
+        INTERRUPT_SETTLES_TITLE,
+        "prerequisite session/start-identity failed",
+      ),
+    ];
+  }
+  let started = openTurnStart(context, threadId);
+  if (started === undefined) {
+    const startedBefore = threadEvents(context, threadId).filter(
+      (event) => event.type === "turn/started",
+    ).length;
+    const turnRequestId = client.request(BRIDGE_REQUEST_METHODS.turnStart, {
+      threadId,
+      providerThreadId: context.providerThreadId,
+      input: interruptiblePromptInput,
+      clientRequestId: nextConformanceClientRequestId(),
+      options: defaultOptions(fixture),
+    });
+    started =
+      (await client.waitFor(() => {
+        const starts = threadEvents(context, threadId).filter(
+          (event) => event.type === "turn/started",
+        );
+        return starts.length > startedBefore
+          ? starts[startedBefore]
+          : undefined;
+      })) ?? undefined;
+    await client.waitForResponse(turnRequestId);
+  }
+  if (started === undefined || started.scope.kind !== "turn") {
+    return [
+      fail(
+        INTERRUPT_SETTLES_ID,
+        INTERRUPT_SETTLES_TITLE,
+        "the interruptible prompt never opened a turn",
+      ),
+    ];
+  }
+  const bbTurnId = started.scope.turnId;
+  const providerTurnId =
+    context.resolveProviderTurnId(threadId, bbTurnId) ?? bbTurnId;
+
+  const stopId = client.request(BRIDGE_REQUEST_METHODS.threadStop, {
+    threadId,
+    providerThreadId: context.providerThreadId,
+    intent: "interrupt",
+    activeTurnId: providerTurnId,
+  });
+  const stopResponse = await client.waitForResponse(stopId);
+  if (stopResponse === null) {
+    return [
+      fail(
+        INTERRUPT_SETTLES_ID,
+        INTERRUPT_SETTLES_TITLE,
+        "thread/stop was not answered",
+      ),
+    ];
+  }
+  if (stopResponse.error !== undefined) {
+    return [
+      fail(
+        INTERRUPT_SETTLES_ID,
+        INTERRUPT_SETTLES_TITLE,
+        `thread/stop failed: ${JSON.stringify(stopResponse.error)}`,
+      ),
+    ];
+  }
+  const responseIndex = client.log.indexOf(stopResponse);
+  const completedIndex =
+    client.events.find(
+      (entry) =>
+        entry.threadId === threadId &&
+        entry.event.type === "turn/completed" &&
+        getThreadEventScopeTurnId(entry.event.scope) === bbTurnId,
+    )?.logIndex ?? -1;
+  if (completedIndex === -1) {
+    return [
+      fail(
+        INTERRUPT_SETTLES_ID,
+        INTERRUPT_SETTLES_TITLE,
+        "the interrupted turn never reached turn/completed",
+      ),
+    ];
+  }
+  if (completedIndex > responseIndex) {
+    return [
+      fail(
+        INTERRUPT_SETTLES_ID,
+        INTERRUPT_SETTLES_TITLE,
+        "turn/completed arrived after the thread/stop response; the runtime had already detached the thread",
+      ),
+    ];
+  }
+  return [pass(INTERRUPT_SETTLES_ID, INTERRUPT_SETTLES_TITLE)];
+}
+
+const SESSION_ARCHIVED_RECOVERY_ID = "recovery/session-archived";
+const SESSION_ARCHIVED_RECOVERY_TITLE =
+  "resuming an archived session is rejected with a sessionArchived hint";
+
+async function runArchivedResumeRecoveryScenario(
+  context: ScenarioContext,
+  threadId: string,
+): Promise<ConformanceCheckResult[]> {
+  const { client, fixture } = context;
+  const providerThreadId = context.providerThreadId;
+  if (providerThreadId === undefined) {
+    return [
+      skipped(
+        SESSION_ARCHIVED_RECOVERY_ID,
+        SESSION_ARCHIVED_RECOVERY_TITLE,
+        "prerequisite session/start-identity failed",
+      ),
+    ];
+  }
+  const archiveId = client.request(BRIDGE_REQUEST_METHODS.threadArchive, {
+    threadId,
+    providerThreadId,
+  });
+  const archiveResponse = await client.waitForResponse(archiveId);
+  if (archiveResponse === null) {
+    return [
+      fail(
+        SESSION_ARCHIVED_RECOVERY_ID,
+        SESSION_ARCHIVED_RECOVERY_TITLE,
+        "thread/archive was not answered",
+      ),
+    ];
+  }
+  if (archiveResponse.error !== undefined) {
+    return [];
+  }
+
+  const resumeParams = {
+    threadId,
+    cwd: fixture.cwd,
+    providerThreadId,
+    options: defaultOptions(fixture),
+    instructionMode: "append",
+  };
+  const resumeId = client.request(
+    BRIDGE_REQUEST_METHODS.threadResume,
+    resumeParams,
+  );
+  const resumeResponse = await client.waitForResponse(resumeId);
+
+  const unarchiveId = client.request(BRIDGE_REQUEST_METHODS.threadUnarchive, {
+    threadId,
+    providerThreadId,
+  });
+  await client.waitForResponse(unarchiveId);
+
+  if (resumeResponse === null) {
+    return [
+      fail(
+        SESSION_ARCHIVED_RECOVERY_ID,
+        SESSION_ARCHIVED_RECOVERY_TITLE,
+        "thread/resume of the archived session was not answered",
+      ),
+    ];
+  }
+  if (resumeResponse.error === undefined) {
+    const resumed = threadIdentityResultSchema.safeParse(resumeResponse.result);
+    if (!resumed.success) {
+      return [
+        fail(
+          SESSION_ARCHIVED_RECOVERY_ID,
+          SESSION_ARCHIVED_RECOVERY_TITLE,
+          `the archived session was resumed with a result the runtime cannot adopt: ${identityProblem(resumed, resumeResponse.result)}`,
+        ),
+      ];
+    }
+    context.providerThreadId = resumed.data.providerThreadId;
+    return [];
+  }
+  const reResumeId = client.request(
+    BRIDGE_REQUEST_METHODS.threadResume,
+    resumeParams,
+  );
+  const reResumeResponse = await client.waitForResponse(reResumeId);
+
+  const data = bridgeErrorDataSchema.safeParse(resumeResponse.error.data);
+  const kind = data.success ? data.data.recovery?.kind : undefined;
+  if (kind !== "sessionArchived") {
+    return [
+      fail(
+        SESSION_ARCHIVED_RECOVERY_ID,
+        SESSION_ARCHIVED_RECOVERY_TITLE,
+        `the rejection carried ${
+          kind === undefined ? "no recovery hint" : `kind "${kind}"`
+        }: ${JSON.stringify(resumeResponse.error)}`,
+      ),
+    ];
+  }
+  const notBack = (detail: string): ConformanceCheckResult[] => [
+    fail(
+      SESSION_ARCHIVED_RECOVERY_ID,
+      SESSION_ARCHIVED_RECOVERY_TITLE,
+      `the session did not come back: ${detail}`,
+    ),
+  ];
+  if (reResumeResponse === null) {
+    return notBack("thread/resume after thread/unarchive was not answered");
+  }
+  if (reResumeResponse.error !== undefined) {
+    return notBack(
+      `thread/resume after thread/unarchive failed: ${JSON.stringify(reResumeResponse.error)}`,
+    );
+  }
+  const reResumed = threadIdentityResultSchema.safeParse(
+    reResumeResponse.result,
+  );
+  if (!reResumed.success) {
+    return notBack(identityProblem(reResumed, reResumeResponse.result));
+  }
+  context.providerThreadId = reResumed.data.providerThreadId;
+  return [pass(SESSION_ARCHIVED_RECOVERY_ID, SESSION_ARCHIVED_RECOVERY_TITLE)];
 }
 
 const SETTLES_WITHOUT_ACTIVITY_ID = "turn/settles-without-activity";
 const SETTLES_WITHOUT_ACTIVITY_TITLE =
   "a turn the provider completes without activity still settles";
 
-/**
- * turn/settles-without-activity: a provider may accept a prompt and finish it
- * without emitting any of the ordinary activity that opens a bb turn — Claude
- * Code answers `/clear` locally with a bare success result (#1431). The turn
- * must still reach a terminal `turn/completed`. Without one the thread stays
- * active forever: `bb thread wait --status idle` hangs and accepted input
- * queued behind the abandoned turn never drains.
- *
- * Runs last so the turn it adds cannot perturb the ordinal expectations of the
- * lifecycle scenarios, and only when the fixture names a zero-work prompt.
- */
 async function runZeroWorkTurnScenario(
   context: ScenarioContext,
   threadId: string,
@@ -619,8 +1186,6 @@ async function runZeroWorkTurnScenario(
   const response = await client.waitForResponse(id);
 
   if (response !== null && response.error !== undefined) {
-    // A bridge is free to reject the prompt outright; what it may not do is
-    // accept it and then never settle.
     return [
       skipped(
         SETTLES_WITHOUT_ACTIVITY_ID,
@@ -639,4 +1204,23 @@ async function runZeroWorkTurnScenario(
     ];
   }
   return [pass(SETTLES_WITHOUT_ACTIVITY_ID, SETTLES_WITHOUT_ACTIVITY_TITLE)];
+}
+
+function openTurnStart(
+  context: ScenarioContext,
+  threadId: string,
+): ThreadEvent | undefined {
+  const events = threadEvents(context, threadId);
+  const completedTurnIds = new Set(
+    events
+      .filter((event) => event.type === "turn/completed")
+      .map((event) => getThreadEventScopeTurnId(event.scope)),
+  );
+  return [...events]
+    .reverse()
+    .find(
+      (event) =>
+        event.type === "turn/started" &&
+        !completedTurnIds.has(getThreadEventScopeTurnId(event.scope)),
+    );
 }

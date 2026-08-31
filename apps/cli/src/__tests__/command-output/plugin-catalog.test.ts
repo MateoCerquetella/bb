@@ -19,6 +19,7 @@ const searchResult = {
   iconTinted: false,
   category: "Developer tools",
   source: "builtin:linear",
+  repositoryUrl: null,
   marketplace: "bb-community",
   marketplaceDisplayName: "BB Official",
   publisherKey: "builtin",
@@ -26,6 +27,7 @@ const searchResult = {
   official: true,
   author: null,
   installed: false,
+  installs: null,
   compatible: true,
   incompatibleReason: null,
 };
@@ -40,7 +42,6 @@ const bundledPlan = {
   incompatibleReason: null,
 };
 
-/** A third-party listing that ranges over the repository's release tags. */
 const thirdPartyPlan = {
   kind: "marketplace",
   entryId: "notes",
@@ -93,6 +94,8 @@ const installedPlugin = {
   app: { hasApp: false, bundle: null },
   logoUrl: null,
   logoDarkUrl: null,
+  providerIds: [],
+  icons: {},
 };
 
 function json(value: object, status = 200): Response {
@@ -145,6 +148,24 @@ describe("bb plugin catalog", () => {
     expect(output).toContain("Marketplace");
     expect(output).toContain("Acme Plugins");
     expect(output).toContain("BB Official");
+  });
+
+  it("adds an Installs column only once a listing reports counts", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(json({ results: [searchResult] }));
+    await runCommand(["plugin", "search", "lin"], register);
+    expect(collectLogPayloads(vi.mocked(console.log)).join("\n")).not.toContain(
+      "Installs",
+    );
+
+    vi.mocked(console.log).mockClear();
+    vi.mocked(fetch).mockResolvedValueOnce(
+      json({ results: [{ ...searchResult, installs: 4210 }] }),
+    );
+    await runCommand(["plugin", "search", "lin"], register);
+
+    const output = collectLogPayloads(vi.mocked(console.log)).join("\n");
+    expect(output).toContain("Installs");
+    expect(output).toContain("4,210");
   });
 
   it("outputs raw catalog search results as JSON", async () => {
@@ -246,8 +267,6 @@ describe("bb plugin catalog", () => {
         ),
     ).toEqual(["git:github.com/acme/bb-plugins@semver:linear/:^1.2.0"]);
 
-    // A prefix means nothing without a range spec, and it must not silently
-    // rewrite a spec that already states its selector.
     const errorSpy = vi.mocked(console.error);
     for (const args of [
       ["plugin", "install", "git:github.com/acme/bb-plugins", "--yes"],
@@ -318,8 +337,6 @@ describe("bb plugin catalog", () => {
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://server/api/v1/plugin-catalog/search?q=linear",
     );
-    // The plan is the routing authority: the confirmation describes what the
-    // server would install, not what the CLI guessed.
     expect(fetchMock.mock.calls[1]?.[0]).toBe(
       "http://server/api/v1/plugin-catalog/install-plan?entryId=linear",
     );
@@ -340,7 +357,10 @@ describe("bb plugin catalog", () => {
       .mockResolvedValueOnce(json({ plan: thirdPartyPlan }))
       .mockResolvedValueOnce(json({ ok: true, plugin: installedPlugin }));
 
-    await runCommand(["plugin", "install", "notes@acme-plugins", "--yes"], register);
+    await runCommand(
+      ["plugin", "install", "notes@acme-plugins", "--yes"],
+      register,
+    );
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe(
       "http://server/api/v1/plugin-catalog/install-plan?entryId=notes&marketplace=acme-plugins",
@@ -381,7 +401,10 @@ describe("bb plugin catalog", () => {
       )
       .mockResolvedValueOnce(json({ ok: true, plugin: installedPlugin }));
 
-    await runCommand(["plugin", "install", "notes@acme-plugins", "--yes"], register);
+    await runCommand(
+      ["plugin", "install", "notes@acme-plugins", "--yes"],
+      register,
+    );
 
     const output = collectLogPayloads(vi.mocked(console.log)).join("\n");
     expect(output).toContain("npm package: bb-plugin-notes@beta");
@@ -406,7 +429,10 @@ describe("bb plugin catalog", () => {
       )
       .mockResolvedValueOnce(json({ ok: true, plugin: installedPlugin }));
 
-    await runCommand(["plugin", "install", "notes@acme-plugins", "--yes"], register);
+    await runCommand(
+      ["plugin", "install", "notes@acme-plugins", "--yes"],
+      register,
+    );
 
     expect(collectLogPayloads(vi.mocked(console.log)).join("\n")).toContain(
       "not resolved right now: no release tag matches ^1.0.0",
@@ -458,8 +484,6 @@ describe("bb plugin catalog", () => {
 
   it("no longer advertises the remote catalog command group", async () => {
     const pluginHelp = await getHelpOutput(["plugin"], register);
-    // Neither a `catalog` nor a `marketplace` command may come back; the words
-    // themselves are fine because `search` describes what it reads.
     expect(pluginHelp).not.toMatch(/^\s+catalog/mu);
     expect(pluginHelp).not.toMatch(/^\s+marketplace/mu);
     expect(pluginHelp).not.toMatch(/^\s+submit\b/mu);

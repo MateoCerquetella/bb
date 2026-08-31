@@ -17,25 +17,13 @@ import {
   type WorkspaceChangedFilesSection,
 } from "@/components/workspace/workspace-change-summary";
 
-export interface ChangedFilesDetailRowProps {
-  /**
-   * Buckets to render in display order. Pass [] to hide the row entirely.
-   * When length > 1, the row label becomes a minimal dropdown matching the
-   * BranchPicker treatment used by the Merge base row, and the active bucket
-   * drives both the aggregate stats and the file list.
-   */
+interface ChangedFilesDetailRowProps {
   sections: WorkspaceChangedFilesSection[];
   onFileClick?: (selection: WorkspaceChangedFileSelection) => void;
-  /** Class applied to the inner `WorkspaceChangesList` (e.g. `h-full`, `max-h-40`). */
   listClassName?: string;
   rowClassName?: string;
   rowValueClassName?: string;
-  /** Class applied to the row's label `<dt>` (e.g. a section-header style). */
   labelClassName?: string;
-  /**
-   * When set, the file list caps at `limit` behind a "Show N more" / "Show
-   * less" toggle (like the Commits list) instead of a scrollable box.
-   */
   limit?: number;
 }
 

@@ -81,10 +81,6 @@ export function registerInternalSessionRoutes(
         );
       }
 
-      // The latest session regardless of status/lease: a crashed daemon's
-      // session is closed the moment its socket drops, so requiring an active
-      // previous session would skip the restarted-daemon reconciliation in
-      // exactly the case it exists for.
       const previousSession = getLatestSessionForHost(deps.db, {
         hostId: daemon.hostId,
       });
@@ -101,7 +97,7 @@ export function registerInternalSessionRoutes(
       updateHost(deps.db, deps.hub, daemon.hostId, {
         lastRejectedProtocolVersion: null,
       });
-      const session = openSession(deps.db, deps.hub, {
+      const session = openSession(deps.db, {
         hostId: daemon.hostId,
         instanceId: payload.instanceId,
         hostName: payload.hostName,
@@ -112,6 +108,10 @@ export function registerInternalSessionRoutes(
         leaseTimeoutMs: LEASE_TIMEOUT_MS,
       });
       deps.hub.recordDaemonSessionPlatform(session.id, payload.platform);
+      deps.hub.recordDaemonSessionLocalApiPort(
+        session.id,
+        payload.localApiPort,
+      );
       deps.sharedPorts.recordHostConnectCapability({
         hostId: daemon.hostId,
         sessionId: session.id,
@@ -166,8 +166,6 @@ export function registerInternalSessionRoutes(
         deps.db,
         query.threadId,
       );
-      // Attachment paths are project-scoped upload tokens, so cross-check
-      // projectId before reading bytes even though threadId identifies a thread.
       if (thread.projectId !== query.projectId) {
         throw new ApiError(
           403,

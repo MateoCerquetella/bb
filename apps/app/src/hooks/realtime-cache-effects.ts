@@ -31,45 +31,57 @@ import {
   REALTIME_PROJECT_CHANGE_REGISTRY,
   REALTIME_SYSTEM_CHANGE_REGISTRY,
   REALTIME_THREAD_CHANGE_REGISTRY,
-  shouldFlushThreadChangesImmediately,
+  partitionThreadChangesByFlushPriority,
 } from "./cache-owners/realtime-cache-registry";
 
-const INVALIDATION_DEBOUNCE_MS = 50;
-const INVALIDATION_MAX_WAIT_MS = 200;
+interface ThreadInvalidationDebounce {
+  debounceMs: number;
+  maxWaitMs: number;
+}
+
+export function resolveThreadInvalidationDebounce(
+  isCoarsePointer: boolean,
+): ThreadInvalidationDebounce {
+  return isCoarsePointer
+    ? { debounceMs: 150, maxWaitMs: 400 }
+    : { debounceMs: 50, maxWaitMs: 200 };
+}
+
+function detectCoarsePointer(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(pointer: coarse)").matches
+  );
+}
+
+const {
+  debounceMs: INVALIDATION_DEBOUNCE_MS,
+  maxWaitMs: INVALIDATION_MAX_WAIT_MS,
+} = resolveThreadInvalidationDebounce(detectCoarsePointer());
 const ENVIRONMENT_INVALIDATION_DEBOUNCE_MS = 250;
 const ENVIRONMENT_INVALIDATION_MAX_WAIT_MS = 500;
 
-export type RealtimeConnectedEvent =
+type RealtimeConnectedEvent =
   | { reconnected: false }
   | { reconnected: true; disconnectedAt: number };
 
-export interface RealtimeCacheEffects {
+interface RealtimeCacheEffects {
   dispose: () => void;
   handleChanged: (message: ChangedMessage) => void;
   handleConnected: (event: RealtimeConnectedEvent) => void;
 }
 
-/**
- * Document visibility source. Defaults to the real document; tests inject a
- * fake so the hidden/visible gating can be driven without a DOM.
- */
 export interface RealtimeCacheEffectsVisibility {
   isDocumentVisible: () => boolean;
   subscribe: (listener: () => void) => () => void;
 }
 
-export interface RealtimeCacheEffectsOptions {
+interface RealtimeCacheEffectsOptions {
   queryClient: QueryClient;
   visibility?: RealtimeCacheEffectsVisibility;
 }
 
-/**
- * Non-thread changes that arrived while the document was hidden. Thread
- * changes already merge into {@link ThreadChangeState}; environment changes
- * merge into the buffered invalidator. Host, project and system changes are
- * normally applied on arrival, so while hidden they are merged here (one entry
- * per entity/id, kinds deduplicated) and replayed once on the next visible.
- */
 interface DeferredNonThreadChanges {
   environmentKindsById: Map<string, Set<EnvironmentChangeKind>>;
   hostKinds: Set<HostChangeKind>;
@@ -111,16 +123,26 @@ function mergeEventTypes(
   return Array.from(new Set([...current, ...next]));
 }
 
-function mergeThreadChangeMetadata(
-  current: ThreadChangeMetadata | undefined,
-  next: ThreadChangeMetadata,
-): ThreadChangeMetadata {
+interface MergeThreadChangeMetadataArgs {
+  current: ThreadChangeMetadata | undefined;
+  next: ThreadChangeMetadata;
+  statusChanged: boolean;
+}
+
+function mergeThreadChangeMetadata({
+  current,
+  next,
+  statusChanged,
+}: MergeThreadChangeMetadataArgs): ThreadChangeMetadata {
   const eventTypes = mergeEventTypes(current?.eventTypes, next.eventTypes);
   const backgroundActivityChanged =
     next.backgroundActivityChanged ?? current?.backgroundActivityChanged;
   const hasPendingInteraction =
     next.hasPendingInteraction ?? current?.hasPendingInteraction;
   const projectId = next.projectId ?? current?.projectId;
+  const statusChange = statusChanged
+    ? next.statusChange
+    : (next.statusChange ?? current?.statusChange);
   const metadata: ThreadChangeMetadata = {};
   if (eventTypes) {
     metadata.eventTypes = eventTypes;
@@ -133,6 +155,9 @@ function mergeThreadChangeMetadata(
   }
   if (projectId !== undefined) {
     metadata.projectId = projectId;
+  }
+  if (statusChange !== undefined) {
+    metadata.statusChange = statusChange;
   }
   return metadata;
 }
@@ -180,6 +205,7 @@ function flushThreadInvalidations(
         hasPendingInteraction: undefined,
         projectId: undefined,
         queryClient,
+        statusChange: undefined,
         threadId: undefined,
       },
       handlers: REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty,
@@ -197,6 +223,7 @@ function flushThreadInvalidations(
           hasPendingInteraction: metadata?.hasPendingInteraction,
           projectId: metadata?.projectId,
           queryClient,
+          statusChange: metadata?.statusChange,
           threadId,
         },
         handlers: REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty,
@@ -205,6 +232,44 @@ function flushThreadInvalidations(
   }
 
   resetThreadChangeState(state);
+}
+
+interface ApplyImmediateThreadChangesArgs {
+  changes: readonly ThreadChangeKind[];
+  id: string | undefined;
+  metadata: ThreadChangeMetadata | undefined;
+  queryClient: QueryClient;
+}
+
+function applyImmediateThreadChanges({
+  changes,
+  id,
+  metadata,
+  queryClient,
+}: ApplyImmediateThreadChangesArgs): void {
+  const merged = metadata
+    ? mergeThreadChangeMetadata({
+        current: undefined,
+        next: metadata,
+        statusChanged: changes.includes("status-changed"),
+      })
+    : undefined;
+  const flushOnce = createFlushOncePredicate();
+  for (const changeKind of changes) {
+    executeRealtimeDirtyHandlers({
+      context: {
+        backgroundActivityChanged: merged?.backgroundActivityChanged,
+        eventTypes: merged?.eventTypes,
+        flushOnce,
+        hasPendingInteraction: merged?.hasPendingInteraction,
+        projectId: merged?.projectId,
+        queryClient,
+        statusChange: merged?.statusChange,
+        threadId: id,
+      },
+      handlers: REALTIME_THREAD_CHANGE_REGISTRY[changeKind].dirty,
+    });
+  }
 }
 
 function recordThreadChange(
@@ -221,13 +286,15 @@ function recordThreadChange(
       state,
       threadId: message.id,
     });
-    if (message.metadata) {
+    const statusChanged = message.changes.includes("status-changed");
+    if (message.metadata || statusChanged) {
       state.metadataByThreadId.set(
         message.id,
-        mergeThreadChangeMetadata(
-          state.metadataByThreadId.get(message.id),
-          message.metadata,
-        ),
+        mergeThreadChangeMetadata({
+          current: state.metadataByThreadId.get(message.id),
+          next: message.metadata ?? {},
+          statusChanged,
+        }),
       );
     }
     return;
@@ -305,11 +372,6 @@ export function createRealtimeCacheEffects({
   visibility = DEFAULT_VISIBILITY,
 }: RealtimeCacheEffectsOptions): RealtimeCacheEffects {
   const threadChangeState = createThreadChangeState();
-  // Hidden documents merge changes but never invalidate: `invalidateQueries`
-  // refetches every active observer even when nothing can be seen, and iOS
-  // suspends the tab anyway, so the fetches only queue up to fire (and be
-  // partially aborted) on resume. Everything merged while hidden is applied
-  // once, as one wave, on the next visible.
   let hasDeferredThreadChanges = false;
   const deferredNonThreadChanges = createDeferredNonThreadChanges();
   const invalidationScheduler = createDebouncedCallbackScheduler({
@@ -317,7 +379,6 @@ export function createRealtimeCacheEffects({
     maxWaitMs: INVALIDATION_MAX_WAIT_MS,
     onFlush: () => {
       if (!visibility.isDocumentVisible()) {
-        // Keep the merged state; the visibility listener flushes it.
         hasDeferredThreadChanges = true;
         return;
       }
@@ -329,7 +390,6 @@ export function createRealtimeCacheEffects({
     debounceMs: ENVIRONMENT_INVALIDATION_DEBOUNCE_MS,
     flushChangedEnvironmentIds: (changedEnvironments) => {
       if (!visibility.isDocumentVisible()) {
-        // Marked while visible, debounce elapsed hidden: hold for the resume.
         for (const { changeKinds, environmentId } of changedEnvironments) {
           mergeInto(
             deferredNonThreadChanges.environmentKindsById,
@@ -426,16 +486,36 @@ export function createRealtimeCacheEffects({
     handleChanged: (message) => {
       const documentVisible = visibility.isDocumentVisible();
       switch (message.entity) {
-        case "thread":
-          recordThreadChange(threadChangeState, message);
+        case "thread": {
           if (!documentVisible) {
+            recordThreadChange(threadChangeState, message);
             hasDeferredThreadChanges = true;
-          } else if (shouldFlushThreadChangesImmediately(message.changes)) {
+            break;
+          }
+          if (message.metadata?.eventTypes?.includes("turn/completed")) {
+            recordThreadChange(threadChangeState, message);
             invalidationScheduler.flush();
-          } else {
+            break;
+          }
+          const { debounced, immediate } =
+            partitionThreadChangesByFlushPriority(message.changes);
+          if (debounced) {
+            recordThreadChange(threadChangeState, {
+              ...message,
+              changes: debounced,
+            });
             invalidationScheduler.schedule();
           }
+          if (immediate) {
+            applyImmediateThreadChanges({
+              changes: immediate,
+              id: message.id,
+              metadata: message.id ? message.metadata : undefined,
+              queryClient,
+            });
+          }
           break;
+        }
         case "environment":
           if (!message.id) {
             break;
@@ -488,8 +568,6 @@ export function createRealtimeCacheEffects({
         return;
       }
       refetchErroredRealtimeQueriesOnInitialConnect({ queryClient });
-      // The ws manager flushes subscribe messages before this callback runs,
-      // so "now" is the watermark after which change events are delivered.
       invalidateRealtimeQueriesFetchedBeforeInitialConnect({
         connectedAt: Date.now(),
         queryClient,

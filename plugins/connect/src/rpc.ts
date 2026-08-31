@@ -12,11 +12,6 @@ import { MachineCodeError, type MachineCode } from "./machine-code.js";
 import type { ShareHostResolver } from "./hosts.js";
 import type { ShareListing } from "./shares.js";
 
-// Panel-facing rpc surface. `server` is optional: the dashboard command
-// carries both --code and --server, but the panel's paste-a-code field only
-// has the code — the server URL is then derived from the redeemed handle
-// (https://<handle>.getbb.app). `baseUrl` overrides the connect cloud apex
-// (tests and self-hosted gates).
 const pairInputSchema = z.object({
   code: z.string().min(1),
   server: z.string().url().optional(),
@@ -98,6 +93,12 @@ const desktopSessionSchema: z.ZodType<DesktopSession> = z
   })
   .strict();
 
+const mobilePairingSchema = z
+  .object({
+    enabled: z.boolean(),
+  })
+  .strict();
+
 const machineCodeSchema: z.ZodType<MachineCode> = z
   .object({
     code: z.string(),
@@ -128,6 +129,7 @@ export const connectRpcContract = defineRpcContract({
     output: listAccountServersResultSchema,
   },
   createDesktopSession: { input: z.null(), output: desktopSessionSchema },
+  mobilePairing: { input: z.null(), output: mobilePairingSchema },
   createMachineCode: { input: z.null(), output: machineCodeSchema },
   revokeMachine: {
     input: revokeMachineInputSchema,
@@ -135,11 +137,16 @@ export const connectRpcContract = defineRpcContract({
   },
 });
 
-export type ConnectRpcHandlers = PluginRpcHandlers<typeof connectRpcContract>;
+type ConnectRpcHandlers = PluginRpcHandlers<typeof connectRpcContract>;
+
+export interface MobilePairingGate {
+  enabled(): Promise<boolean>;
+}
 
 export function createRpcHandlers(
   tunnel: ConnectTunnel,
   hostResolver: ShareHostResolver,
+  mobilePairing: MobilePairingGate,
 ): ConnectRpcHandlers {
   return {
     async pair(args) {
@@ -150,8 +157,6 @@ export function createRpcHandlers(
           ...(args.baseUrl !== undefined ? { baseUrl: args.baseUrl } : {}),
         });
       } catch (error) {
-        // The panel maps stable codes to human copy; raw detail stays in the
-        // plugin log (see ConnectTunnel.pair). Never surface wire text.
         if (error instanceof ConnectPairError) {
           throw new Error(error.code);
         }
@@ -184,8 +189,6 @@ export function createRpcHandlers(
       try {
         return await tunnel.listAccountServers();
       } catch (error) {
-        // Stable codes for callers (CLI / panel); raw detail stays on the error
-        // message for plugin logs when surfaced elsewhere.
         if (error instanceof ConnectListError) {
           throw new Error(error.code);
         }
@@ -201,6 +204,9 @@ export function createRpcHandlers(
         }
         throw error;
       }
+    },
+    async mobilePairing() {
+      return { enabled: await mobilePairing.enabled() };
     },
     async createMachineCode() {
       try {

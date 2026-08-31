@@ -22,14 +22,7 @@ import {
 import { parseFileEditFromItemEvent } from "./file-edit-parsing.js";
 import { parseWebActivityLifecycleEvent } from "./web-activity-lifecycle.js";
 import { parseOperationMessage } from "./parse-operation-message.js";
-import {
-  parseErrorMessage,
-  isDuplicateEventType,
-  isIgnoredItemStartEvent,
-  isIgnoredItemCompletedEvent,
-  appendDebugEvent,
-} from "./parse-error-message.js";
-import { isIgnoredNoiseType } from "./timeline-noise-events.js";
+import { parseErrorMessage } from "./parse-error-message.js";
 import {
   normalizeEventProjection,
   sortEventProjectionMessagesBySource,
@@ -53,6 +46,7 @@ import {
   parseRejectedUsersFromClientRequest,
   parseUsersFromClientRequest,
   parseLegacyUserMessage,
+  parseProviderUserMessage,
 } from "./user-message-parsing.js";
 import { isTerminalBufferedTextFlushEvent } from "./assistant-buffering.js";
 import {
@@ -97,8 +91,6 @@ import {
 import { buildProjectionActiveThinking } from "./reasoning-lifecycle-projection.js";
 import { projectAssistantAndReasoningEvent } from "./assistant-event-projection.js";
 
-// --- Projection state machine ---
-
 type ProjectedUserMessage = Extract<EventProjectionMessage, { kind: "user" }>;
 interface ClientTurnRequestedWithMeta {
   event: Extract<ThreadEvent, { type: "client/turn/requested" }>;
@@ -134,21 +126,6 @@ interface BuildDetailedProjectionArgs {
   turnMessageDetail: BuildEventProjectionOptions["turnMessageDetail"];
 }
 
-const PROVIDER_THREAD_DELEGATION_TOOL_NAMES = new Set([
-  "spawnAgent",
-  "resumeAgent",
-]);
-const PROVIDER_THREAD_CHILD_INTERACTION_TOOL_NAMES = new Set([
-  "sendInput",
-  "wait",
-  "closeAgent",
-]);
-
-/**
- * Every workflow currently running in the thread, newest start first. A thread
- * can drive several workflows at once, so this is a list rather than a single
- * "current" workflow; the prompt-box banner renders one card per entry.
- */
 function selectActiveWorkflowMessages(
   messages: readonly EventProjectionMessage[],
 ): EventProjectionWorkflowMessage[] {
@@ -156,8 +133,6 @@ function selectActiveWorkflowMessages(
   for (const message of messages) {
     if (
       message.kind !== "workflow" ||
-      // The prompt-box active workflow banner is workflow-only; non-workflow
-      // background tasks use the separate background-activity card.
       message.taskType !== LOCAL_WORKFLOW_TASK_TYPE ||
       message.status !== "pending" ||
       message.skipTranscript
@@ -182,14 +157,17 @@ function isEventProjectionCallMessage(
   switch (message.kind) {
     case "command":
     case "delegation":
+    case "extension":
     case "file-edit":
+    case "file-read":
     case "image-view":
+    case "plan-steps":
+    case "search":
     case "tool-call":
     case "web-fetch":
     case "web-search":
       return true;
     case "assistant-text":
-    case "debug/raw-event":
     case "error":
     case "operation":
     case "permission-grant-lifecycle":
@@ -240,11 +218,13 @@ function getBackgroundAgentModel(
     : null;
 }
 
-function getBackgroundTaskFamilyId(itemId: string): string {
-  // Claude keeps the provider task id when a settled task restarts and makes
-  // each persisted item unique with a `#N` generation suffix. The restarted
-  // task may omit its original spawning call, so use the stable family id to
-  // carry forward metadata already correlated from an earlier generation.
+function getBackgroundTaskFamilyId(
+  message: EventProjectionWorkflowMessage,
+): string {
+  if (message.familyId !== null) {
+    return `family:${message.familyId}`;
+  }
+  const itemId = message.itemId;
   const generationMatch = /#(\d+)$/.exec(itemId);
   if (!generationMatch) {
     return itemId;
@@ -268,7 +248,7 @@ function enrichBackgroundAgentModels(
       continue;
     }
 
-    const taskFamilyId = getBackgroundTaskFamilyId(message.itemId);
+    const taskFamilyId = getBackgroundTaskFamilyId(message);
     const model =
       getBackgroundAgentModel(message, callMessageById) ??
       message.model ??
@@ -302,9 +282,6 @@ function selectActiveBackgroundCommandMessages(
   messages: readonly EventProjectionMessage[],
   callMessageById: ReadonlyMap<string, EventProjectionCallMessage>,
 ): EventProjectionWorkflowMessage[] {
-  // Running non-workflow background tasks, most recently started first. Feeds
-  // the background-activity prompt-box card, independent of the workflow-only
-  // banner driven by selectActiveWorkflowMessage.
   const representedRootCallIds = new Set<string>();
   for (const message of messages) {
     if (
@@ -424,9 +401,6 @@ function canUseAcceptedClientRequestForVisibleProjection(
   decoded: ClientTurnRequestedEvent,
   selectedStartedTurnIds: ReadonlySet<string>,
 ): boolean {
-  // Context-only accepted rows can point at turns outside the selected page.
-  // Use them to classify fallback messages only when that turn root is already
-  // visible; otherwise pending-steer suppression handles the correlation.
   switch (decoded.target.kind) {
     case "auto":
     case "steer":
@@ -456,47 +430,13 @@ function appendProjectedUserMessage(
   state.messages.push(projectedClientUser);
 }
 
-function getToolCallName(decoded: ThreadEvent): string | undefined {
-  if (
-    (decoded.type !== "item/started" && decoded.type !== "item/completed") ||
-    decoded.item.type !== "toolCall"
-  ) {
-    return undefined;
-  }
-
-  return decoded.item.tool;
-}
-
-function getToolCallReceiverThreadIds(decoded: ThreadEvent): string[] {
-  if (
-    (decoded.type !== "item/started" && decoded.type !== "item/completed") ||
-    decoded.item.type !== "toolCall"
-  ) {
-    return [];
-  }
-
-  const receiverThreadIds = decoded.item.arguments?.receiverThreadIds;
-  if (!Array.isArray(receiverThreadIds)) {
-    return [];
-  }
-
-  return receiverThreadIds.filter(
-    (receiverThreadId): receiverThreadId is string =>
-      typeof receiverThreadId === "string" && receiverThreadId.length > 0,
-  );
-}
-
-function getToolCallSenderThreadId(decoded: ThreadEvent): string | undefined {
-  if (
-    (decoded.type !== "item/started" && decoded.type !== "item/completed") ||
-    decoded.item.type !== "toolCall"
-  ) {
-    return undefined;
-  }
-
-  const senderThreadId = decoded.item.arguments?.senderThreadId;
-  return typeof senderThreadId === "string" && senderThreadId.length > 0
-    ? senderThreadId
+function getDelegationChildRef(decoded: ThreadEvent): string | undefined {
+  return (decoded.type === "item/started" ||
+    decoded.type === "item/completed" ||
+    decoded.type === "item/delegation/progress" ||
+    decoded.type === "item/delegation/completed") &&
+    decoded.item.type === "delegation"
+    ? decoded.item.childRef
     : undefined;
 }
 
@@ -597,9 +537,6 @@ function getCompactionTurnFinalization(
       detail: decoded.detail ?? decoded.message,
     };
   }
-  // The provider declined a requested compaction (for example pi's "Nothing
-  // to compact"): the row settles as a skipped compaction instead of staying
-  // pending forever. Other warnings inside the turn leave the row alone.
   if (
     decoded.type === "provider/warning" &&
     decoded.category === "compaction-skipped"
@@ -624,13 +561,10 @@ function getCompactionTurnFinalization(
   return undefined;
 }
 
-// --- Main entry point ---
-
 function buildFlatProjectionData(
   args: BuildFlatProjectionDataArgs,
 ): BuildFlatProjectionDataResult {
   const state = createProjectionState();
-  const includeDebugRawEvents = args.options?.includeDebugRawEvents ?? false;
   const shouldTrackActiveThinking = args.includeActiveThinking;
 
   const orderedEvents = args.events;
@@ -723,8 +657,6 @@ function buildFlatProjectionData(
         status: compactionTurnFinalization.status,
         detail: compactionTurnFinalization.detail,
       });
-      // The skipped-compaction row already carries the warning text; do not
-      // render the same notice a second time as a standalone warning row.
       if (settledPendingCompaction && decoded.type === "provider/warning") {
         continue;
       }
@@ -824,6 +756,12 @@ function buildFlatProjectionData(
       continue;
     }
 
+    const providerUserMessage = parseProviderUserMessage(decoded, meta);
+    if (providerUserMessage) {
+      appendProjectedUserMessage(state, providerUserMessage);
+      continue;
+    }
+
     const legacyUserMessage = parseLegacyUserMessage(decoded, meta);
     if (legacyUserMessage) {
       flushToolActivityBeforeNonToolMessage(state);
@@ -882,9 +820,7 @@ function buildFlatProjectionData(
       eventParentToolCallId,
     );
     if (toolCallEvent) {
-      const toolCallName = getToolCallName(decoded);
-      const toolCallReceiverThreadIds = getToolCallReceiverThreadIds(decoded);
-      const toolCallSenderThreadId = getToolCallSenderThreadId(decoded);
+      const delegationChildRef = getDelegationChildRef(decoded);
       if (toolCallEvent.kind !== "output") {
         if (toolCallEvent.call.kind === "delegation" && eventTurnId) {
           state.delegationTurnIdsByCallId.set(
@@ -892,32 +828,9 @@ function buildFlatProjectionData(
             eventTurnId,
           );
         }
-        if (
-          !toolCallEvent.call.parentToolCallId &&
-          toolCallName &&
-          PROVIDER_THREAD_CHILD_INTERACTION_TOOL_NAMES.has(toolCallName)
-        ) {
-          const inferredParentToolCallId = toolCallReceiverThreadIds
-            .map((receiverThreadId) =>
-              state.delegationParentToolCallIdsByProviderThreadId.get(
-                receiverThreadId,
-              ),
-            )
-            .find(
-              (parentToolCallId): parentToolCallId is string =>
-                typeof parentToolCallId === "string" &&
-                parentToolCallId.length > 0,
-            );
-          if (inferredParentToolCallId) {
-            toolCallEvent.call.parentToolCallId = inferredParentToolCallId;
-          }
-        }
-        if (
-          toolCallName &&
-          PROVIDER_THREAD_DELEGATION_TOOL_NAMES.has(toolCallName)
-        ) {
+        if (delegationChildRef !== undefined) {
           if (
-            toolCallReceiverThreadIds.length === 0 ||
+            delegationChildRef === eventProviderThreadId ||
             state.delegatedTurnLinkCallIds.has(toolCallEvent.call.callId)
           ) {
             enqueuePendingDelegationTurnLink(
@@ -926,22 +839,9 @@ function buildFlatProjectionData(
               eventTurnId,
               toolCallEvent.call.callId,
             );
-          }
-          for (const receiverThreadId of toolCallReceiverThreadIds) {
-            if (
-              receiverThreadId === eventProviderThreadId ||
-              receiverThreadId === toolCallSenderThreadId
-            ) {
-              enqueuePendingDelegationTurnLink(
-                state,
-                eventProviderThreadId,
-                eventTurnId,
-                toolCallEvent.call.callId,
-              );
-              continue;
-            }
+          } else {
             state.delegationParentToolCallIdsByProviderThreadId.set(
-              receiverThreadId,
+              delegationChildRef,
               toolCallEvent.call.callId,
             );
           }
@@ -1066,23 +966,6 @@ function buildFlatProjectionData(
       flushToolActivityBeforeNonToolMessage(state);
       state.messages.push(error);
       continue;
-    }
-
-    if (includeDebugRawEvents) {
-      const debugReason = isDuplicateEventType(eventType)
-        ? "duplicate-event"
-        : isIgnoredNoiseType(eventType) ||
-            isIgnoredItemStartEvent(decoded) ||
-            isIgnoredItemCompletedEvent(decoded)
-          ? "ignored-noise"
-          : "unhandled";
-
-      if (debugReason !== "unhandled") {
-        continue;
-      }
-
-      flushToolActivityBeforeNonToolMessage(state);
-      appendDebugEvent(state.messages, decoded, meta, debugReason);
     }
   }
 

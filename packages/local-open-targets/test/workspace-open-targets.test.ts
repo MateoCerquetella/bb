@@ -4,10 +4,33 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import {
+  createWorkspaceOpenTargetRuntime,
   listWorkspaceOpenTargetsWithRuntime,
   openPathInTargetWithRuntime,
   type WorkspaceOpenTargetRuntime,
 } from "../src/index.js";
+
+describe("default workspace open-target runtime", () => {
+  it("exposes the resolved shell PATH without changing system-tool launches", async () => {
+    const runtime = createWorkspaceOpenTargetRuntime({
+      shellPath: "/Users/test/.local/bin:/usr/bin",
+    });
+
+    expect(runtime.env?.PATH).toBe("/Users/test/.local/bin:/usr/bin");
+    const inheritedResult = await runtime.execFile(process.execPath, [
+      "-e",
+      "process.stdout.write(process.env.PATH ?? '')",
+    ]);
+    expect(inheritedResult.stdout).toBe(process.env.PATH ?? "");
+
+    const userExecutableResult = await runtime.execFile(
+      process.execPath,
+      ["-e", "process.stdout.write(process.env.PATH ?? '')"],
+      { env: runtime.env },
+    );
+    expect(userExecutableResult.stdout).toBe("/Users/test/.local/bin:/usr/bin");
+  });
+});
 
 type ExecFileHandler = WorkspaceOpenTargetRuntime["execFile"];
 
@@ -209,6 +232,7 @@ describe("workspace open targets", () => {
         "[Desktop Entry]",
         "Type=Application",
         "Name=Mock Edit",
+        "Categories=Utility;TextEditor;",
         "Exec=mockedit --open %f",
         "",
       ].join("\n"),
@@ -220,7 +244,38 @@ describe("workspace open targets", () => {
         "Type=Application",
         "Name=Hidden App",
         "NoDisplay=true",
+        "Categories=TextEditor;",
         "Exec=hidden %f",
+        "",
+      ].join("\n"),
+    );
+    await Promise.all(
+      [
+        ["files", "Files", "FileManager"],
+        ["terminal", "Terminal", "TerminalEmulator"],
+      ].map(async ([id, name, category]) =>
+        writeFile(
+          path.join(desktopDirectory, `${id}.desktop`),
+          [
+            "[Desktop Entry]",
+            "Type=Application",
+            `Name=${name}`,
+            `Categories=System;${category};`,
+            `Exec=${id} %f`,
+            "",
+          ].join("\n"),
+        ),
+      ),
+    );
+    await writeFile(
+      path.join(desktopDirectory, "unrelated.desktop"),
+      [
+        "[Desktop Entry]",
+        "Type=Application",
+        "Name=Music Player",
+        "Categories=AudioVideo;Player;",
+        "MimeType=audio/mpeg;inode/directory;",
+        "Exec=music-player %f",
         "",
       ].join("\n"),
     );
@@ -233,8 +288,12 @@ describe("workspace open targets", () => {
         }),
       );
 
-      expect(targets).toEqual([
-        {
+      expect(targets).toEqual(
+        [
+          ["desktop-app:files", "Files"],
+          ["desktop-app:mockedit", "Mock Edit"],
+          ["desktop-app:terminal", "Terminal"],
+        ].map(([id, label]) => ({
           capabilities: {
             openDirectory: true,
             openFile: true,
@@ -242,11 +301,11 @@ describe("workspace open targets", () => {
             openFileAtLine: false,
           },
           icon: { kind: "symbol", name: "app" },
-          id: "desktop-app:mockedit",
+          id,
           kind: "native-app",
-          label: "Mock Edit",
-        },
-      ]);
+          label,
+        })),
+      );
     } finally {
       await rm(root, { force: true, recursive: true });
     }
@@ -325,6 +384,7 @@ describe("workspace open targets", () => {
       expect(calls.find((call) => call.file === "wslview")).toEqual({
         file: "wslview",
         args: [filePath],
+        env: { WSL_DISTRO_NAME: "Ubuntu" },
       });
     } finally {
       await rm(workspacePath, { force: true, recursive: true });
@@ -361,6 +421,7 @@ describe("workspace open targets", () => {
       expect(calls.find((call) => call.file === "explorer.exe")).toEqual({
         file: "explorer.exe",
         args: [path.dirname(filePath)],
+        env: { WSL_DISTRO_NAME: "Ubuntu" },
       });
     } finally {
       await rm(workspacePath, { force: true, recursive: true });
@@ -405,13 +466,22 @@ describe("workspace open targets", () => {
           path: filePath,
           targetId: "vscode",
         },
-        createRuntime({ execFile, platform: "linux" }),
+        createRuntime({
+          env: { PATH: "/Users/test/.local/bin:/usr/bin" },
+          execFile,
+          platform: "linux",
+        }),
       );
 
       expect(calls.find((call) => call.file === "code")).toEqual({
         file: "code",
         args: ["-g", `${filePath}:15:6`],
+        env: { PATH: "/Users/test/.local/bin:/usr/bin" },
       });
+      expect(
+        calls.find((call) => call.file === "which" && call.args[0] === "code")
+          ?.env,
+      ).toEqual({ PATH: "/Users/test/.local/bin:/usr/bin" });
     } finally {
       await rm(workspacePath, { force: true, recursive: true });
     }
@@ -435,6 +505,7 @@ describe("workspace open targets", () => {
           "[Desktop Entry]",
           "Type=Application",
           "Name=Mock Edit",
+          "Categories=TextEditor;",
           "Exec=mockedit --open %f",
           "",
         ].join("\n"),
@@ -507,8 +578,6 @@ describe("workspace open targets", () => {
       {
         context: {
           kind: "remote-ssh",
-          serverOrigin: "https://bb.example.test",
-          hostId: "host_remote",
           sshAuthority: "devbox",
         },
         columnNumber: 8,
@@ -611,7 +680,10 @@ describe("workspace open targets", () => {
           path: filePath,
           targetId: "default-app",
         },
-        createRuntime({ execFile }),
+        createRuntime({
+          env: { PATH: "/Users/test/.local/bin:/usr/bin" },
+          execFile,
+        }),
       );
 
       expect(calls.find((call) => call.file === "open")).toEqual({
@@ -695,8 +767,7 @@ describe("workspace open targets", () => {
         expect(calls.some((call) => call.file === target.cli)).toBe(false);
         expect(
           calls.find(
-            (call) =>
-              call.file === "open" && call.args[1] === target.appName,
+            (call) => call.file === "open" && call.args[1] === target.appName,
           ),
         ).toEqual({
           file: "open",
@@ -760,7 +831,10 @@ describe("workspace open targets", () => {
   it("advertises and uses column support for IntelliJ IDEA", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "bb-intellij-idea-"));
     const applicationsDirectory = path.join(root, "Applications");
-    const intellijAppPath = path.join(applicationsDirectory, "IntelliJ IDEA.app");
+    const intellijAppPath = path.join(
+      applicationsDirectory,
+      "IntelliJ IDEA.app",
+    );
     const intellijExecutable = path.join(
       intellijAppPath,
       "Contents",
@@ -785,16 +859,17 @@ describe("workspace open targets", () => {
         }),
       );
 
-      expect(targets.find((target) => target.id === "intellij-idea"))
-        .toMatchObject({
-          capabilities: {
-            openDirectory: true,
-            openFile: true,
-            openFileAtColumn: true,
-            openFileAtLine: true,
-          },
-          label: "IntelliJ IDEA",
-        });
+      expect(
+        targets.find((target) => target.id === "intellij-idea"),
+      ).toMatchObject({
+        capabilities: {
+          openDirectory: true,
+          openFile: true,
+          openFileAtColumn: true,
+          openFileAtLine: true,
+        },
+        label: "IntelliJ IDEA",
+      });
 
       await openPathInTargetWithRuntime(
         {
@@ -1060,8 +1135,6 @@ describe("workspace open targets", () => {
         {
           context: {
             kind: "remote-ssh",
-            serverOrigin: "https://example.test",
-            hostId: "host_1",
             sshAuthority: "mbp-intel",
           },
           columnNumber: 2,
@@ -1495,6 +1568,7 @@ describe("workspace open targets", () => {
       expect(calls.find((call) => call.file === webStormExecutable)).toEqual({
         file: webStormExecutable,
         args: ["--line", "15", "--column", "6", filePath],
+        env: { HOME: homeDirectory },
       });
     } finally {
       await rm(root, { force: true, recursive: true });
@@ -1746,8 +1820,6 @@ describe("workspace open targets", () => {
       {
         context: {
           kind: "remote-ssh",
-          serverOrigin: "https://bb.example.test",
-          hostId: "host_remote",
           sshAuthority: "devbox",
         },
         columnNumber: 9,
@@ -1780,8 +1852,6 @@ describe("workspace open targets", () => {
       {
         context: {
           kind: "remote-ssh",
-          serverOrigin: "https://bb.example.test",
-          hostId: "host_remote",
           sshAuthority: "devbox",
         },
         columnNumber: 8,
@@ -1819,8 +1889,6 @@ describe("workspace open targets", () => {
       {
         context: {
           kind: "remote-ssh",
-          serverOrigin: "https://bb.example.test",
-          hostId: "host_remote",
           sshAuthority: "devbox",
         },
         columnNumber: null,
@@ -1859,8 +1927,6 @@ describe("workspace open targets", () => {
       {
         context: {
           kind: "remote-ssh",
-          serverOrigin: "https://bb.example.test",
-          hostId: "host_remote",
           sshAuthority: "devbox",
         },
         columnNumber: 3,
@@ -1883,8 +1949,6 @@ describe("workspace open targets", () => {
         {
           context: {
             kind: "remote-ssh",
-            serverOrigin: "https://bb.example.test",
-            hostId: "host_remote",
             sshAuthority: "devbox",
           },
           columnNumber: null,

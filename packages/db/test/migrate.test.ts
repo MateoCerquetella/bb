@@ -1,19 +1,26 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { publishedMigrationWhensByTag } from "../src/migration-history.js";
+import { defaultAppSettings } from "@bb/domain";
 import {
   createQueuedThreadMessage,
   createThread,
   createConnection,
   createProject,
+  getAppKeybindingOverrides,
+  getAppSettings,
   migrate,
   noopNotifier,
   upsertHost,
   type DbConnection,
   type MigrationWarningLogger,
 } from "../src/index.js";
+import {
+  createMigratedConnection,
+  prepareMigratedConnectionTemplate,
+} from "./helpers/migrated-connection.js";
 
 type InsertMigrationParameters = [string, number];
 type DeleteMigrationParameters = [number];
@@ -139,6 +146,11 @@ interface MigratedEventRow {
 
 interface MigratedEventDataRow {
   data: string;
+}
+
+interface MigratedEventParentRow {
+  id: string;
+  parentToolCallId: string | null;
 }
 
 interface MigratedExperimentRow {
@@ -278,23 +290,23 @@ function restoreWideExperimentsTable(db: DbConnection): void {
   `);
 }
 
+function dropAppSettingsValuesTable(db: DbConnection): void {
+  db.$client.prepare("DROP TABLE IF EXISTS app_settings_values").run();
+}
+
 function dropRewindAddedTables(db: DbConnection): void {
-  // Several tests migrate to head, rewind the schema to a legacy state, then
-  // re-apply forward. Tables added by recent migrations must be dropped as part
-  // of that rewind so the forward re-migrate can re-create them: the automations
-  // tables (added by 0039/0041), app_theme (added by 0042), the thread section
-  // schema (thread section columns + thread_sections table), thread tabs, and
-  // normalized plugin persistence tables.
   db.$client.prepare("DROP TABLE IF EXISTS thread_tabs").run();
   db.$client.prepare("DROP TABLE IF EXISTS automation_runs").run();
   db.$client.prepare("DROP TABLE IF EXISTS automations").run();
   db.$client.prepare("DROP TABLE IF EXISTS app_theme").run();
   db.$client.prepare("DROP TABLE IF EXISTS app_settings").run();
+  dropAppSettingsValuesTable(db);
   db.$client.prepare("DROP TABLE IF EXISTS plugin_state_snapshots").run();
   db.$client.prepare("DROP TABLE IF EXISTS plugin_artifacts").run();
   db.$client.prepare("DROP TABLE IF EXISTS plugin_catalog").run();
   db.$client.prepare("DROP TABLE IF EXISTS marketplaces").run();
   dropMarketplaceCatalogSchema(db);
+  dropEventParentToolCallIdColumn(db);
   db.$client.prepare("DROP TABLE IF EXISTS plugins").run();
   db.$client.prepare("DROP TABLE IF EXISTS plugin_kv").run();
   db.$client.prepare("DROP TABLE IF EXISTS plugin_settings").run();
@@ -307,10 +319,6 @@ function dropRewindAddedTables(db: DbConnection): void {
   dropPluginArtifactGitCheckoutRootColumn(db);
   dropThreadSectionSchema(db);
   restoreWideExperimentsTable(db);
-  // system_experiments predates thread search, so the table itself isn't
-  // rewound. Later migrations add plugins, bb_connect, multi_machine, and
-  // thread_splits; the current schema has removed all four, so only drop a
-  // column when an older migration under test left it present.
   const experimentColumns = new Set(
     db.$client
       .prepare<[], TableInfoRow>("PRAGMA table_info(system_experiments)")
@@ -342,11 +350,7 @@ function dropRewindAddedTables(db: DbConnection): void {
   dropNewOnboardingExperimentColumn(db);
   dropSteerActiveThreadOnEnterColumn(db);
   dropOnboardingCompletedAtColumn(db);
-  // Thread visibility was added after the legacy checkpoints these tests
-  // replay, so remove it before applying the forward migration chain again.
   db.$client.prepare("ALTER TABLE threads DROP COLUMN visibility").run();
-  // threads.origin_plugin_id was added by 0051; rewind it the same way. Its
-  // 0084 index has to go first — SQLite refuses to drop an indexed column.
   db.$client.exec("DROP INDEX IF EXISTS `threads_origin_plugin_archived_idx`");
   db.$client.prepare("ALTER TABLE threads DROP COLUMN origin_plugin_id").run();
   dropProjectGitRemoteUrlColumn(db);
@@ -396,6 +400,9 @@ const queuedMessageGroupingMigrationWhen = 1782273194188;
 const pendingInteractionsMigrationWhen = 1783626227375;
 const permissionModesMigrationWhen = 1784311522462;
 const branchLocalThreadTabsMigrationWhen = 1783633750817;
+const eventParentToolCallMigrationWhen = 1787181956957;
+const eventParentToolCallPreJsonValidMigrationHash =
+  "79d39e7b68d1db8ba02614fe4cc227cc0c154d77c7183f2e37ed2d8475412993";
 const eventLargeValuesPreOptimizationHash =
   "bc111f5134183c37cf135af70231ec5a79823f9868818fdd8377e1ab3c05a23f";
 const queuedMessageSortKeyMigrationPath = resolve(
@@ -427,6 +434,18 @@ const experimentKeyValueMigrationPath = resolve(
   "..",
   "drizzle",
   "0090_equal_reaper.sql",
+);
+const appSettingsKeyValueMigrationPath = resolve(
+  __dirname,
+  "..",
+  "drizzle",
+  "0102_app_settings_key_value.sql",
+);
+const providerSettingsToPluginsMigrationPath = resolve(
+  __dirname,
+  "..",
+  "drizzle",
+  "0105_provider_settings_to_plugins.sql",
 );
 const retireRequestedAtMigrationPath = resolve(
   __dirname,
@@ -480,13 +499,6 @@ function closeConnection(db: DbConnection): void {
   db.$client.close();
 }
 
-// Migration 0079 adds the side_chat_plugin experiment column alongside the
-// side-chat visibility backfill. Rewind scenarios that clear its
-// __drizzle_migrations row must also rewind the schema: ALTER TABLE ADD is
-// not re-appliable against a column that already exists (the backfill UPDATE
-// itself is idempotent).
-// Inverse of dropSideChatPluginExperimentColumn: 0084 DROPs the column, so a
-// scenario that re-applies 0084 must put it back first.
 function restoreSideChatPluginExperimentColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(system_experiments)")
@@ -509,9 +521,6 @@ function dropSideChatPluginExperimentColumn(db: DbConnection): void {
   }
 }
 
-// Current schemas no longer have the legacy provenance column. Replay tests
-// that clear later migration rows must reconstruct the historical schema so
-// older migrations can run before 0093 removes the column again.
 function restoreLegacyThreadOriginColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(threads)")
@@ -523,9 +532,6 @@ function restoreLegacyThreadOriginColumn(db: DbConnection): void {
   }
 }
 
-// Migration 0082 drops the `plugins` experiment column. Rewind scenarios that
-// clear its migration row must restore the column before replaying the
-// migration, since ALTER TABLE DROP COLUMN is not re-appliable.
 function restorePluginsExperimentColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(system_experiments)")
@@ -539,8 +545,6 @@ function restorePluginsExperimentColumn(db: DbConnection): void {
   }
 }
 
-// Migration 0080 adds the Tools Hub experiment column. Rewind scenarios that
-// clear its migration row must drop the column before replaying the migration.
 function dropToolsHubExperimentColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(system_experiments)")
@@ -552,8 +556,6 @@ function dropToolsHubExperimentColumn(db: DbConnection): void {
   }
 }
 
-// Migration 0087 adds the new onboarding experiment column. Rewind scenarios
-// that clear its migration row must drop the column before replay.
 function dropNewOnboardingExperimentColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(system_experiments)")
@@ -565,8 +567,6 @@ function dropNewOnboardingExperimentColumn(db: DbConnection): void {
   }
 }
 
-// Migration 0083 adds the machine permission ceiling. Rewind scenarios that
-// clear its migration row must drop the column before replay.
 function dropHostMaxPermissionModeColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(hosts)")
@@ -578,8 +578,6 @@ function dropHostMaxPermissionModeColumn(db: DbConnection): void {
   }
 }
 
-// Migration 0081 adds the active-thread Enter behavior preference. Rewind
-// scenarios that clear its migration row must drop the column before replay.
 function dropSteerActiveThreadOnEnterColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(app_settings)")
@@ -595,12 +593,6 @@ function dropSteerActiveThreadOnEnterColumn(db: DbConnection): void {
   }
 }
 
-// Journal `when` for 0085, used to rewind exactly that migration.
-const onboardingMigrationWhen = 1785947206119;
-
-// Migration 0085 adds the onboarding completion timestamp. Rewind scenarios
-// that clear its migration row must drop the column before replay, for the same
-// reason as the preference column above: ALTER TABLE ADD is not re-appliable.
 function dropOnboardingCompletedAtColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(app_settings)")
@@ -612,14 +604,6 @@ function dropOnboardingCompletedAtColumn(db: DbConnection): void {
   }
 }
 
-// Thread-search replay scenarios start from a full `migrate(db)` and then roll
-// the thread-search migrations back to an earlier state. Any migration that
-// lands AFTER thread-search (e.g. the automations migration) stays applied with
-// a newer timestamp, which would block Drizzle from re-applying the canonical
-// thread-search migrations (it only replays migrations newer than the latest
-// applied row). Clear those later migrations so the replay scenario matches a
-// real upgrade, where thread-search is repaired before later migrations apply.
-// NOTE: when adding a migration after thread-search, drop its schema here too.
 function resetMigrationsAfterThreadSearch(db: DbConnection): void {
   restoreLegacyThreadOriginColumn(db);
   dropRewindAddedTables(db);
@@ -628,12 +612,6 @@ function resetMigrationsAfterThreadSearch(db: DbConnection): void {
     .run(threadSearchRowidFtsMigrationWhen);
 }
 
-/**
- * Migration 0094 adds the marketplace catalog tables and the plugins
- * marketplace-name column, and 0095 adds the git tag-range columns. Rewind
- * scenarios that clear those journal rows must remove all of them, or
- * migrate() replays the CREATE/ADD against a DB that has them.
- */
 function dropMarketplaceCatalogSchema(db: DbConnection): void {
   db.$client.prepare("DROP TABLE IF EXISTS plugin_marketplace_icons").run();
   db.$client.prepare("DROP TABLE IF EXISTS plugin_marketplaces").run();
@@ -655,6 +633,47 @@ function dropMarketplaceCatalogSchema(db: DbConnection): void {
   }
 }
 
+function dropEventToolNameColumn(db: DbConnection): void {
+  db.$client.exec("DROP INDEX IF EXISTS events_delegating_item_lookup_idx");
+  db.$client.exec("DROP INDEX IF EXISTS events_plan_steps_thread_sequence_idx");
+  db.$client.prepare("DROP TABLE IF EXISTS deferred_thread_messages").run();
+  const columns = db.$client
+    .prepare<[], TableInfoRow>("PRAGMA table_xinfo(events)")
+    .all();
+  if (columns.some((column) => column.name === "tool_name")) {
+    db.$client.exec(
+      "DROP INDEX IF EXISTS events_todo_tool_call_thread_tool_sequence_idx",
+    );
+    db.$client.prepare("ALTER TABLE events DROP COLUMN tool_name").run();
+  }
+}
+
+function dropEventParentToolCallIdColumn(db: DbConnection): void {
+  dropEventToolNameColumn(db);
+  const columns = db.$client
+    .prepare<[], TableInfoRow>("PRAGMA table_info(events)")
+    .all();
+  if (columns.some((column) => column.name === "parent_tool_call_id")) {
+    db.$client.exec(
+      "DROP INDEX IF EXISTS events_parent_tool_call_thread_parent_sequence_idx",
+    );
+    db.$client
+      .prepare("ALTER TABLE events DROP COLUMN parent_tool_call_id")
+      .run();
+  }
+}
+
+function dropMarketplaceStatsColumn(db: DbConnection): void {
+  const columns = db.$client
+    .prepare<[], TableInfoRow>("PRAGMA table_info(plugin_marketplaces)")
+    .all();
+  if (columns.some((column) => column.name === "stats_json")) {
+    db.$client
+      .prepare("ALTER TABLE plugin_marketplaces DROP COLUMN stats_json")
+      .run();
+  }
+}
+
 function dropEnvironmentNameColumn(db: DbConnection): void {
   db.$client.prepare("ALTER TABLE environments DROP COLUMN name").run();
 }
@@ -665,11 +684,6 @@ function dropEnvironmentDestroyAttemptIdColumn(db: DbConnection): void {
     .run();
 }
 
-// Migration 0091 adds the dedicated archive-grace clock. Rewind scenarios
-// that clear its journal row must remove the column before replaying the ADD.
-// Migration 0094 records the git checkout root on each artifact. Rewind
-// scenarios that clear its journal row must remove the column before replaying
-// the ADD.
 function dropPluginArtifactGitCheckoutRootColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(plugin_artifacts)")
@@ -692,22 +706,12 @@ function dropEnvironmentRetireRequestedAtColumn(db: DbConnection): void {
   }
 }
 
-/**
- * cleanup_mode existed since the baseline and is dropped by 0033, so a forward
- * replay from before 0033 must first restore it for 0033's DROP COLUMN to apply
- * — the mirror of the post-ADD-COLUMN drops above.
- */
 function restoreEnvironmentCleanupModeColumn(db: DbConnection): void {
   db.$client
     .prepare("ALTER TABLE environments ADD COLUMN cleanup_mode text")
     .run();
 }
 
-/**
- * cleanup_requested_at existed since the baseline and is dropped by 0035.
- * Tests that rewind migration history from a current schema need to restore it
- * so Drizzle can replay the historical DROP COLUMN migration.
- */
 function restoreEnvironmentCleanupRequestedAtColumn(db: DbConnection): void {
   const columns = db.$client
     .prepare<[], TableInfoRow>("PRAGMA table_info(environments)")
@@ -727,12 +731,6 @@ function restoreEnvironmentCleanupRequestedAtColumn(db: DbConnection): void {
     .run();
 }
 
-/**
- * stop_requested_at existed since the baseline and is dropped by 0034, so a
- * forward replay from before 0034 must first restore it for 0034's DROP COLUMN
- * to apply — and the legacy thread_operations stop backfill in migrate.ts
- * writes it before the journal runs. Mirror of restoreEnvironmentCleanupModeColumn.
- */
 function restoreThreadStopRequestedAtColumn(db: DbConnection): void {
   db.$client
     .prepare("ALTER TABLE threads ADD COLUMN stop_requested_at integer")
@@ -745,8 +743,8 @@ function dropQueuedMessageSenderThreadIdColumn(db: DbConnection): void {
     .run();
 }
 
-/** Tables created by migrations after 0023, dropped so migrate() re-applies. */
 function dropPost0023Tables(db: DbConnection): void {
+  dropEventParentToolCallIdColumn(db);
   dropEnvironmentRetireRequestedAtColumn(db);
   dropPluginArtifactGitCheckoutRootColumn(db);
   dropProjectGitRemoteUrlColumn(db);
@@ -782,11 +780,6 @@ function dropProjectGitRemoteUrlColumn(db: DbConnection): void {
   }
 }
 
-/**
- * The original section schema lands in migration 0046. Replay scenarios that
- * rewind the ledger past it must drop the schema too, or migrate() re-runs the
- * ADD/CREATE against a DB that already has it.
- */
 function dropThreadSectionSchema(db: DbConnection): void {
   db.$client.exec("DROP INDEX IF EXISTS threads_folder_archived_deleted_idx;");
   db.$client.exec("DROP INDEX IF EXISTS threads_section_archived_deleted_idx;");
@@ -934,8 +927,6 @@ function markEventLargeValuesMigrationUnapplied(db: DbConnection): void {
       `,
     )
     .run(eventLargeValuesMigrationWhen);
-  // Later migrations add these thread provenance columns; drop them so that
-  // migration replay can re-apply cleanly from the large-values migration.
   db.$client.prepare("DROP INDEX IF EXISTS `threads_source_origin_idx`").run();
   db.$client
     .prepare("ALTER TABLE `threads` DROP COLUMN `source_thread_id`")
@@ -1370,6 +1361,10 @@ function deleteDeferredCleanupMigrationRows(db: DbConnection): void {
 }
 
 describe("migrate", () => {
+  beforeAll(() => {
+    prepareMigratedConnectionTemplate();
+  });
+
   it("backfills the first checkout commit component for every artifact shape", () => {
     const db = createConnection(":memory:");
     const commit = "d".repeat(40);
@@ -1411,10 +1406,9 @@ describe("migrate", () => {
 
       expect(
         db.$client
-          .prepare<
-            [],
-            { id: string; root: string | null }
-          >("SELECT id, git_checkout_root AS root FROM plugin_artifacts ORDER BY id")
+          .prepare<[], { id: string; root: string | null }>(
+            "SELECT id, git_checkout_root AS root FROM plugin_artifacts ORDER BY id",
+          )
           .all(),
       ).toEqual([
         { id: "collision", root: `/cache/repo/${commit}` },
@@ -1506,71 +1500,225 @@ describe("migrate", () => {
     }
   });
 
-  // Side chats used to be their own origin kind. 0084 hands every existing one
-  // to the builtin side-chat plugin, so old side chats keep opening in the
-  // plugin's panel instead of stranding on a removed origin kind.
-  it("stamps existing installs as onboarded so upgrades skip the first-run flow", () => {
+  it("moves app settings columns into key/value rows without losing values", () => {
     const db = createConnection(":memory:");
-    migrate(db);
 
-    // Rewind 0085 so it replays against an install that already has a project —
-    // exactly what an upgrading user's database looks like.
-    restoreWideExperimentsTable(db);
-    dropOnboardingCompletedAtColumn(db);
-    dropNewOnboardingExperimentColumn(db);
-    dropEnvironmentRetireRequestedAtColumn(db);
-    dropPluginArtifactGitCheckoutRootColumn(db);
-    dropMarketplaceCatalogSchema(db);
-    // Delete by the journal timestamp, not a hash substring: migration hashes
-    // are hex and can contain "0085" by coincidence.
-    db.$client
-      .prepare<
-        [number]
-      >("DELETE FROM __drizzle_migrations WHERE created_at >= ?")
-      .run(onboardingMigrationWhen);
-    db.$client
-      .prepare(
-        "INSERT INTO projects (id, name, created_at, updated_at, sort_key, kind) VALUES ('proj_a','app',1,1,'V','standard')",
-      )
-      .run();
-    // Deliberately no app_settings row: it is created on first save, so an
-    // existing user can have projects without one.
-    db.$client.prepare("DELETE FROM app_settings").run();
+    try {
+      db.$client.exec(`
+        CREATE TABLE app_settings (
+          id text PRIMARY KEY NOT NULL,
+          caffeinate integer DEFAULT false NOT NULL,
+          show_keyboard_hints integer DEFAULT true NOT NULL,
+          steer_active_thread_on_enter integer DEFAULT false NOT NULL,
+          show_unhandled_provider_events integer DEFAULT false NOT NULL,
+          codex_memory_enabled integer DEFAULT true NOT NULL,
+          claude_code_memory_enabled integer DEFAULT true NOT NULL,
+          codex_subagents_disabled integer DEFAULT false NOT NULL,
+          claude_code_subagents_disabled integer DEFAULT false NOT NULL,
+          claude_code_workflows_disabled integer DEFAULT false NOT NULL,
+          keybinding_overrides text DEFAULT '[]' NOT NULL,
+          onboarding_completed_at text,
+          updated_at integer NOT NULL
+        );
+        INSERT INTO app_settings VALUES (
+          'current', true, false, true, true, false, true, true, false, true,
+          '[{"command":"thread.new","shortcut":null}]',
+          '2026-08-01T00:00:00.000Z',
+          1234
+        );
+      `);
 
-    restoreLegacyThreadOriginColumn(db);
-    migrate(db);
+      runMigrationFile({ db, migrationPath: appSettingsKeyValueMigrationPath });
 
-    const row = db.$client
-      .prepare<
-        [],
-        { onboarding_completed_at: string | null }
-      >("SELECT onboarding_completed_at FROM app_settings WHERE id = 'current'")
-      .get();
-    // Non-null means the flow will not open for this install.
-    expect(row?.onboarding_completed_at).toBeTruthy();
-
-    closeConnection(db);
+      expect(getAppSettings(db)).toEqual({
+        showKeyboardHints: false,
+        steerActiveThreadOnEnter: true,
+        showUnhandledProviderEvents: true,
+        providerOrder: [],
+        defaultProviderId: null,
+        streamerMode: false,
+      });
+      expect(
+        db.$client
+          .prepare<[], { key: string; value: string }>(
+            "SELECT key, value FROM app_settings_values WHERE key LIKE 'codex%' OR key LIKE 'claudeCode%' ORDER BY key",
+          )
+          .all(),
+      ).toEqual([
+        { key: "claudeCodeMemoryEnabled", value: "true" },
+        { key: "claudeCodeSubagentsDisabled", value: "false" },
+        { key: "claudeCodeWorkflowsDisabled", value: "true" },
+        { key: "codexMemoryEnabled", value: "false" },
+        { key: "codexSubagentsDisabled", value: "true" },
+      ]);
+      expect(getAppKeybindingOverrides(db)).toEqual([
+        { command: "thread.new", shortcut: null },
+      ]);
+      expect(
+        db.$client
+          .prepare<[], { updatedAt: number }>(
+            "SELECT updated_at AS updatedAt FROM app_settings_values WHERE key = 'showKeyboardHints'",
+          )
+          .get(),
+      ).toEqual({ updatedAt: 1234 });
+    } finally {
+      closeConnection(db);
+    }
   });
 
-  it("leaves a fresh install unstamped so onboarding opens", () => {
+  it("carries the provider knobs into plugin settings and retires the shared rows", () => {
     const db = createConnection(":memory:");
-    migrate(db);
+    try {
+      db.$client.exec(`
+        CREATE TABLE app_settings_values (
+          key text PRIMARY KEY NOT NULL,
+          value text NOT NULL,
+          updated_at integer NOT NULL
+        );
+        CREATE TABLE plugin_settings (
+          plugin_id text NOT NULL,
+          key text NOT NULL,
+          value text NOT NULL,
+          updated_at integer NOT NULL,
+          PRIMARY KEY (plugin_id, key)
+        );
+        INSERT INTO app_settings_values (key, value, updated_at) VALUES
+          ('showKeyboardHints', 'false', 10),
+          ('codexMemoryEnabled', 'false', 11),
+          ('codexSubagentsDisabled', 'true', 12),
+          ('claudeCodeMemoryEnabled', 'true', 13),
+          ('claudeCodeSubagentsDisabled', 'false', 14),
+          ('claudeCodeWorkflowsDisabled', 'true', 15);
+        -- A plugin row written before the migration wins over the old value.
+        INSERT INTO plugin_settings (plugin_id, key, value, updated_at) VALUES
+          ('provider-claude-code', 'memoryEnabled', 'false', 99);
+      `);
 
-    db.$client
-      .prepare(
-        "INSERT OR REPLACE INTO app_settings (id, updated_at) VALUES ('current', 1)",
-      )
-      .run();
+      runMigrationFile({
+        db,
+        migrationPath: providerSettingsToPluginsMigrationPath,
+      });
 
-    const row = db.$client
-      .prepare<
-        [],
-        { onboarding_completed_at: string | null }
-      >("SELECT onboarding_completed_at FROM app_settings WHERE id = 'current'")
-      .get();
-    expect(row?.onboarding_completed_at).toBeNull();
+      expect(
+        db.$client
+          .prepare<
+            [],
+            { pluginId: string; key: string; value: string; updatedAt: number }
+          >(
+            "SELECT plugin_id AS pluginId, key, value, updated_at AS updatedAt FROM plugin_settings ORDER BY plugin_id, key",
+          )
+          .all(),
+      ).toEqual([
+        {
+          pluginId: "provider-claude-code",
+          key: "memoryEnabled",
+          value: "false",
+          updatedAt: 99,
+        },
+        {
+          pluginId: "provider-claude-code",
+          key: "subagentsDisabled",
+          value: "false",
+          updatedAt: 14,
+        },
+        {
+          pluginId: "provider-claude-code",
+          key: "workflowsDisabled",
+          value: "true",
+          updatedAt: 15,
+        },
+        {
+          pluginId: "provider-codex",
+          key: "memoryEnabled",
+          value: "false",
+          updatedAt: 11,
+        },
+        {
+          pluginId: "provider-codex",
+          key: "subagentsDisabled",
+          value: "true",
+          updatedAt: 12,
+        },
+      ]);
+      expect(
+        db.$client
+          .prepare<[], { key: string }>(
+            "SELECT key FROM app_settings_values ORDER BY key",
+          )
+          .all(),
+      ).toEqual([{ key: "showKeyboardHints" }]);
+    } finally {
+      closeConnection(db);
+    }
+  });
 
-    closeConnection(db);
+  it("keeps a never-onboarded install null through the app settings move", () => {
+    const db = createConnection(":memory:");
+
+    try {
+      db.$client.exec(`
+        CREATE TABLE app_settings (
+          id text PRIMARY KEY NOT NULL,
+          caffeinate integer DEFAULT false NOT NULL,
+          show_keyboard_hints integer DEFAULT true NOT NULL,
+          steer_active_thread_on_enter integer DEFAULT false NOT NULL,
+          show_unhandled_provider_events integer DEFAULT false NOT NULL,
+          codex_memory_enabled integer DEFAULT true NOT NULL,
+          claude_code_memory_enabled integer DEFAULT true NOT NULL,
+          codex_subagents_disabled integer DEFAULT false NOT NULL,
+          claude_code_subagents_disabled integer DEFAULT false NOT NULL,
+          claude_code_workflows_disabled integer DEFAULT false NOT NULL,
+          keybinding_overrides text DEFAULT '[]' NOT NULL,
+          onboarding_completed_at text,
+          updated_at integer NOT NULL
+        );
+        INSERT INTO app_settings (id, updated_at) VALUES ('current', 1234);
+      `);
+
+      runMigrationFile({ db, migrationPath: appSettingsKeyValueMigrationPath });
+
+      expect(getAppSettings(db)).toEqual(defaultAppSettings);
+      expect(getAppKeybindingOverrides(db)).toEqual([]);
+    } finally {
+      closeConnection(db);
+    }
+  });
+
+  it("leaves app settings unset when there is no legacy row", () => {
+    const db = createConnection(":memory:");
+
+    try {
+      db.$client.exec(`
+        CREATE TABLE app_settings (
+          id text PRIMARY KEY NOT NULL,
+          caffeinate integer DEFAULT false NOT NULL,
+          show_keyboard_hints integer DEFAULT true NOT NULL,
+          steer_active_thread_on_enter integer DEFAULT false NOT NULL,
+          show_unhandled_provider_events integer DEFAULT false NOT NULL,
+          codex_memory_enabled integer DEFAULT true NOT NULL,
+          claude_code_memory_enabled integer DEFAULT true NOT NULL,
+          codex_subagents_disabled integer DEFAULT false NOT NULL,
+          claude_code_subagents_disabled integer DEFAULT false NOT NULL,
+          claude_code_workflows_disabled integer DEFAULT false NOT NULL,
+          keybinding_overrides text DEFAULT '[]' NOT NULL,
+          onboarding_completed_at text,
+          updated_at integer NOT NULL
+        );
+      `);
+
+      runMigrationFile({ db, migrationPath: appSettingsKeyValueMigrationPath });
+
+      expect(
+        db.$client
+          .prepare<[], { count: number }>(
+            "SELECT COUNT(*) AS count FROM app_settings_values",
+          )
+          .get(),
+      ).toEqual({ count: 0 });
+      expect(getAppSettings(db)).toEqual(defaultAppSettings);
+    } finally {
+      closeConnection(db);
+    }
   });
 
   it("adopts legacy side chats as the side-chat plugin's hidden forks", () => {
@@ -1611,17 +1759,12 @@ describe("migrate", () => {
         originPluginId: "workflows",
         sourceThreadId: source.id,
       });
-      // Seed the pre-0084 shape: the origin kind is gone from the enum, so it
-      // cannot be written through createThread any more.
       db.$client
         .prepare(
           "UPDATE threads SET origin_kind = 'side-chat' WHERE id IN (?, ?)",
         )
         .run(sideChat.id, orphanSideChat.id);
 
-      // The merged 0084 also CREATEs an index and DROPs the experiment column;
-      // undo both so it re-applies cleanly and the adoption UPDATEs run on the
-      // seeded rows.
       db.$client.exec(
         "DROP INDEX IF EXISTS `threads_origin_plugin_archived_idx`",
       );
@@ -1630,28 +1773,22 @@ describe("migrate", () => {
       runMigrationFile({ db, migrationPath: sideChatPluginOnlyMigrationPath });
 
       const rows = db.$client
-        .prepare<
-          [],
-          MigratedThreadOriginRow
-        >("SELECT id, origin_kind AS originKind, origin_plugin_id AS originPluginId, visibility FROM threads")
+        .prepare<[], MigratedThreadOriginRow>(
+          "SELECT id, origin_kind AS originKind, origin_plugin_id AS originPluginId, visibility FROM threads",
+        )
         .all();
       const byId = new Map(rows.map((row) => [row.id, row]));
 
-      // The side chat is now the plugin's hidden fork, so its panel reopens it.
       expect(byId.get(sideChat.id)).toMatchObject({
         originKind: "fork",
         originPluginId: "side-chat",
         visibility: "hidden",
       });
-      // No source thread means the panel has nothing to open, so the row drops
-      // the removed origin kind AND becomes visible — it is nobody's fork now,
-      // so its own row is the only way back to it.
       expect(byId.get(orphanSideChat.id)).toMatchObject({
         originKind: null,
         originPluginId: null,
         visibility: "visible",
       });
-      // Another plugin's fork is untouched.
       expect(byId.get(pluginFork.id)).toMatchObject({
         originKind: "fork",
         originPluginId: "workflows",
@@ -1705,8 +1842,6 @@ describe("migrate", () => {
         sourceThreadId: sourceWithoutHistory.id,
         status: "idle",
       });
-      // `side-chat` is no longer a valid origin kind, but these rows predate
-      // migration 0084, so seed the legacy value directly.
       db.$client
         .prepare(
           "UPDATE threads SET origin_kind = 'side-chat' WHERE id IN (?, ?)",
@@ -1795,9 +1930,6 @@ describe("migrate", () => {
           inheritedQueue.id,
           fallbackQueue.id,
         );
-      // Roll back from the permission-modes migration onward so it replays;
-      // Drizzle only re-applies migrations newer than the latest applied row,
-      // so every later row (0079) must be cleared with it.
       restoreWideExperimentsTable(db);
       db.$client
         .prepare<DeleteMigrationParameters>(
@@ -1809,11 +1941,13 @@ describe("migrate", () => {
       restorePluginsExperimentColumn(db);
       dropSteerActiveThreadOnEnterColumn(db);
       dropOnboardingCompletedAtColumn(db);
+      dropAppSettingsValuesTable(db);
       dropNewOnboardingExperimentColumn(db);
       dropHostMaxPermissionModeColumn(db);
       dropEnvironmentRetireRequestedAtColumn(db);
       dropPluginArtifactGitCheckoutRootColumn(db);
       dropMarketplaceCatalogSchema(db);
+      dropEventParentToolCallIdColumn(db);
 
       restoreLegacyThreadOriginColumn(db);
       migrate(db);
@@ -2211,11 +2345,13 @@ describe("migrate", () => {
       restorePluginsExperimentColumn(db);
       dropSteerActiveThreadOnEnterColumn(db);
       dropOnboardingCompletedAtColumn(db);
+      dropAppSettingsValuesTable(db);
       dropNewOnboardingExperimentColumn(db);
       dropHostMaxPermissionModeColumn(db);
       dropEnvironmentRetireRequestedAtColumn(db);
       dropPluginArtifactGitCheckoutRootColumn(db);
       dropMarketplaceCatalogSchema(db);
+      dropEventParentToolCallIdColumn(db);
 
       restoreLegacyThreadOriginColumn(db);
       expect(
@@ -2310,11 +2446,13 @@ describe("migrate", () => {
       restorePluginsExperimentColumn(db);
       dropSteerActiveThreadOnEnterColumn(db);
       dropOnboardingCompletedAtColumn(db);
+      dropAppSettingsValuesTable(db);
       dropNewOnboardingExperimentColumn(db);
       dropHostMaxPermissionModeColumn(db);
       dropEnvironmentRetireRequestedAtColumn(db);
       dropPluginArtifactGitCheckoutRootColumn(db);
       dropMarketplaceCatalogSchema(db);
+      dropEventParentToolCallIdColumn(db);
 
       restoreLegacyThreadOriginColumn(db);
       expect(() => migrate(db)).not.toThrow();
@@ -2653,8 +2791,6 @@ describe("migrate", () => {
           originKind: "fork",
         },
         {
-          // 0038 moves the provenance, then 0084 hands the side chat to the
-          // plugin — the whole chain runs here, so this is the end state.
           id: "thr_side_chat",
           parentThreadId: null,
           sourceThreadId: "thr_source",
@@ -3226,9 +3362,6 @@ describe("migrate", () => {
           .all()
           .map((row) => row.name),
       ).toEqual(expect.arrayContaining(["command_cursor"]));
-      // The legacy thread_operations stop backfill still drives the thread to
-      // error; stop_requested_at is no longer a column (dropped by 0031), so it
-      // can't be asserted — the durable stop intent is now the status itself.
       expect(
         db.$client
           .prepare<[], OperationBackfillThreadRow>(
@@ -3845,6 +3978,7 @@ describe("migrate", () => {
         "item_kind",
         "data",
         "created_at",
+        "parent_tool_call_id",
       ]);
       const eventIndexNames = readIndexNames({
         db,
@@ -3853,14 +3987,16 @@ describe("migrate", () => {
       expect(eventIndexNames).toEqual([
         "events_background_task_thread_type_item_sequence_idx",
         "events_completed_item_truncation_idx",
+        "events_delegating_item_lookup_idx",
         "events_environment_idx",
-        "events_goal_thread_sequence_idx",
         "events_item_lifecycle_thread_item_sequence_idx",
+        "events_parent_tool_call_thread_parent_sequence_idx",
+        "events_plan_steps_thread_sequence_idx",
         "events_thread_sequence_idx",
+        "events_thread_state_thread_sequence_idx",
         "events_thread_turn_type_item_sequence_idx",
         "events_thread_type_item_kind_sequence_idx",
         "events_thread_type_sequence_idx",
-        "events_tool_call_parent_lookup_idx",
       ]);
 
       const migrationCreatedAts = db.$client
@@ -3877,8 +4013,6 @@ describe("migrate", () => {
       expect(migrationCreatedAts).toContain(threadDynamicContextFileStatesWhen);
       expect(migrationCreatedAts).toContain(commandLookupIndexesWhen);
       expect(migrationCreatedAts).toContain(threadPinningMigrationWhen);
-      // The legacy thread_operations stop backfill still drives the thread to
-      // error; stop_requested_at is no longer a column (dropped by 0031).
       expect(
         db.$client
           .prepare<[], OperationBackfillThreadRow>(
@@ -4073,10 +4207,9 @@ describe("migrate", () => {
   });
 
   it("skips legacy large event value round trip when values are already inline", () => {
-    const db = createConnection(":memory:");
+    const db = createMigratedConnection();
 
     try {
-      migrate(db);
       dropRewindAddedTables(db);
       seedEventLargeValueBackfillThread(db);
       const values = seedEventLargeValueBackfillEvents(db);
@@ -4093,8 +4226,6 @@ describe("migrate", () => {
 
       migrate(db);
 
-      // The skipped round-trip and every migration after it re-apply, so the
-      // latest applied migration is the most recent in the journal (0041).
       expect(readLatestAppliedMigrationCreatedAt(db)).toBe(latestMigrationWhen);
       expect(readTableNames(db)).not.toContain("event_large_values");
       expect(
@@ -4127,10 +4258,9 @@ describe("migrate", () => {
   });
 
   it("restores legacy large event values to inline payloads", () => {
-    const db = createConnection(":memory:");
+    const db = createMigratedConnection();
 
     try {
-      migrate(db);
       dropRewindAddedTables(db);
       seedEventLargeValueBackfillThread(db);
       const values = seedEventLargeValueBackfillEvents(db);
@@ -4205,6 +4335,26 @@ describe("migrate", () => {
         createdAt: eventLargeValuesMigrationWhen,
         hash: eventLargeValuesPreOptimizationHash,
       });
+
+      expect(() => migrate(db)).not.toThrow();
+    } finally {
+      closeConnection(db);
+    }
+  });
+
+  it("accepts the event parent migration hash from before its JSON guard", () => {
+    const db = createConnection(":memory:");
+
+    try {
+      migrate(db);
+      db.$client
+        .prepare(
+          "UPDATE __drizzle_migrations SET hash = ? WHERE created_at = ?",
+        )
+        .run(
+          eventParentToolCallPreJsonValidMigrationHash,
+          eventParentToolCallMigrationWhen,
+        );
 
       expect(() => migrate(db)).not.toThrow();
     } finally {
@@ -4521,10 +4671,9 @@ describe("migrate", () => {
       expect(readTableNames(db)).not.toContain("marketplaces");
       expect(
         db.$client
-          .prepare<
-            [],
-            { source: string }
-          >("SELECT source FROM plugins WHERE id = 'third-party'")
+          .prepare<[], { source: string }>(
+            "SELECT source FROM plugins WHERE id = 'third-party'",
+          )
           .get(),
       ).toEqual({ source: "git:https://example.test/tasks@main" });
     } finally {
@@ -4594,10 +4743,9 @@ describe("migrate", () => {
       });
       expect(
         db.$client
-          .prepare<
-            [],
-            MigrationCountRow
-          >("SELECT COUNT(*) AS count FROM plugin_catalog")
+          .prepare<[], MigrationCountRow>(
+            "SELECT COUNT(*) AS count FROM plugin_catalog",
+          )
           .get(),
       ).toEqual({ count: 0 });
     } finally {
@@ -4640,8 +4788,6 @@ describe("migrate", () => {
         migrationPath: curatedMarketplaceRenameMigrationPath,
       });
 
-      // A dangling reference is the failure that matters: a renamed row whose
-      // installs still name the old key would list every entry twice.
       expect(
         db.$client
           .prepare<[], { name: string }>(
@@ -4671,10 +4817,6 @@ describe("migrate", () => {
         { id: "tasks", catalogMarketplaceName: "acme" },
       ]);
 
-      // The stored manifest still declares the old name. A conditional refresh
-      // that answers 304 parses that document and checks its name against the
-      // row, so the renamed row must not carry validators that can produce a
-      // 304. Other marketplaces keep theirs.
       expect(
         db.$client
           .prepare<
@@ -4825,8 +4967,6 @@ describe("migrate", () => {
         .prepare("UPDATE threads SET child_origin = 'side-chat' WHERE id = ?")
         .run(legacyOriginSideChat.id);
 
-      // The merged 0079 also ADDs the experiment column; drop it first so the
-      // ALTER re-applies cleanly and the backfill UPDATE runs on seeded rows.
       dropSideChatPluginExperimentColumn(db);
       runMigrationFile({
         db,
@@ -4851,6 +4991,116 @@ describe("migrate", () => {
           { id: legacyOriginSideChat.id, visibility: "hidden" },
           { id: fork.id, visibility: "visible" },
         ].sort((left, right) => left.id.localeCompare(right.id)),
+      );
+    } finally {
+      closeConnection(db);
+    }
+  });
+
+  it("backfills normalized parent tool-call ids from legacy event payloads", () => {
+    const db = createConnection(":memory:");
+
+    try {
+      migrate(db);
+      const host = upsertHost(db, noopNotifier, {
+        name: "event-parent-migration-host",
+        type: "persistent",
+      });
+      const { project } = createProject(db, noopNotifier, {
+        name: "event-parent-migration-project",
+        source: {
+          type: "local_path",
+          hostId: host.id,
+          path: "/tmp/event-parent-migration",
+        },
+      });
+      const thread = createThread(db, noopNotifier, {
+        projectId: project.id,
+        providerId: "codex",
+      });
+
+      dropEventParentToolCallIdColumn(db);
+      dropMarketplaceStatsColumn(db);
+      db.$client
+        .prepare<DeleteMigrationParameters>(
+          "DELETE FROM __drizzle_migrations WHERE created_at >= ?",
+        )
+        .run(eventParentToolCallMigrationWhen);
+      db.$client.exec(`
+        INSERT INTO events (
+          id, thread_id, scope_kind, turn_id, sequence, type, item_id, item_kind, data, created_at
+        ) VALUES
+          (
+            'evt_top_level_parent',
+            '${thread.id}',
+            'turn',
+            'legacy-turn',
+            1,
+            'turn/started',
+            NULL,
+            NULL,
+            '{"parentToolCallId":"parent-top-level"}',
+            1
+          ),
+          (
+            'evt_item_parent',
+            '${thread.id}',
+            'turn',
+            'legacy-turn',
+            2,
+            'item/completed',
+            'child-message',
+            'agentMessage',
+            '{"item":{"id":"child-message","type":"agentMessage","parentToolCallId":"parent-item"}}',
+            2
+          ),
+          (
+            'evt_no_parent',
+            '${thread.id}',
+            'thread',
+            NULL,
+            3,
+            'system/error',
+            NULL,
+            NULL,
+            '{"message":"parentToolCallId is only text here"}',
+            3
+          ),
+          (
+            'evt_malformed_parent',
+            '${thread.id}',
+            'thread',
+            NULL,
+            4,
+            'system/error',
+            NULL,
+            NULL,
+            '{"parentToolCallId":',
+            4
+          );
+      `);
+
+      migrate(db);
+
+      expect(
+        db.$client
+          .prepare<[], MigratedEventParentRow>(
+            `
+              SELECT id, parent_tool_call_id AS parentToolCallId
+              FROM events
+              WHERE id LIKE 'evt_%_parent'
+              ORDER BY id
+            `,
+          )
+          .all(),
+      ).toEqual([
+        { id: "evt_item_parent", parentToolCallId: "parent-item" },
+        { id: "evt_malformed_parent", parentToolCallId: null },
+        { id: "evt_no_parent", parentToolCallId: null },
+        { id: "evt_top_level_parent", parentToolCallId: "parent-top-level" },
+      ]);
+      expect(readIndexNames({ db, tableName: "events" })).toContain(
+        "events_parent_tool_call_thread_parent_sequence_idx",
       );
     } finally {
       closeConnection(db);

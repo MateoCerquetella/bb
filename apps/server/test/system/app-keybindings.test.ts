@@ -152,6 +152,24 @@ describe("app keybindings", () => {
         shortcut: { key: "n", mod: true, shift: true },
       });
       expect(
+        config.keybindings.find(
+          (binding) => binding.command === "panel.reopenClosedTab",
+        ),
+      ).toMatchObject({
+        desktopOnly: true,
+        shortcut: { key: "t", mod: true, shift: true },
+      });
+      expect(
+        config.keybindings.filter(
+          (binding) => binding.command === "terminal.open",
+        ),
+      ).toMatchObject([
+        {
+          desktopOnly: false,
+          shortcut: { key: "Enter", mod: true, shift: true },
+        },
+      ]);
+      expect(
         assignedDefaultKeybindings
           .filter((binding) => binding.command === "thread.previous")
           .map((binding) => ({
@@ -276,7 +294,6 @@ describe("app keybindings", () => {
           })),
       ).toEqual([
         { desktopOnly: false, key: "Enter" },
-        { desktopOnly: true, key: "t" },
       ]);
       expect(
         assignedDefaultKeybindings.find(
@@ -315,9 +332,6 @@ describe("app keybindings", () => {
         },
         when,
       });
-      // Forward cycles use Alt and backward cycles add Shift. Both directions
-      // share the scope of `modelPicker.toggle` and keep working in the open
-      // picker.
       expect(
         assignedDefaultKeybindings
           .filter((binding) => binding.command.startsWith("modelPicker.cycle"))
@@ -333,8 +347,6 @@ describe("app keybindings", () => {
         altChord("modelPicker.cycleProviderBackward", "p", true, composerWhen),
         altChord("modelPicker.cycleReasoning", "t", false, composerWhen),
         altChord("modelPicker.cycleReasoningBackward", "t", true, composerWhen),
-        // The picker popover is modal, so a second scoped copy of each chord
-        // keeps cycling alive while it is open.
         altChord("modelPicker.cycleModel", "m", false, pickerOpenWhen),
         altChord("modelPicker.cycleModelBackward", "m", true, pickerOpenWhen),
         altChord("modelPicker.cycleProvider", "p", false, pickerOpenWhen),
@@ -352,8 +364,6 @@ describe("app keybindings", () => {
           pickerOpenWhen,
         ),
       ]);
-      // Alt defaults remain confined to composer cycling commands, so unrelated
-      // actions cannot shadow these chords.
       expect(
         assignedDefaultKeybindings
           .filter((binding) => binding.shortcut.alt)
@@ -455,7 +465,7 @@ describe("app keybindings", () => {
         "thread.next",
         ...THREAD_JUMP_APP_COMMAND_IDS,
         ...PANE_FOCUS_APP_COMMAND_IDS,
-        "terminal.open",
+        "panel.reopenClosedTab",
         "browser.focusLocation",
         "browser.reload",
         "browser.find",
@@ -634,9 +644,11 @@ describe("app keybindings", () => {
     await withTestHarness(async (harness) => {
       harness.db.$client
         .prepare(
-          "INSERT INTO app_settings (id, keybinding_overrides, updated_at) VALUES (?, ?, ?)",
+          `INSERT INTO app_settings_values (key, value, updated_at)
+           VALUES (?, ?, ?)
+           ON CONFLICT (key) DO UPDATE SET value = excluded.value`,
         )
-        .run("current", "not-json", Date.now());
+        .run("keybindingOverrides", "not-json", Date.now());
 
       const response = await harness.app.request("/api/v1/system/config");
       expect(response.status).toBe(200);

@@ -32,6 +32,7 @@ import type {
   ThreadResponse,
   ThreadSearchResponse,
   ThreadStorageFileListResponse,
+  ThreadStorageLocationResponse,
   ThreadStoragePathListResponse,
   ThreadTabsResponse,
   ThreadTimelineResponse,
@@ -45,6 +46,7 @@ import type {
   ResolveThreadMentionsRequest,
   ResolveThreadMentionsResponse,
   SendMessageRequest,
+  SendMessageResponse,
   SendQueuedMessageRequest,
   SetQueuedMessageGroupBoundaryRequest,
   ThreadEventsQuery,
@@ -117,7 +119,7 @@ export type ThreadArchiveResult = ThreadArchiveAllResponse;
 export type ThreadOpenResult = ThreadOpenResponse;
 export type ThreadPaneActionResult = ThreadPaneActionResponse;
 export type ThreadDeleteResult = { ok: true };
-export type ThreadSendResult = { ok: true };
+export type ThreadSendResult = SendMessageResponse;
 export type ThreadEditMessageResult = EditMessageResponse;
 export type ThreadStopResult = { ok: true };
 export type ThreadCompactResult = { ok: true };
@@ -138,10 +140,10 @@ export type ThreadQueuedMessageGroupBoundaryResult =
 export type ThreadTabsResult = ThreadTabsResponse;
 export type ThreadTabsUpdateResult = ThreadTabsResponse;
 export type ThreadStorageFilesResult = ThreadStorageFileListResponse;
+export type ThreadStorageLocationResult = ThreadStorageLocationResponse;
 export type ThreadStoragePathsResult = ThreadStoragePathListResponse;
 export type ThreadChildSummaryResult = ThreadChildSummaryResponse;
-export type ThreadDefaultExecutionOptionsResult =
-  ResolvedThreadExecutionOptions | null;
+export type ThreadDefaultExecutionOptionsResult = ResolvedThreadExecutionOptions | null;
 export type ThreadConversationOutlineResult = ThreadConversationOutlineResponse;
 export type ThreadTimelineTurnSummaryDetailsResult =
   TimelineTurnSummaryDetailsResponse;
@@ -267,16 +269,12 @@ export interface ThreadPaneActionArgs {
 }
 
 export interface ThreadEventsListArgs {
-  /** Return only events with a sequence greater than this value. */
   afterSeq?: string;
-  /** Return only events with a sequence less than this value. */
   beforeSeq?: string;
   limit?: string;
-  /** Defaults to ascending sequence order. */
   order?: "asc" | "desc";
   signal?: AbortSignal;
   threadId: string;
-  /** Return only these event types. */
   types?: readonly [ThreadEventType, ...ThreadEventType[]];
 }
 
@@ -463,10 +461,6 @@ export interface ThreadsArea {
   search(args: ThreadSearchArgs): Promise<ThreadSearchResult>;
   send(args: ThreadSendArgs): Promise<ThreadSendResult>;
   spawn(args: ThreadSpawnArgs): Promise<ThreadSpawnResult>;
-  /**
-   * Stop active work and release the loaded agent runtime. This operation is
-   * idempotent and preserves thread history for a later resume.
-   */
   stop(args: ThreadActionArgs): Promise<ThreadStopResult>;
   tabs: ThreadTabsArea;
   timeline(args: ThreadTimelineArgs): Promise<ThreadTimelineResult>;
@@ -474,6 +468,7 @@ export interface ThreadsArea {
     args: ThreadTimelineTurnSummaryDetailsArgs,
   ): Promise<ThreadTimelineTurnSummaryDetailsResult>;
   storageFiles(args: ThreadStorageFilesArgs): Promise<ThreadStorageFilesResult>;
+  storageLocation(args: ThreadStatusArgs): Promise<ThreadStorageLocationResult>;
   storagePaths(args: ThreadStoragePathsArgs): Promise<ThreadStoragePathsResult>;
   unarchive(args: ThreadActionArgs): Promise<ThreadUnarchiveResult>;
   unpin(args: ThreadActionArgs): Promise<ThreadMutationResult>;
@@ -887,8 +882,6 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
   };
   return {
     async archive(input) {
-      // Match the UI: archiving a parent also archives assigned children and
-      // source-derived side chats via the cascade archive-all route.
       return transport.readJson(
         transport.api.v1.threads[":id"]["archive-all"].$post({
           param: { id: input.threadId },
@@ -1052,13 +1045,12 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
       );
     },
     async send(input) {
-      await transport.readVoid(
+      return transport.readJson(
         transport.api.v1.threads[":id"].send.$post({
           param: { id: input.threadId },
           json: sendJson(input),
         }),
       );
-      return { ok: true };
     },
     async spawn(input) {
       return transport.readJson(
@@ -1132,6 +1124,16 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
           {
             param: { id: input.threadId },
             query: { query: input.query, limit: input.limit },
+          },
+          ...signalRequestArgs(input.signal),
+        ),
+      );
+    },
+    async storageLocation(input) {
+      return transport.readJson(
+        transport.api.v1.threads[":id"]["thread-storage"].location.$get(
+          {
+            param: { id: input.threadId },
           },
           ...signalRequestArgs(input.signal),
         ),

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { createBridgeJsonRpcTestHarness } from "@bb/provider-bridge-protocol/testing";
+import { experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness } from "@get-bb/plugin-sdk/provider-bridge/testing";
 import { experimental_killAllChildrenForTests, handleLine } from "./bridge.js";
 
 const fakeAppServerPath = fileURLToPath(
@@ -41,8 +41,6 @@ it("reuses one initialized app-server across model catalog requests", async () =
 
   expect(first.error).toBeUndefined();
   expect(second.error).toBeUndefined();
-  // The fixture puts a random per-process identity in its model id. Equal
-  // catalogs therefore prove both requests reached the same child process.
   expect(second.result).toEqual(first.result);
 });
 

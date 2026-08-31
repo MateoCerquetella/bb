@@ -4,7 +4,6 @@ import {
   createConnection,
   createQueuedThreadMessageId,
   createEnvironmentId,
-  createEnvironmentProvisioningId,
   createEventId,
   createHostDaemonSessionId,
   createHostId,
@@ -749,7 +748,6 @@ describe("db rebuild schema", () => {
     expect(createProjectId()).toMatch(/^proj_/u);
     expect(createProjectSourceId()).toMatch(/^src_/u);
     expect(createEnvironmentId()).toMatch(/^env_/u);
-    expect(createEnvironmentProvisioningId()).toMatch(/^epv_/u);
     expect(createThreadId()).toMatch(/^thr_/u);
     expect(createEventId()).toMatch(/^evt_/u);
     expect(createPromptHistoryEntryId()).toMatch(/^phist_/u);
@@ -781,7 +779,6 @@ describe("db rebuild schema", () => {
           instanceId: "instance",
           hostName: "host",
           hostType: "persistent",
-          // data_dir intentionally omitted — column is NOT NULL.
           protocolVersion: 1,
           heartbeatIntervalMs: 1_000,
           leaseTimeoutMs: 10_000,

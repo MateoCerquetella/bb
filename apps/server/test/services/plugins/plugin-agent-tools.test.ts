@@ -7,6 +7,7 @@ import { createConnection, migrate, type DbConnection } from "@bb/db";
 import { encodeClientTurnRequestIdNumber } from "@bb/domain";
 import type { Logger } from "@bb/logger";
 import { RESERVED_AGENT_TOOL_NAMES } from "../../../src/services/plugins/plugin-api.js";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginService,
@@ -69,6 +70,7 @@ describe("bb.agents.registerTool", () => {
     migrate(db);
     workDir = await mkdtemp(join(tmpdir(), "bb-plugin-tools-test-"));
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -242,12 +244,10 @@ describe("bb.agents.registerTool", () => {
     expect((invalid.contentItems[0] as { text: string }).text).toContain(
       "query",
     );
-    // The model's bad arguments never count against the plugin.
     expect(
       service.list().find((p) => p.id === "zodded")?.handlerStats.errorCount,
     ).toBe(0);
 
-    // A throwing execute maps to an isError result and counts as an error.
     api!.agents.registerTool({
       name: "exploder",
       description: "Always throws",
@@ -324,58 +324,57 @@ describe("bb.agents.registerTool", () => {
     ]);
   });
 
-  it("keeps experimental status labels with a registered native tool", async () => {
+  it("resolves one full row presentation per injected tool", async () => {
     const rootDir = await writePlugin(workDir, {
-      name: "bb-plugin-readable-tool",
+      name: "bb-plugin-presented-tools",
       serverSource: "export default function plugin() {}",
     });
     await service.installPath(rootDir);
-    const api = service.getApi("readable-tool")!;
+    const api = service.getApi("presented-tools")!;
 
     api.agents.registerTool({
-      name: "repository_context",
-      description: "Read project context",
-      experimental_statusLabels: {
-        pending: "Reading project overview",
-        completed: "Read project overview",
+      name: "declared_tool",
+      description: "Declares its whole presentation",
+      presentation: {
+        label: { pending: "Looking things up", completed: "Looked things up" },
+        icon: { glyph: "Search" },
+        suppress: true,
+        tint: { light: "#123456", dark: "#654321" },
       },
       parameters: { type: "object" },
       execute: () => "ok",
     });
+    api.agents.registerTool({
+      name: "plain_tool",
+      description: "Declares nothing",
+      parameters: { type: "object" },
+      execute: () => "ok",
+    });
 
-    expect(service.findAgentTool("repository_context")?.record).toMatchObject({
-      experimentalStatusLabels: {
-        pending: "Reading project overview",
-        completed: "Read project overview",
-      },
+    const byName = new Map(
+      service.listAgentTools().map((entry) => [entry.tool.name, entry.tool]),
+    );
+    expect(byName.get("declared_tool")?.presentation).toEqual({
+      label: { pending: "Looking things up", completed: "Looked things up" },
+      icon: { glyph: "Search" },
+      suppress: true,
+      tint: { light: "#123456", dark: "#654321" },
+    });
+    expect(byName.get("plain_tool")?.presentation).toEqual({
+      label: { pending: "Running plain_tool", completed: "Ran plain_tool" },
+      icon: { glyph: "Zap" },
     });
 
     expect(() =>
       (api.agents.registerTool as (tool: unknown) => void)({
-        name: "invalid_status_labels",
-        description: "Invalid status-labels fixture",
-        experimental_statusLabels: { pending: "", completed: "Done" },
+        name: "bad_presentation",
+        description: "Invalid presentation fixture",
+        presentation: { icon: { glyph: "" } },
         parameters: { type: "object" },
         execute: () => "unused",
       }),
     ).toThrow(
-      'tool "invalid_status_labels" experimental_statusLabels must provide non-empty pending and completed strings',
-    );
-
-    // Labels ride on two stored events per call and share one timeline row.
-    expect(() =>
-      (api.agents.registerTool as (tool: unknown) => void)({
-        name: "oversized_status_labels",
-        description: "Oversized status-labels fixture",
-        experimental_statusLabels: {
-          pending: "x".repeat(81),
-          completed: "Done",
-        },
-        parameters: { type: "object" },
-        execute: () => "unused",
-      }),
-    ).toThrow(
-      'tool "oversized_status_labels" experimental_statusLabels exceed the 80-character limit',
+      'tool "bad_presentation" presentation.icon must be { glyph: string }',
     );
   });
 
@@ -415,8 +414,6 @@ describe("bb.agents.registerTool", () => {
     await service.installPath(first);
     const entry = await service.installPath(second);
 
-    // The later plugin keeps running; the dropped tool rides its status
-    // detail, and its other tools are unaffected.
     expect(entry.status).toBe("running");
     expect(entry.statusDetail).toContain(
       'tool "shared_tool" is already registered by plugin "collide-a"',
@@ -452,6 +449,122 @@ describe("bb.agents.registerTool", () => {
     expect(entry.statusDetail).toContain("built-in bb tool");
     expect(service.listAgentTools()).toEqual([]);
   });
+
+  it.each([
+    [
+      "experimental_presentation",
+      'registerTool: "experimental_presentation" was renamed to "presentation" in SDK 0.4.16 (tool "stale_tool")',
+    ],
+    [
+      "experimental_statusLabels",
+      'registerTool: "experimental_statusLabels" was folded into "presentation" (labels) in SDK 0.4.16 (tool "stale_tool")',
+    ],
+    [
+      "experimental_rowStyle",
+      'registerTool: tool "stale_tool" contains unknown field: experimental_rowStyle',
+    ],
+  ])(
+    "rejects a registration built against SDK <0.4.16 that carries %s",
+    async (field, message) => {
+      const rootDir = await writePlugin(workDir, {
+        name: "bb-plugin-stale-field",
+        serverSource: `
+        export default function plugin(bb: any) {
+          bb.agents.registerTool({
+            name: "stale_tool",
+            description: "Built against an SDK before 0.4.16",
+            ${field}: { pending: "Working", completed: "Worked" },
+            parameters: { type: "object" },
+            execute: () => "ok",
+          });
+        }
+      `,
+      });
+      const entry = await service.installPath(rootDir);
+      expect(entry.status).toBe("error");
+      expect(entry.statusDetail).toContain(message);
+      expect(service.listAgentTools()).toEqual([]);
+    },
+  );
+});
+
+describe("bb.agents.experimental_registerProvider (removed in SDK 0.4.16)", () => {
+  let db: DbConnection;
+  let workDir: string;
+  let service: PluginService;
+
+  beforeEach(async () => {
+    db = createConnection(":memory:");
+    migrate(db);
+    workDir = await mkdtemp(join(tmpdir(), "bb-plugin-old-provider-test-"));
+    service = createPluginService({
+      aiServices: createAiServiceRegistry(),
+      telemetry: createNoopTelemetryService(),
+      db,
+      hub: {
+        getDaemonSessionIdForHost: () => null,
+        notifyPluginSignal: () => 0,
+        notifySystem: () => {},
+      },
+      logger,
+      dataDir: join(workDir, "data"),
+      appVersion: "0.9.0",
+      loadTimeoutMs: 2000,
+    });
+  });
+
+  afterEach(async () => {
+    await service.stop();
+    await rm(workDir, { recursive: true, force: true });
+  });
+
+  const REMOVED_MESSAGE =
+    "bb.agents.experimental_registerProvider was removed in SDK 0.4.16; use bb.providers.register";
+
+  it("fails the plugin at factory time with a message naming the replacement", async () => {
+    const rootDir = await writePlugin(workDir, {
+      name: "bb-plugin-old-provider",
+      serverSource: `
+        export default function plugin(bb: any) {
+          bb.agents.experimental_registerProvider({ id: "old" });
+        }
+      `,
+    });
+    const entry = await service.installPath(rootDir);
+    expect(entry.status).toBe("error");
+    expect(entry.statusDetail).toContain(REMOVED_MESSAGE);
+  });
+
+  it("is invisible to enumeration and leaves the rest of bb.agents working", async () => {
+    const rootDir = await writePlugin(workDir, {
+      name: "bb-plugin-current-agents",
+      serverSource: "export default function plugin() {}",
+    });
+    await service.installPath(rootDir);
+    const api = service.getApi("current-agents")!;
+
+    expect(() =>
+      Reflect.get(api.agents, "experimental_registerProvider"),
+    ).toThrow(REMOVED_MESSAGE);
+    expect(Object.keys(api.agents).sort()).toEqual([
+      "configure",
+      "contributeInstructions",
+      "registerTool",
+    ]);
+    expect(Object.keys({ ...api.agents })).not.toContain(
+      "experimental_registerProvider",
+    );
+
+    api.agents.registerTool({
+      name: "still_works",
+      description: "Registered after the removed getter was touched",
+      parameters: { type: "object" },
+      execute: () => "ok",
+    });
+    expect(service.listAgentTools().map((tool) => tool.tool.name)).toEqual([
+      "still_works",
+    ]);
+  });
 });
 
 describe("bb.agents.contributeInstructions", () => {
@@ -464,6 +577,7 @@ describe("bb.agents.contributeInstructions", () => {
     migrate(db);
     workDir = await mkdtemp(join(tmpdir(), "bb-plugin-instr-test-"));
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -632,8 +746,6 @@ describe("plugin tools reach thread runtime config", () => {
       command.dynamicTools.find((tool) => tool.name === "demo_lookup")
         ?.inputSchema,
     ).toMatchObject({ type: "object" });
-    // Per-tool instructions: built-in snippet + the plugin tool's snippet,
-    // and nothing for the description-only tool.
     expect(command.instructions).toContain("update_environment_directory");
     expect(command.instructions).toContain(
       'The following instructions come from the BB plugin "tooldemo" for its tool "demo_lookup":',
@@ -874,8 +986,6 @@ describe("plugin tools reach thread runtime config", () => {
       sourceThreadId: alpha.thread.id,
     });
     const sideCommand = await build({ ...alpha, thread: sideThread }, 12);
-    // A side chat is an ordinary plugin-owned fork: it keeps the built-in
-    // mutable environment tool, and configure() selections apply as usual.
     expect(sideCommand.dynamicTools.map((tool) => tool.name)).toEqual([
       "update_environment_directory",
       "alpha_tool",
@@ -903,8 +1013,6 @@ describe("plugin tools reach thread runtime config", () => {
         ?.handlerStats.errorCount,
     ).toBe(0);
     const betaAgain = await build(beta, 13);
-    // The side-chat resolution applied configure too, so this remains the
-    // fourth callback invocation without rebuilding the factory.
     expect(betaAgain.instructions).toContain("factory=1;configure=4");
 
     const betaExecution = await resolveExecutionOptions(harness.deps, {
@@ -959,8 +1067,6 @@ describe("internal tool-call dispatch to plugin tools", () => {
         });
         const entry = await harness.pluginService.installPath(rootDir);
         expect(entry.status).toBe("running");
-        // A zod-backed tool registered on the live handle (mid-session
-        // registration surface; applies to sessions started afterwards).
         harness.pluginService.getApi("wired")!.agents.registerTool({
           name: "strict_add",
           description: "Adds two numbers",
@@ -1017,8 +1123,6 @@ describe("internal tool-call dispatch to plugin tools", () => {
           contentItems: [{ type: "inputText", text: "sum=5" }],
         });
 
-        // Zod-invalid arguments come back as an isError tool result, not a
-        // crash or a 4xx.
         const badResponse = await postToolCall("strict_add", { a: 2 });
         expect(badResponse.status).toBe(200);
         const bad = (await readJson(badResponse)) as {
@@ -1030,7 +1134,6 @@ describe("internal tool-call dispatch to plugin tools", () => {
           'Invalid arguments for tool "strict_add"',
         );
 
-        // The built-in tool still wins its name.
         const builtinResponse = await postToolCall(
           UPDATE_ENVIRONMENT_DIRECTORY_TOOL_NAME,
           { path: environmentPath },
@@ -1042,7 +1145,6 @@ describe("internal tool-call dispatch to plugin tools", () => {
         expect(builtin.success).toBe(true);
         expect(builtin.contentItems[0].text).toContain("already using");
 
-        // Unknown tools keep the unsupported-tool response.
         const unknownResponse = await postToolCall("never_registered", {});
         await expect(readJson(unknownResponse)).resolves.toEqual({
           success: false,

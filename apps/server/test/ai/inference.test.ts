@@ -1,186 +1,225 @@
-import { setTimeout as delay } from "node:timers/promises";
 import { Type } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import {
   InferenceTimeoutError,
   inferenceComplete,
 } from "../../src/services/ai/inference.js";
-import {
-  reportQueuedCommandError,
-  reportQueuedCommandSuccess,
-  waitForQueuedCommand,
-} from "../helpers/commands.js";
+import { registerFakeAiService } from "../helpers/ai-services.js";
 import { seedHostSession } from "../helpers/seed.js";
 import { withTestHarness } from "../helpers/test-app.js";
 
 const titleSchema = Type.Object({
   title: Type.String(),
 });
+
 describe("inferenceComplete", () => {
-  it("surfaces missing host for codex inference", async () => {
-    await withTestHarness({
-      inferenceModel: "codex/gpt-5.6-luna",
-    }, async (harness) => {
-      await expect(
-        inferenceComplete(harness.deps, {
-          prompt: "Generate a title",
-          schema: titleSchema,
-          timeoutMs: 5000,
-        }),
-      ).rejects.toMatchObject({
-        body: {
-          code: "host_unavailable",
-        },
-        status: 502,
-      });
-    });
+  it("surfaces missing host for a plugin-served service", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        registerFakeAiService(harness.deps.aiServices);
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).rejects.toMatchObject({
+          body: {
+            code: "host_unavailable",
+          },
+          status: 502,
+        });
+      },
+    );
   });
 
-  it("routes codex inference through the host daemon and validates structured output", async () => {
-    await withTestHarness({
-      inferenceModel: "codex/gpt-5.6-luna",
-    }, async (harness) => {
-      const { host } = seedHostSession(harness.deps);
-      const completion = inferenceComplete(harness.deps, {
-        prompt: "Generate a title",
-        schema: titleSchema,
-        timeoutMs: 5000,
-      });
+  it("refuses a configured service no plugin registers", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        seedHostSession(harness.deps);
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).resolves.toBeNull();
+      },
+    );
+  });
 
-      const queued = await waitForQueuedCommand(
-        harness,
-        ({ command }) => command.type === "codex.inference.complete",
-      );
-      expect(queued.row.hostId).toBe(host.id);
-      expect(queued.command).toMatchObject({
-        type: "codex.inference.complete",
-        model: "gpt-5.6-luna",
-        reasoningEffort: "none",
-        prompt: "Generate a title",
-        timeoutMs: 5000,
-      });
+  it("routes a server-direct provider id past a registered service of the same id", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "openai/no-such-model",
+      },
+      async (harness) => {
+        seedHostSession(harness.deps);
+        const fake = registerFakeAiService(harness.deps.aiServices, {
+          id: "openai",
+          completeInference: () => ({
+            ok: true,
+            model: "x",
+            value: { title: "captured" },
+          }),
+        });
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).resolves.toBeNull();
+        expect(fake.inferenceCalls).toHaveLength(0);
+      },
+    );
+  });
 
-      await reportQueuedCommandSuccess(harness, queued, {
-        model: "gpt-5.6-luna",
-        value: { title: "Generated title" },
-      });
-
-      await expect(completion).resolves.toEqual({
-        title: "Generated title",
-      });
-    });
+  it("routes inference to the registered service and validates structured output", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        const { host } = seedHostSession(harness.deps);
+        const fake = registerFakeAiService(harness.deps.aiServices, {
+          completeInference: (input) => ({
+            ok: true,
+            model: input.model,
+            value: { title: "Generated title" },
+          }),
+        });
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).resolves.toEqual({ title: "Generated title" });
+        expect(fake.inferenceCalls).toHaveLength(1);
+        expect(fake.inferenceCalls[0]?.input).toMatchObject({
+          serviceId: "codex",
+          model: "gpt-5.6-luna",
+          reasoningEffort: "none",
+          prompt: "Generate a title",
+          timeoutMs: 5000,
+        });
+        expect(fake.inferenceCalls[0]?.options).toMatchObject({
+          hostId: host.id,
+          timeoutMs: 6000,
+        });
+      },
+    );
   });
 
   it("routes an explicit fallback model instead of the configured primary", async () => {
-    await withTestHarness({
-      inferenceModel: "codex/gpt-5.6-luna",
-    }, async (harness) => {
-      seedHostSession(harness.deps);
-      const completion = inferenceComplete(harness.deps, {
-        model: "codex/gpt-5.4-mini",
-        prompt: "Generate a title",
-        schema: titleSchema,
-        timeoutMs: 5000,
-      });
-
-      const queued = await waitForQueuedCommand(
-        harness,
-        ({ command }) => command.type === "codex.inference.complete",
-      );
-      expect(queued.command).toMatchObject({
-        model: "gpt-5.4-mini",
-        type: "codex.inference.complete",
-      });
-
-      await reportQueuedCommandSuccess(harness, queued, {
-        model: "gpt-5.4-mini",
-        value: { title: "Fallback title" },
-      });
-
-      await expect(completion).resolves.toEqual({ title: "Fallback title" });
-    });
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        seedHostSession(harness.deps);
+        const fake = registerFakeAiService(harness.deps.aiServices, {
+          completeInference: (input) => ({
+            ok: true,
+            model: input.model,
+            value: { title: "Fallback title" },
+          }),
+        });
+        await expect(
+          inferenceComplete(harness.deps, {
+            model: "codex/gpt-5.4-mini",
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).resolves.toEqual({ title: "Fallback title" });
+        expect(fake.inferenceCalls[0]?.input.model).toBe("gpt-5.4-mini");
+      },
+    );
   });
 
-  it("leaves grace for a daemon result to cross the host RPC boundary", async () => {
-    await withTestHarness({
-      inferenceModel: "codex/gpt-5.6-luna",
-    }, async (harness) => {
-      seedHostSession(harness.deps);
-      const completion = inferenceComplete(harness.deps, {
-        prompt: "Generate a title",
-        schema: titleSchema,
-        timeoutMs: 5,
-      });
-
-      const queued = await waitForQueuedCommand(
-        harness,
-        ({ command }) => command.type === "codex.inference.complete",
-      );
-      await delay(20);
-      await reportQueuedCommandSuccess(harness, queued, {
-        model: "gpt-5.6-luna",
-        value: { title: "Generated title" },
-      });
-
-      await expect(completion).resolves.toEqual({
-        title: "Generated title",
-      });
-    });
+  it("rejects a structured result that does not satisfy the schema", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        seedHostSession(harness.deps);
+        registerFakeAiService(harness.deps.aiServices, {
+          completeInference: (input) => ({
+            ok: true,
+            model: input.model,
+            value: { headline: "not a title" },
+          }),
+        });
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).rejects.toThrow();
+      },
+    );
   });
 
-  it("converts codex daemon timeouts into inference timeouts", async () => {
-    await withTestHarness({
-      inferenceModel: "codex/gpt-5.6-luna",
-    }, async (harness) => {
-      seedHostSession(harness.deps);
-      const completion = inferenceComplete(harness.deps, {
-        prompt: "Generate a title",
-        schema: titleSchema,
-        timeoutMs: 5000,
-      });
-
-      const queued = await waitForQueuedCommand(
-        harness,
-        ({ command }) => command.type === "codex.inference.complete",
-      );
-      const completionExpectation =
-        expect(completion).rejects.toBeInstanceOf(InferenceTimeoutError);
-      await reportQueuedCommandError(harness, queued, {
-        errorCode: "codex_request_timeout",
-        errorMessage: "Codex request timed out after 5000ms",
-      });
-
-      await completionExpectation;
-    });
+  it("converts a service timeout into an inference timeout", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        seedHostSession(harness.deps);
+        registerFakeAiService(harness.deps.aiServices, {
+          completeInference: () => ({
+            ok: false,
+            code: "timeout",
+            message: "Codex request timed out after 5000ms",
+          }),
+        });
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).rejects.toBeInstanceOf(InferenceTimeoutError);
+      },
+    );
   });
 
-  it("surfaces codex daemon auth errors", async () => {
-    await withTestHarness({
-      inferenceModel: "codex/gpt-5.6-luna",
-    }, async (harness) => {
-      seedHostSession(harness.deps);
-      const completion = inferenceComplete(harness.deps, {
-        prompt: "Generate a title",
-        schema: titleSchema,
-        timeoutMs: 5000,
-      });
-
-      const queued = await waitForQueuedCommand(
-        harness,
-        ({ command }) => command.type === "codex.inference.complete",
-      );
-      const completionExpectation = expect(completion).rejects.toMatchObject({
-        body: {
-          code: "codex_auth_missing",
-        },
-        status: 502,
-      });
-      await reportQueuedCommandError(harness, queued, {
-        errorCode: "codex_auth_missing",
-        errorMessage: "Codex auth file not found",
-      });
-
-      await completionExpectation;
-    });
+  it("surfaces a service auth failure as a non-retryable error", async () => {
+    await withTestHarness(
+      {
+        inferenceModel: "codex/gpt-5.6-luna",
+      },
+      async (harness) => {
+        seedHostSession(harness.deps);
+        registerFakeAiService(harness.deps.aiServices, {
+          completeInference: () => ({
+            ok: false,
+            code: "auth_required",
+            message: "Codex auth file not found",
+          }),
+        });
+        await expect(
+          inferenceComplete(harness.deps, {
+            prompt: "Generate a title",
+            schema: titleSchema,
+            timeoutMs: 5000,
+          }),
+        ).rejects.toMatchObject({
+          body: { code: "ai_service_auth_required", retryable: false },
+          status: 502,
+        });
+      },
+    );
   });
 });

@@ -16,7 +16,7 @@ import {
   type PluginComposerHost,
 } from "@/components/plugin/plugin-composer-host";
 import type { PluginComposerPlusMenuContribution } from "@/components/plugin/PluginComposerActions";
-import { emptyPromptDraftState } from "@/lib/prompt-draft";
+import { emptyPromptDraftState } from "@bb/client-core";
 import {
   resetPluginLogoStoreForTest,
   setPluginLogoUrls,
@@ -43,10 +43,9 @@ describe("PromptBoxActionsMenu", () => {
     const onAttach = vi.fn();
     render(<PromptBoxActionsMenu onAction={() => {}} onAttach={onAttach} />);
 
-    fireEvent.pointerDown(
-      screen.getByRole("button", { name: "Prompt actions" }),
-      { button: 0 },
-    );
+    const trigger = screen.getByRole("button", { name: "Prompt actions" });
+    expect(trigger.classList).toContain("text-subtle-foreground/75");
+    fireEvent.pointerDown(trigger, { button: 0 });
     fireEvent.click(
       await screen.findByRole("menuitem", { name: "Attach files" }),
     );
@@ -116,9 +115,9 @@ describe("PromptBoxActionsMenu", () => {
     const setDraft = vi.fn();
     const host: PluginComposerHost = {
       scope: view.scope,
-      draft,
       textEffectKey: "plus-menu-update-test",
       getCurrent: () => draft,
+      subscribeDraft: () => () => {},
       setDraft,
       focus: () => document.getElementById("composer-focus-target")?.focus(),
     };
@@ -177,9 +176,9 @@ describe("PromptBoxActionsMenu", () => {
     const draft = emptyPromptDraftState();
     const host: PluginComposerHost = {
       scope: view.scope,
-      draft,
       textEffectKey: "plus-menu-test",
       getCurrent: () => draft,
+      subscribeDraft: () => () => {},
       setDraft: vi.fn(),
       focus: vi.fn(),
     };
@@ -221,6 +220,7 @@ describe("PromptBoxActionsMenu", () => {
             compactIconUrl: null,
             logoUrl: null,
             logoDarkUrl: null,
+            icons: new Map(),
           },
         ],
         [
@@ -231,6 +231,7 @@ describe("PromptBoxActionsMenu", () => {
             compactIconUrl: null,
             logoUrl: null,
             logoDarkUrl: null,
+            icons: new Map(),
           },
         ],
       ]),

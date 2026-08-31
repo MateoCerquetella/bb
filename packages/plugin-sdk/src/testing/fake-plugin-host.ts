@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,38 +8,48 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { PLUGIN_INTERACTION_MAX_TITLE_LENGTH } from "@bb/domain/plugin-interaction-limits";
 import {
+  adoptHttpRouteResponse,
   AGENT_TOOL_NAME_PATTERN,
+  agentToolIconRefusalMessage,
+  aiServiceAlreadyRegisteredMessage,
+  assertAiServiceRegistrable,
   assertNoRecursiveJsonSchemaReferences,
   BACKGROUND_NAME_PATTERN,
   CLI_COMMAND_NAME_PATTERN,
   enforcePluginCliOutputLimit,
-  isZodSchemaLike,
   isStandardSchema,
+  isZodSchemaLike,
   KV_VALUE_MAX_BYTES,
   MENTION_PROVIDER_ID_PATTERN,
   normalizeMentionProviderTriggers,
+  parsePluginAgentToolPresentation,
+  pluginCliCollisionWarning,
   PLUGIN_AGENT_DYNAMIC_INSTRUCTIONS_MAX_CHARS,
   PLUGIN_AGENT_SELECTION_MAX_IDS,
   PLUGIN_AGENT_STATIC_INSTRUCTIONS_MAX_CHARS,
-  PLUGIN_AGENT_STATUS_LABEL_MAX_CHARS,
   PLUGIN_AGENT_TOOL_PARAMETERS_MAX_BYTES,
   PLUGIN_HTTP_METHODS,
+  providerAlreadyRegisteredMessage,
+  providerIconRefusalMessage,
+  providerWithoutBridgeMessage,
   readRpcMethodContract,
   registerSettingDescriptors,
+  rejectStaleAgentToolFields,
   RESERVED_AGENT_TOOL_NAMES,
-  RESERVED_BB_CLI_COMMANDS,
   RPC_METHOD_PATTERN,
   summarizeParseIssues,
+  undeclaredIconProblem,
+  validatePluginAiServiceDeclaration,
   validatePluginProviderDeclaration,
   validateSettingsUpdate,
-  adoptHttpRouteResponse,
+  type NormalizedPluginProviderDeclaration,
 } from "../internal/host-policy.js";
 import type {
   BbPluginApi,
   PluginAgentConfiguration,
   PluginAgentConfigurationContext,
   PluginAgentToolContext,
-  PluginAgentToolExperimentalStatusLabels,
+  PluginAgentToolPresentation,
   PluginAgentToolResult,
   PluginAgents,
   PluginBackground,
@@ -60,7 +71,10 @@ import type {
   PluginMentionItem,
   PluginMentionSearchContext,
   PluginMentionTrigger,
+  PluginAiServiceDeclaration,
+  PluginAiServices,
   PluginProviderDeclaration,
+  PluginProviders,
   PluginRealtime,
   PluginRpc,
   PluginServerApi,
@@ -86,6 +100,12 @@ import {
   type FakeSdkHarness,
   type FakeSdkOverrides,
 } from "./fake-sdk.js";
+
+const LEGACY_UNKNOWN_MIGRATION_HASH = "legacy-unknown";
+
+function migrationStatementHash(statement: string): string {
+  return createHash("sha256").update(statement).digest("hex");
+}
 
 /**
  * `createFakePluginHost` — an in-process stand-in for the BB server's plugin
@@ -163,8 +183,14 @@ export interface FakeCliRecord {
 export interface FakeAgentToolRecord {
   name: string;
   description: string;
-  experimentalStatusLabels: PluginAgentToolExperimentalStatusLabels | null;
   instructions: string | null;
+  /**
+   * The plugin's declared row presentation, null when it declared none.
+   * Parsed by the shared `parsePluginAgentToolPresentation`, so the record
+   * holds exactly what the production host stores and a presentation bb
+   * rejects is rejected here with the same message.
+   */
+  presentation: PluginAgentToolPresentation | null;
   /** JSON-schema object the host would send providers. */
   inputSchema: unknown;
   parse(
@@ -220,9 +246,12 @@ export interface FakePluginRegistrations {
     | null;
   threadEventHandlers: Record<PluginThreadEventName, number>;
   mentionProviders: FakeMentionProviderRecord[];
-  /** Live provider registrations from `experimental_registerProvider`
+  /** Live provider registrations from `bb.providers.register`
    * (normalized declarations, registration order; dispose removes). */
-  providerRegistrations: PluginProviderDeclaration[];
+  providerRegistrations: NormalizedPluginProviderDeclaration[];
+  /** Live AI-service registrations from `experimental_aiServices.register`
+   * (normalized declarations, registration order; dispose removes). */
+  aiServiceRegistrations: PluginAiServiceDeclaration[];
 }
 
 /** Read-only state for assertions after a plugin registers or handles work. */
@@ -378,6 +407,11 @@ export interface CreateFakePluginHostOptions {
    */
   loopbackBaseUrl?: string;
   /**
+   * Value served by `bb.server.experimental_dataDir`. Defaults to
+   * "/tmp/bb-fake-data-dir".
+   */
+  dataDir?: string;
+  /**
    * Pre-seeded stored settings values (as if saved before this load) —
    * including secret ones, which the fake keeps in memory instead of
    * files. Values with the wrong type for their descriptor fall back to
@@ -390,6 +424,24 @@ export interface CreateFakePluginHostOptions {
   agentSkillIds?: readonly string[];
   /** Read-only identities returned by bb.hosts.ensureSharedPortTunnel. */
   sharedPortTunnelIdentities?: Record<string, PluginSharedPortTunnelIdentity>;
+  /**
+   * Whether the plugin's manifest declares a `bb.host` entry. Production
+   * refuses `bb.providers.register` (the provider would have no bridge to
+   * run on) and `experimental_aiServices.register` (the service would have
+   * nothing to run on) without one; the fake applies the same rules.
+   * Defaults to true.
+   */
+  experimental_hostEntry?: boolean;
+  /**
+   * The icon names the plugin's manifest declares under
+   * `bb.branding.experimental_icons`. Production refuses a provider `icon`
+   * or a tool `presentation.icon.glyph` that is a namespaced glyph
+   * (`"<pluginId>/<name>"`) naming another plugin or a name not declared
+   * there; the fake applies the same rule against this list. Defaults to
+   * none declared, so every namespaced glyph is refused until the test
+   * names the icons the manifest would.
+   */
+  experimental_declaredIconNames?: readonly string[];
   /** Deterministic stand-in for the targeted daemon host entry. */
   experimental_callHostRpc?: (
     call: ExperimentalFakeHostRpcCall,
@@ -826,6 +878,9 @@ function createFakePluginHostInternal(
       ),
     } satisfies FakePluginPersistentState);
   const pluginId = options.pluginId ?? "test-plugin";
+  const declaredIconNames = new Set(
+    options.experimental_declaredIconNames ?? [],
+  );
   const agentSkillIds = [...(options.agentSkillIds ?? [])];
   if (new Set(agentSkillIds).size !== agentSkillIds.length) {
     throw new Error("agentSkillIds must not contain duplicates");
@@ -904,23 +959,57 @@ function createFakePluginHostInternal(
     migrate(database, statements) {
       assertLive();
       database.exec(
-        "CREATE TABLE IF NOT EXISTS _bb_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS _bb_migrations (id INTEGER PRIMARY KEY, applied_at INTEGER NOT NULL, statement_hash TEXT)",
       );
-      const applied = new Set(
-        (
-          database.prepare("SELECT id FROM _bb_migrations").all() as Array<{
-            id: number;
-          }>
-        ).map((row) => row.id),
+      const migrationColumns = database
+        .prepare<[], { name: string }>("PRAGMA table_info(_bb_migrations)")
+        .all();
+      if (
+        !migrationColumns.some((column) => column.name === "statement_hash")
+      ) {
+        database.exec(
+          "ALTER TABLE _bb_migrations ADD COLUMN statement_hash TEXT",
+        );
+      }
+      const rows = database
+        .prepare<
+          [],
+          { id: number; statement_hash: string | null }
+        >("SELECT id, statement_hash FROM _bb_migrations ORDER BY id")
+        .all();
+      const applied = new Map<number, string | null>();
+      for (const row of rows) applied.set(row.id, row.statement_hash);
+      const statementHashes = statements.map(migrationStatementHash);
+      statementHashes.forEach((statementHash, index) => {
+        const recordedHash = applied.get(index);
+        if (
+          recordedHash !== undefined &&
+          recordedHash !== null &&
+          recordedHash !== statementHash
+        ) {
+          throw new Error(
+            `migration ${index} does not match the recorded statement; append a new migration instead of changing or reusing an index`,
+          );
+        }
+      });
+      const adopt = database.prepare(
+        "UPDATE _bb_migrations SET statement_hash = ? WHERE id = ? AND statement_hash IS NULL",
       );
       const record = database.prepare(
-        "INSERT INTO _bb_migrations (id, applied_at) VALUES (?, ?)",
+        "INSERT INTO _bb_migrations (id, applied_at, statement_hash) VALUES (?, ?, ?)",
       );
       database.transaction(() => {
+        for (const row of rows) {
+          if (row.statement_hash !== null) continue;
+          adopt.run(
+            statementHashes[row.id] ?? LEGACY_UNKNOWN_MIGRATION_HASH,
+            row.id,
+          );
+        }
         statements.forEach((statement, index) => {
           if (applied.has(index)) return;
           database.exec(statement);
-          record.run(index, Date.now());
+          record.run(index, Date.now(), statementHashes[index]);
         });
       })();
     },
@@ -1142,11 +1231,6 @@ function createFakePluginHostInternal(
           `invalid cli command name ${JSON.stringify(name)} — use lowercase letters, digits, and "-"`,
         );
       }
-      if (RESERVED_BB_CLI_COMMANDS.includes(name)) {
-        throw new Error(
-          `cli command name "${name}" is reserved by the bb CLI — pick another name`,
-        );
-      }
       if (
         typeof registration.summary !== "string" ||
         registration.summary.trim().length === 0
@@ -1185,18 +1269,88 @@ function createFakePluginHostInternal(
         commands: validatedCommands,
         run: registration.run.bind(registration),
       };
+      const warning = pluginCliCollisionWarning(pluginId, name);
+      if (warning) emitLog("warn", warning);
     },
   };
 
   // --- agents ---
   const agentTools: FakeAgentToolRecord[] = [];
-  const providerRegistrations: PluginProviderDeclaration[] = [];
+  const providerRegistrations: NormalizedPluginProviderDeclaration[] = [];
   let agentConfigurationProvider:
     | ((context: PluginAgentConfigurationContext) => PluginAgentConfiguration)
     | null = null;
   let instructionProvider:
     | ((ctx: { threadId: string; projectId: string }) => string | null)
     | null = null;
+  function registerProviderDeclaration(
+    declaration: PluginProviderDeclaration,
+  ): { dispose(): void } {
+    assertLive();
+    // The shared validator: the fake host must accept and reject provider
+    // declarations exactly like production.
+    const normalized = validatePluginProviderDeclaration(declaration);
+    // The same refusals production makes at the register call, in its
+    // order: the icon against the manifest's declared icons, then the
+    // bridge the declaration runs on, then the id.
+    const iconProblem =
+      normalized.icon === undefined
+        ? null
+        : undeclaredIconProblem(pluginId, declaredIconNames, normalized.icon);
+    if (iconProblem !== null) {
+      throw new Error(providerIconRefusalMessage(normalized.id, iconProblem));
+    }
+    if (options.experimental_hostEntry === false) {
+      throw new Error(providerWithoutBridgeMessage(normalized.id));
+    }
+    if (
+      providerRegistrations.some((existing) => existing.id === normalized.id)
+    ) {
+      throw new Error(providerAlreadyRegisteredMessage(normalized.id));
+    }
+    providerRegistrations.push(normalized);
+    let disposed = false;
+    const dispose = (): void => {
+      if (disposed) return;
+      disposed = true;
+      const index = providerRegistrations.indexOf(normalized);
+      if (index !== -1) providerRegistrations.splice(index, 1);
+    };
+    disposeHooks.push(dispose);
+    return { dispose };
+  }
+
+  const aiServiceRegistrations: PluginAiServiceDeclaration[] = [];
+  const experimental_aiServices: PluginAiServices = {
+    register(declaration) {
+      assertLive();
+      const normalized = validatePluginAiServiceDeclaration(declaration);
+      // The same refusals production makes at the register call. The fake
+      // host builds no artifact; the declared entry stands in for it.
+      assertAiServiceRegistrable({
+        id: normalized.id,
+        hostArtifact:
+          options.experimental_hostEntry === false ? null : "declared",
+        hostArtifactProblem: null,
+      });
+      if (
+        aiServiceRegistrations.some((existing) => existing.id === normalized.id)
+      ) {
+        throw new Error(aiServiceAlreadyRegisteredMessage(normalized.id));
+      }
+      aiServiceRegistrations.push(normalized);
+      let disposed = false;
+      const dispose = (): void => {
+        if (disposed) return;
+        disposed = true;
+        const index = aiServiceRegistrations.indexOf(normalized);
+        if (index !== -1) aiServiceRegistrations.splice(index, 1);
+      };
+      disposeHooks.push(dispose);
+      return { dispose };
+    },
+  };
+
   const agents: PluginAgents = {
     configure(provider) {
       assertLive();
@@ -1222,34 +1376,11 @@ function createFakePluginHostInternal(
       }
       instructionProvider = provider;
     },
-    experimental_registerProvider(declaration) {
-      assertLive();
-      // The shared validator: the fake host must accept and reject provider
-      // declarations exactly like production.
-      const normalized = validatePluginProviderDeclaration(declaration);
-      if (
-        providerRegistrations.some((existing) => existing.id === normalized.id)
-      ) {
-        throw new Error(
-          `Provider "${normalized.id}" is already registered; a plugin cannot shadow an existing provider.`,
-        );
-      }
-      providerRegistrations.push(normalized);
-      let disposed = false;
-      const dispose = (): void => {
-        if (disposed) return;
-        disposed = true;
-        const index = providerRegistrations.indexOf(normalized);
-        if (index !== -1) providerRegistrations.splice(index, 1);
-      };
-      disposeHooks.push(dispose);
-      return { dispose };
-    },
     registerTool(tool: {
       name: string;
       description: string;
       instructions?: string;
-      experimental_statusLabels?: PluginAgentToolExperimentalStatusLabels;
+      presentation?: PluginAgentToolPresentation;
       parameters: unknown;
       execute(
         params: never,
@@ -1268,6 +1399,7 @@ function createFakePluginHostInternal(
           `tool name "${name}" is a built-in bb tool — pick another name`,
         );
       }
+      rejectStaleAgentToolFields(name, tool);
       if (
         typeof tool.description !== "string" ||
         tool.description.trim().length === 0
@@ -1288,30 +1420,21 @@ function createFakePluginHostInternal(
           `tool "${name}" instructions exceed the ${PLUGIN_AGENT_STATIC_INSTRUCTIONS_MAX_CHARS}-character limit`,
         );
       }
-      const experimentalStatusLabels = tool.experimental_statusLabels;
-      if (
-        experimentalStatusLabels !== undefined &&
-        (typeof experimentalStatusLabels !== "object" ||
-          experimentalStatusLabels === null ||
-          typeof experimentalStatusLabels.pending !== "string" ||
-          typeof experimentalStatusLabels.completed !== "string" ||
-          experimentalStatusLabels.pending.trim().length === 0 ||
-          experimentalStatusLabels.completed.trim().length === 0)
-      ) {
-        throw new Error(
-          `tool "${name}" experimental_statusLabels must provide non-empty pending and completed strings`,
+      const presentation = parsePluginAgentToolPresentation(
+        name,
+        tool.presentation,
+      );
+      if (presentation?.icon !== undefined) {
+        // A namespaced glyph must name one of THIS plugin's declared icons,
+        // checked here like production checks it at the register call.
+        const problem = undeclaredIconProblem(
+          pluginId,
+          declaredIconNames,
+          presentation.icon.glyph,
         );
-      }
-      if (
-        experimentalStatusLabels !== undefined &&
-        (experimentalStatusLabels.pending.length >
-          PLUGIN_AGENT_STATUS_LABEL_MAX_CHARS ||
-          experimentalStatusLabels.completed.length >
-            PLUGIN_AGENT_STATUS_LABEL_MAX_CHARS)
-      ) {
-        throw new Error(
-          `tool "${name}" experimental_statusLabels exceed the ${PLUGIN_AGENT_STATUS_LABEL_MAX_CHARS}-character limit`,
-        );
+        if (problem !== null) {
+          throw new Error(agentToolIconRefusalMessage(name, problem));
+        }
       }
       if (typeof tool.execute !== "function") {
         throw new Error(
@@ -1361,13 +1484,7 @@ function createFakePluginHostInternal(
       const record: FakeAgentToolRecord = {
         name,
         description: tool.description,
-        experimentalStatusLabels:
-          experimentalStatusLabels === undefined
-            ? null
-            : {
-                pending: experimentalStatusLabels.pending,
-                completed: experimentalStatusLabels.completed,
-              },
+        presentation,
         instructions:
           tool.instructions !== undefined && tool.instructions.trim().length > 0
             ? tool.instructions
@@ -1444,10 +1561,15 @@ function createFakePluginHostInternal(
 
   // --- server ---
   const loopbackBaseUrl = options.loopbackBaseUrl ?? "http://127.0.0.1:38886";
+  const dataDir = options.dataDir ?? "/tmp/bb-fake-data-dir";
   const server: PluginServerApi = {
     get loopbackBaseUrl(): string {
       assertLive();
       return loopbackBaseUrl;
+    },
+    get experimental_dataDir(): string {
+      assertLive();
+      return dataDir;
     },
   };
 
@@ -1717,6 +1839,12 @@ function createFakePluginHostInternal(
     },
   };
 
+  const providers: PluginProviders = {
+    register(declaration) {
+      return registerProviderDeclaration(declaration);
+    },
+  };
+
   const bb: BbPluginApi = {
     pluginId,
     log,
@@ -1728,11 +1856,13 @@ function createFakePluginHostInternal(
     background,
     cli,
     agents,
+    providers,
     ui,
     events,
     status,
     server,
     hosts,
+    experimental_aiServices,
     get sdk() {
       assertLive();
       return sdk;
@@ -1823,6 +1953,7 @@ function createFakePluginHostInternal(
       },
       mentionProviders,
       providerRegistrations,
+      aiServiceRegistrations,
     },
     get pendingInteractions() {
       return [...pendingInteractions].map(([id, pending]) => ({

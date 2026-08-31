@@ -16,11 +16,6 @@ import { emitPluginThreadCreated } from "../plugins/plugin-thread-events.js";
 import type { ThreadCreateServiceRequest } from "./thread-create-request.js";
 import { sanitizeGeneratedBranchSlug } from "./title-generation.js";
 
-/**
- * Convert a {@link BaseBranchSpec} to the stored/wire branch-name shape.
- * `{ kind: "default" }` becomes `null`, which means the source's default
- * branch.
- */
 export function baseBranchSpecToStoredName(
   spec: BaseBranchSpec,
 ): string | null {
@@ -40,7 +35,7 @@ type EnvironmentProvisionCommand = Extract<
 type EnvironmentProvisionCommandInitiator =
   EnvironmentProvisionCommand["initiator"];
 
-export interface ManagedBranchNameArgs {
+interface ManagedBranchNameArgs {
   branchSlug?: string | null;
   threadId: string;
 }
@@ -65,7 +60,7 @@ export function requirePublicProjectForThreadCreate(
   return project;
 }
 
-export const SETUP_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes
+export const SETUP_TIMEOUT_MS = 15 * 60 * 1000;
 
 export function requireSourceForHost(
   deps: Pick<AppDeps, "db">,
@@ -83,15 +78,11 @@ export function requireSourceForHost(
   return source;
 }
 
-/**
- * Pre-provision checkout for unmanaged workspaces, fully resolved on the
- * server (the daemon receives an explicit branch name in both kinds).
- */
 export type UnmanagedCheckoutCommand =
   | { kind: "existing"; name: string }
   | { kind: "new"; name: string; baseBranch: string };
 
-export type EnvironmentProvisionCommandArgs =
+type EnvironmentProvisionCommandArgs =
   | {
       workspaceProvisionType: "unmanaged";
       environmentId: string;
@@ -160,7 +151,6 @@ export function createThreadRecord(
   args: {
     environmentId: string | null;
     request: ThreadCreateServiceRequest;
-    status?: "starting";
   },
 ) {
   const sectionId = args.request.sectionId ?? null;
@@ -181,7 +171,7 @@ export function createThreadRecord(
       originKind: args.request.originKind,
       originPluginId: args.request.originPluginId ?? null,
       visibility: args.request.visibility,
-      status: args.status ?? "starting",
+      status: "starting",
     });
     emitPluginThreadCreated(thread);
     return thread;

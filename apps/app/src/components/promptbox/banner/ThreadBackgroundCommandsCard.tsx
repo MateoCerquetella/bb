@@ -1,8 +1,13 @@
+import { useRef, useState } from "react";
 import { isBackgroundAgentTaskType } from "@bb/domain";
 import type { TimelineWorkflowWorkRow } from "@bb/server-contract";
 import { durationToCompactString } from "@bb/thread-view";
+import { useResizeObserver } from "usehooks-ts";
 import { AnimatedBody } from "@/components/promptbox/banner/AnimatedBody";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import {
+  PROMPT_STACK_CARD_ROW_HEIGHT,
+  PromptStackCard,
+} from "@/components/promptbox/banner/PromptStackCard";
 import { useSecondTick } from "@/hooks/useSecondTick";
 import { Icon } from "@bb/shared-ui/icon";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
@@ -11,12 +16,26 @@ import {
   activityMetaClass,
   activityRowClass,
   activityTextClass,
-} from "@/components/ui/activity-row-styles";
+} from "@bb/shared-ui/activity-row-styles";
 import { cn } from "@bb/shared-ui/lib/utils";
 
-const CARD_ROW_HEIGHT = 32;
 const BODY_ID = "thread-background-commands-card-body";
 const TOGGLE_ID = "thread-background-commands-card-toggle";
+const COMPACT_PROMPT_SHELL_MAX_WIDTH_REM = 34;
+const DEFAULT_ROOT_FONT_SIZE_PX = 16;
+
+function isCompactPromptShellWidth(width: number): boolean {
+  const parsedRootFontSize =
+    typeof window === "undefined"
+      ? Number.NaN
+      : Number.parseFloat(
+          window.getComputedStyle(document.documentElement).fontSize,
+        );
+  const rootFontSize = Number.isFinite(parsedRootFontSize)
+    ? parsedRootFontSize
+    : DEFAULT_ROOT_FONT_SIZE_PX;
+  return width <= COMPACT_PROMPT_SHELL_MAX_WIDTH_REM * rootFontSize;
+}
 
 interface BackgroundActivityDisplay {
   icon: "Terminal" | "UserRoundPlus";
@@ -84,11 +103,6 @@ function compactBackgroundActivityLabel(
   return `Running ${rows.length} background activities`;
 }
 
-/**
- * Live elapsed time since the background task started, ticking every second.
- * Blank for the first second to avoid sub-second flicker on entry. Mirrors the
- * workflow card's duration treatment.
- */
 function BackgroundActivityDuration({ startedAt }: { startedAt: number }) {
   const elapsed = useSecondTick() - startedAt;
   if (elapsed <= 1_000) {
@@ -112,15 +126,7 @@ function BackgroundActivitySummary({
   const model = backgroundActivityModel(row);
   return (
     <span className="flex min-w-0 flex-1 items-center gap-1 text-left">
-      {/*
-       * The prefix and the description truncate as separate flex items rather
-       * than as one truncating span. `activityTextClass("active")` carries
-       * `animate-shine`, which is `display: inline-block` so its
-       * background-clip gradient has a box to size against — an atomic inline
-       * inside a truncating parent is dropped whole when it overflows, so the
-       * description collapsed to a bare ellipsis with the rest of the row left
-       * empty. Truncating on the shimmering element itself clips its own text.
-       */}
+      {}
       <span
         className={cn(
           "shrink-0 whitespace-nowrap",
@@ -165,36 +171,38 @@ function BackgroundActivitySummary({
   );
 }
 
-export interface ThreadBackgroundCommandsCardProps {
+interface ThreadBackgroundCommandsCardProps {
   commands: TimelineWorkflowWorkRow[];
   isExpanded: boolean;
   onToggle: () => void;
 }
 
-/**
- * Prompt-stack card for running non-workflow background tasks, independent of
- * the workflow card. Wide layouts show the most recent task and append "+N
- * more" when needed. Compact layouts summarize background agents by count and
- * expand even a single agent so its full description and model stay readable.
- * Each task also keeps its own timeline row carrying the terminal outcome;
- * this card only tracks the live ones and drops out once none remain.
- */
 export function ThreadBackgroundCommandsCard({
   commands,
   isExpanded,
   onToggle,
 }: ThreadBackgroundCommandsCardProps) {
   const isCompactViewport = useIsCompactViewport();
+  const cardRef = useRef<HTMLElement>(null!);
+  const [isCompactCard, setIsCompactCard] = useState<boolean | null>(null);
+  useResizeObserver({
+    ref: cardRef,
+    box: "border-box",
+    onResize: ({ width }) => {
+      if (width === undefined) return;
+      const nextIsCompact = isCompactPromptShellWidth(width);
+      setIsCompactCard((previous) =>
+        previous === nextIsCompact ? previous : nextIsCompact,
+      );
+    },
+  });
   const primary = commands[0];
   if (!primary) {
     return null;
   }
   const others = commands.slice(1);
   const hasMore = others.length > 0;
-  const hasAgent = commands.some((row) =>
-    isBackgroundAgentTaskType(row.taskType),
-  );
-  const useCompactSummary = isCompactViewport && hasAgent;
+  const useCompactSummary = isCompactCard ?? isCompactViewport;
   const canExpand = hasMore || useCompactSummary;
   const expandedRows = useCompactSummary ? commands : others;
   const compactLabel = compactBackgroundActivityLabel(commands);
@@ -203,9 +211,10 @@ export function ThreadBackgroundCommandsCard({
 
   return (
     <PromptStackCard
+      rootRef={cardRef}
       ariaLabel={groupLabel}
       className="overflow-hidden"
-      style={{ minHeight: CARD_ROW_HEIGHT }}
+      style={{ minHeight: PROMPT_STACK_CARD_ROW_HEIGHT }}
     >
       <div className="flex items-center">
         {canExpand ? (
@@ -287,8 +296,6 @@ export function ThreadBackgroundCommandsCard({
               return (
                 <div
                   key={row.id}
-                  // px-3 matches the full-width header row's padding so the
-                  // icon lines up under the header icon.
                   className={cn(
                     "flex min-w-0 gap-1.5 px-3 py-0.5 text-xs",
                     useCompactSummary ? "items-start" : "items-center",
@@ -319,7 +326,9 @@ export function ThreadBackgroundCommandsCard({
                     </span>
                   ) : null}
                   <span className="shrink-0 whitespace-nowrap text-subtle-foreground">
-                    <BackgroundActivityDuration startedAt={row.startedAt} />
+                    {isExpanded ? (
+                      <BackgroundActivityDuration startedAt={row.startedAt} />
+                    ) : null}
                   </span>
                 </div>
               );

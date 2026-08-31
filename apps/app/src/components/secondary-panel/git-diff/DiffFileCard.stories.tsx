@@ -1,9 +1,8 @@
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useState } from "react";
 import type { DiffFileEntry } from "@bb/server-contract";
-import { GIT_DIFF_VIEW_BASE_OPTIONS } from "@/components/git-diff/GitDiffCard";
+import type { DiffPresentation } from "@/components/code/code-rendering";
 import type { RequestDiffFileContents } from "@/components/git-diff/GitDiffCardBody";
 import { DEFAULT_CODE_OVERFLOW_MODE } from "@/lib/code-overflow-mode";
-import { usePreferredTheme } from "@/hooks/useTheme";
 import type { DiffPatchState } from "@/hooks/queries/use-environment-diff-patches";
 import { appToast } from "@/components/ui/app-toast";
 import { StoryCard, StoryRow } from "../../../../.ladle/story-card";
@@ -13,7 +12,6 @@ export default {
   title: "right-panel/Diff File Card",
 };
 
-// A one-line modified patch — the card parses this and renders the real diff.
 const MODIFIED_PATCH = [
   "diff --git a/src/file.ts b/src/file.ts",
   "index 1111111..2222222 100644",
@@ -27,8 +25,6 @@ const MODIFIED_PATCH = [
 
 const TALL_ADDED_LINES = 40;
 
-// A taller patch so the sticky header has a body to stay pinned over while the
-// file scrolls underneath it.
 const TALL_PATCH = [
   "diff --git a/src/tall.ts b/src/tall.ts",
   "index 1111111..2222222 100644",
@@ -44,7 +40,6 @@ const TALL_PATCH = [
   "",
 ].join("\n");
 
-// A 1x1 transparent PNG so the image-preview branch has something to render.
 const IMAGE_DATA_URL =
   "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/Qo3AAAAAElFTkSuQmCC";
 
@@ -54,8 +49,6 @@ const imageContentsRequester: RequestDiffFileContents = async () => ({
   sizeBytes: 20_480,
 });
 
-// A hunk in the middle of a longer file, plus both full sides, so the card's
-// on-demand "Expand context" affordance has surrounding lines to reach for.
 const CONTEXT_FILE_LINES = Array.from(
   { length: 24 },
   (_, index) => `export const line${index + 1} = ${index + 1};`,
@@ -78,7 +71,6 @@ const CONTEXT_PATCH = [
   "",
 ].join("\n");
 
-// Resolves after a short delay so the loading state is visible on click.
 const contextContentsRequester: RequestDiffFileContents = async (
   path,
   side,
@@ -114,24 +106,18 @@ interface CardStageProps {
   onRequestFileContents?: RequestDiffFileContents;
 }
 
-// Mounts a single DiffFileCard at a panel-realistic width with live theme-aware
-// view options, mirroring how DiffFilesPanel renders each row.
+const CARD_PRESENTATION: DiffPresentation = {
+  view: "unified",
+  overflow: DEFAULT_CODE_OVERFLOW_MODE,
+  showLineNumbers: true,
+};
+
 function CardStage({
   entry,
   patchState = { status: "idle" },
   collapsed = false,
   onRequestFileContents,
 }: CardStageProps) {
-  const preferredTheme = usePreferredTheme();
-  const diffViewOptions = useMemo(
-    () => ({
-      ...GIT_DIFF_VIEW_BASE_OPTIONS,
-      diffStyle: "unified",
-      overflow: DEFAULT_CODE_OVERFLOW_MODE,
-      themeType: preferredTheme,
-    }),
-    [preferredTheme],
-  );
   const [isCollapsed, setIsCollapsed] = useState(collapsed);
   const toast = useCallback(
     (label: string) => (path: string) =>
@@ -142,7 +128,7 @@ function CardStage({
     <div className="w-full max-w-[640px] min-w-0">
       <DiffFileCard
         entry={buildEntry(entry)}
-        diffViewOptions={diffViewOptions}
+        presentation={CARD_PRESENTATION}
         isCollapsed={isCollapsed}
         onToggleCollapsed={() => setIsCollapsed((value) => !value)}
         patchState={patchState}

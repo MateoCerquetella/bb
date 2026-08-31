@@ -40,19 +40,17 @@ function tryParseUrlPath(value: string): string | null {
     ) {
       return url.pathname;
     }
-  } catch {
-    // not a URL
-  }
+  } catch {}
   return null;
 }
 
-export interface ResolveManagedTargetPathArgs {
+interface ResolveManagedTargetPathArgs {
   dataDir: string;
   environmentId: string;
   sourcePath: string;
 }
 
-export interface ResolvePersonalTargetPathArgs {
+interface ResolvePersonalTargetPathArgs {
   dataDir: string;
   environmentId: string;
 }
@@ -78,12 +76,6 @@ export function resolvePersonalTargetPath(
   );
 }
 
-/**
- * Whether a path lies inside a workspace root bb creates and destroys on a
- * host. A managed environment stores its path only once the host reports
- * provisioning success, so an environment row is not a reliable claim during
- * that window. The roots are, because bb derives every managed path from them.
- */
 export function isBbManagedWorkspacePath(args: {
   dataDir: string;
   path: string;

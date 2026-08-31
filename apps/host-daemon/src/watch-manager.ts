@@ -18,6 +18,7 @@ import type {
   WorkspaceWatchError,
 } from "@bb/host-watcher";
 import { reconnectProvisionArgsFromWorkspaceContext } from "./workspace-provision-target.js";
+import { userExecutableProcessOptions } from "./user-executable-env.js";
 
 type StopWatching = () => void | Promise<void>;
 
@@ -56,6 +57,7 @@ export interface WatchManagerOptions {
     options: ProvisionWorkspaceArgs,
   ) => Promise<HostWorkspace>;
   refreshWorkspace?: (args: RefreshWorkspaceArgs) => Promise<HostWorkspace>;
+  shellEnv?: () => NodeJS.ProcessEnv;
   threadStorageRootPath?: string | null;
   onThreadStorageChanged?: (args: {
     environmentId: string;
@@ -123,11 +125,15 @@ export class WatchManager {
 
   constructor(private readonly options: WatchManagerOptions = {}) {
     this.hostWatcher = options.hostWatcher;
-    this.provisionWorkspace = options.provisionWorkspace ?? provisionWorkspace;
+    const provision = options.provisionWorkspace ?? provisionWorkspace;
+    this.provisionWorkspace = (args: ProvisionWorkspaceArgs) =>
+      provision({
+        ...args,
+        ...userExecutableProcessOptions(options.shellEnv?.() ?? {}),
+      });
     this.refreshWorkspace =
       options.refreshWorkspace ??
-      ((args: RefreshWorkspaceArgs) =>
-        this.provisionWorkspace(args.provision));
+      ((args: RefreshWorkspaceArgs) => this.provisionWorkspace(args.provision));
   }
 
   async replaceWatchSet(watchSet: HostDaemonWatchSet): Promise<void> {
@@ -265,9 +271,6 @@ export class WatchManager {
             entry,
           });
         },
-        // Parcel subscriptions are established asynchronously. Reconcile once
-        // the workspace-root subscription is live so an edit made between the
-        // initial preview fetch and watcher readiness cannot remain stale.
         onReady: () => {
           this.queueWorkspaceWatchChange({
             changeKinds: ["workspace-content-changed"],
@@ -330,9 +333,6 @@ export class WatchManager {
       return;
     }
     if (args.changeKinds.includes("workspace-content-changed")) {
-      // The filesystem event itself is sufficient evidence that live content
-      // is stale. Notify before any Git fingerprint work: large diffs can make
-      // status/numstat slow or fail, but previews must still refresh.
       this.options.onWorkspaceStatusChanged?.({
         changeKinds: ["work-status-changed"],
         environmentId: args.entry.target.environmentId,

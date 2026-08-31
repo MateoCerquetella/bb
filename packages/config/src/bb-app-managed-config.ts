@@ -6,10 +6,6 @@ import {
 } from "@bb/domain";
 import { z } from "zod";
 
-/**
- * The provider ids that ship with bb. A custom ACP agent id always formats to
- * `acp-<slug>`, so only the bundled ACP entry can be shadowed by one.
- */
 const BUNDLED_PROVIDER_IDS = [
   "codex",
   "claude-code",
@@ -21,8 +17,8 @@ const RESERVED_ACP_PROVIDER_IDS: ReadonlySet<string> = new Set(
   BUNDLED_PROVIDER_IDS,
 );
 
-export const BB_APP_CONFIG_FILE_NAME = "config.json";
-export const BB_APP_ENV_FILE_NAME = "env.json";
+const BB_APP_CONFIG_FILE_NAME = "config.json";
+const BB_APP_ENV_FILE_NAME = "env.json";
 
 export type BbAppManagedConfigKey =
   | "BB_APP_URL"
@@ -43,15 +39,15 @@ export const PORTABLE_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 const CUSTOM_ACP_AGENT_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/u;
 const CUSTOM_ACP_AGENT_LOGO_PATTERN = /\.(?:svg|png|webp)$/iu;
 
-export interface BbAppManagedConfigWarningLogger {
+interface BbAppManagedConfigWarningLogger {
   warn(fields: Record<string, unknown>, message: string): void;
 }
 
-export interface ParseBbAppManagedConfigOptions {
+interface ParseBbAppManagedConfigOptions {
   logger?: BbAppManagedConfigWarningLogger;
 }
 
-export const bbAppManagedConfigValuesSchema = z
+const bbAppManagedConfigValuesSchema = z
   .object({
     BB_APP_URL: z.string().optional(),
     BB_INFERENCE: z.string().optional(),
@@ -61,16 +57,6 @@ export const bbAppManagedConfigValuesSchema = z
   })
   .strict();
 
-/**
- * ACP provider ids are dynamic: known agents (acp-opencode, acp-omp, …) and
- * custom agents (acp-<slug>) both live outside the bundled provider list, so
- * customModels accepts any well-formed acp-* id alongside it.
- *
- * DEBT: config is parsed before plugins load, so it cannot consult the live
- * registry; the bundled ids are restated here. A third-party plugin provider
- * therefore still cannot carry custom models — unchanged from before, and
- * fixed by moving this check to where the provider listing is composed.
- */
 const ACP_PROVIDER_ID_PATTERN = /^acp-[a-z0-9][a-z0-9-]*$/u;
 
 const customModelProviderIdSchema = z.union([
@@ -78,9 +64,6 @@ const customModelProviderIdSchema = z.union([
   z.string().regex(ACP_PROVIDER_ID_PATTERN),
 ]);
 
-// A user-registered model offered in the model picker in addition to the
-// provider's built-in catalog (e.g. a non-public preview model id). Omitting
-// `displayName` means "derive the label from the model id".
 export const customProviderModelSchema = z
   .object({
     providerId: customModelProviderIdSchema,
@@ -89,11 +72,9 @@ export const customProviderModelSchema = z
   })
   .strict();
 
-export const bbAppManagedEnvNameSchema = z
-  .string()
-  .regex(PORTABLE_ENV_NAME_PATTERN);
+const bbAppManagedEnvNameSchema = z.string().regex(PORTABLE_ENV_NAME_PATTERN);
 
-export const bbAppManagedEnvConfigSchema = z.record(
+const bbAppManagedEnvConfigSchema = z.record(
   bbAppManagedEnvNameSchema,
   z.string(),
 );
@@ -113,9 +94,7 @@ const customAcpAgentModelCliSchema = z
     modelCli.listArgs.length > 0 ? modelCli : undefined,
   );
 
-// One user-registered ACP agent. `id` is a slug; BB derives the runtime
-// provider id as `acp-<id>`.
-export const customAcpAgentSchema = z
+const customAcpAgentSchema = z
   .object({
     id: z.string().regex(CUSTOM_ACP_AGENT_ID_PATTERN),
     displayName: z.string().min(1),
@@ -135,10 +114,6 @@ export const customAcpAgentSchema = z
     reasoningCli: acpReasoningCliSchema.optional(),
     nativeReasoning: acpNativeReasoningSchema.optional(),
     nativeSkillRoots: providerNativeSkillRootsSchema.optional(),
-    // Whether the agent accepts an explicit compaction request. The ACP
-    // protocol has no capability for it, so the agent definition declares it:
-    // OpenCode implements /compact, Cursor does not, and a custom agent says
-    // so here rather than being enumerated in a BB-side id list.
     supportsManualCompaction: z.boolean().default(false),
   })
   .strict()

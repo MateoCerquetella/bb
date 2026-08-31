@@ -5,10 +5,6 @@ import type {
 } from "@tanstack/react-query";
 import type { ThreadListEntry } from "@bb/domain";
 
-// Some thread list queries store a flat array (`useThreads`); the paginated
-// archived view stores `InfiniteData<ThreadListEntry[]>`. These helpers let
-// cache mutations and iteration treat both shapes uniformly.
-
 export type ThreadListCacheData =
   | ThreadListEntry[]
   | InfiniteData<ThreadListEntry[]>;
@@ -47,7 +43,7 @@ export function* iterateThreadListCacheEntries(
   }
 }
 
-export function mapThreadListCacheData<T extends ThreadListCacheData>(
+function mapThreadListCacheData<T extends ThreadListCacheData>(
   data: T,
   mapper: (list: ThreadListEntry[]) => ThreadListEntry[],
 ): T {
@@ -57,13 +53,11 @@ export function mapThreadListCacheData<T extends ThreadListCacheData>(
   return { ...data, pages: data.pages.map(mapper) } as T;
 }
 
-export function isThreadListCacheData(
-  value: unknown,
-): value is ThreadListCacheData {
+function isThreadListCacheData(value: unknown): value is ThreadListCacheData {
   return isThreadListEntryArray(value) || isInfiniteThreadListData(value);
 }
 
-export interface CachedThreadList {
+interface CachedThreadList {
   queryKey: QueryKey;
   data: ThreadListCacheData;
 }
@@ -92,13 +86,6 @@ export function getCachedThreadLists(
     result.push({ queryKey, data });
   }
   return result;
-}
-
-export function snapshotCachedThreadLists(
-  queryClient: QueryClient,
-  options: ThreadListCacheQueryOptions,
-): CachedThreadListSnapshot {
-  return getCachedThreadLists(queryClient, options);
 }
 
 export function restoreCachedThreadLists(

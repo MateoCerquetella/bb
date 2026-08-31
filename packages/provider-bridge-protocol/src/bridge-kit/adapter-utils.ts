@@ -1,12 +1,8 @@
-/**
- * Shared adapter utilities.
- *
- * Functions and constants duplicated across the claude-code, pi, and codex
- * adapters are extracted here so each adapter imports from one place.
- */
-
 import { z } from "zod";
-import type { ThreadEventItem } from "@bb/domain";
+import type {
+  ThreadEventItem,
+  ThreadEventTokenUsageBreakdown,
+} from "@bb/domain";
 import { textBlockSchema } from "./tool-arg-schemas.js";
 import { getStringProperty, isRecord } from "./provider-visibility-helpers.js";
 
@@ -19,10 +15,6 @@ const contentWrapperSchema = z
 const shellEnvironmentVariableKeySchema = z
   .string()
   .regex(/^[A-Z_][A-Z0-9_]*$/i);
-
-// ---------------------------------------------------------------------------
-// Diff helpers
-// ---------------------------------------------------------------------------
 
 type LineDiffOperation =
   | { type: "add"; line: string }
@@ -174,10 +166,6 @@ function formatLineDiff(args: {
   return [...args.headers, ...body].join("\n") + "\n";
 }
 
-/**
- * Builds a compact unified-diff-like string from old/new text pairs.
- * Exported so each adapter can call it with its own arg names.
- */
 export function buildEditDiff(
   filePath: string,
   oldString: string | undefined,
@@ -219,10 +207,6 @@ export function buildEditDiff(
   return undefined;
 }
 
-// ---------------------------------------------------------------------------
-// Shared item helpers
-// ---------------------------------------------------------------------------
-
 export function toOptionalString(value: unknown): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
@@ -246,12 +230,6 @@ export function withParentToolCallId<TItem extends ThreadEventItem>(
   };
 }
 
-/**
- * The environment overrides a bridge may hand its provider: the requested
- * variables minus any name a shell would refuse. A rejected name is dropped,
- * never passed through — a provider that inherits an unquotable name can fail
- * its whole session on one bad key.
- */
 export function buildShellEnvOverrides(
   envVars?: Record<string, string>,
 ): Record<string, string> {
@@ -265,10 +243,6 @@ export function buildShellEnvOverrides(
   return overrides;
 }
 
-// ---------------------------------------------------------------------------
-// Numeric helpers
-// ---------------------------------------------------------------------------
-
 export function toNonNegativeNumber(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? value
@@ -279,8 +253,6 @@ export function normalizeProviderCommandOutput(args: {
   emptyPlaceholders: readonly string[];
   text: string;
 }): string | undefined {
-  // Compare placeholders against trimmed provider text, but preserve the
-  // original bytes for real process output so downstream rendering stays exact.
   const trimmedText = args.text.trim();
   if (
     args.emptyPlaceholders.some((placeholder) => placeholder === trimmedText)
@@ -290,10 +262,6 @@ export function normalizeProviderCommandOutput(args: {
   return args.text.length > 0 ? args.text : undefined;
 }
 
-/**
- * Extracts text from tool result content.
- * Handles strings, arrays of text blocks, and `{ content: [...] }` wrappers.
- */
 export function extractResultText(content: unknown): string {
   if (content === null || content === undefined) return "";
   if (typeof content === "string") return content;
@@ -375,4 +343,26 @@ function describeResultContentBlock(block: unknown): string | null {
     return `[${type}: ${url}]`;
   }
   return `[${type}]`;
+}
+
+export const ZERO_TOKEN_USAGE: ThreadEventTokenUsageBreakdown = {
+  totalTokens: 0,
+  inputTokens: 0,
+  cachedInputTokens: 0,
+  outputTokens: 0,
+  reasoningOutputTokens: 0,
+};
+
+export function addTokenUsage(
+  total: ThreadEventTokenUsageBreakdown,
+  last: ThreadEventTokenUsageBreakdown,
+): ThreadEventTokenUsageBreakdown {
+  return {
+    totalTokens: total.totalTokens + last.totalTokens,
+    inputTokens: total.inputTokens + last.inputTokens,
+    cachedInputTokens: total.cachedInputTokens + last.cachedInputTokens,
+    outputTokens: total.outputTokens + last.outputTokens,
+    reasoningOutputTokens:
+      total.reasoningOutputTokens + last.reasoningOutputTokens,
+  };
 }

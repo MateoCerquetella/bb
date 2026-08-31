@@ -3,33 +3,16 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { describe, expect, it } from "vitest";
 
-/**
- * Guards the relational structure of the neutral ramp. The whole light/dark
- * palette is derived from two anchors per mode (`--canvas`, `--ink`) by mixing
- * ink into the canvas; each token's mix percentage is its *contrast from the
- * canvas*. These tests fail if someone reintroduces a hand-set literal, inverts
- * a state relationship, or adds a token to only one mode — the regressions that
- * the flat token set used to hide.
- */
-
 const css = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "theme.css"),
   "utf8",
 );
-/** Declarations of the rule whose body contains `color-scheme: <scheme>;`. */
 function modeBlock(scheme: "light" | "dark", source = css): string {
   const at = source.indexOf(`color-scheme: ${scheme};`);
   if (at === -1) throw new Error(`no ${scheme} block in theme.css`);
   return source.slice(source.lastIndexOf("{", at) + 1, source.indexOf("}", at));
 }
 
-/**
- * token -> ink mix percentage, for tokens derived from the anchors. The base is
- * either the canvas (opaque steps, mixed in oklch) or `transparent` (translucent
- * interactive/overlay steps, mixed in oklab — see the guard below); over the
- * canvas both resolve to the same step, so the mix percentage is the comparable
- * "contrast from canvas" either way.
- */
 function rampSteps(block: string): Map<string, number> {
   const re =
     /--([a-z-]+):\s*color-mix\(in okl(?:ch|ab), var\(--ink\) ([\d.]+)%, (?:var\(--canvas\)|transparent)\);/g;
@@ -40,7 +23,6 @@ function rampSteps(block: string): Map<string, number> {
   return steps;
 }
 
-// Every neutral surface/line must be derived from the anchors, not hand-set.
 const REQUIRED_RAMP_TOKENS = [
   "secondary",
   "accent",
@@ -141,9 +123,7 @@ describe("theme.css neutral ramp", () => {
     expect(rule).toContain(
       "linear-gradient(var(--state-active), var(--state-active))",
     );
-    expect(rule).toContain(
-      "linear-gradient(var(--sidebar), var(--sidebar))",
-    );
+    expect(rule).toContain("linear-gradient(var(--sidebar), var(--sidebar))");
   });
 
   it("resolves the open-in-split thread tint to an opaque sidebar color", () => {
@@ -203,10 +183,6 @@ describe("theme.css neutral ramp", () => {
       });
 
       it("keeps card and popover flush with the background", () => {
-        // Elevation is conveyed by border + shadow, not a surface tint, so card
-        // and popover share the page's canvas value instead of sitting on the
-        // lift ramp. Guards against anyone reintroducing a fill tint (the change
-        // that silently broke sticky overlay headers).
         expect(steps.has("card")).toBe(false);
         expect(steps.has("popover")).toBe(false);
         expect(block).toMatch(/--card:\s*var\(--canvas\);/);
@@ -226,11 +202,6 @@ describe("theme.css neutral ramp", () => {
       });
 
       it("keeps the sidebar a quiet chrome lift below the fills", () => {
-        // Sidebar is chrome adjacent to the page, so it should be the faintest
-        // lift — below the secondary/accent fills — and never compete with
-        // content surfaces. This must hold in light and dark (the lift used to
-        // invert between modes). Cards are now flush with the page, so the floor
-        // this is measured against is the lowest fill rather than the card.
         expect(step("sidebar")).toBeLessThan(step("secondary"));
       });
     });
@@ -243,15 +214,6 @@ describe("theme.css neutral ramp", () => {
   });
 
   it("derives translucent (transparent-mixed) tokens in oklab, not oklch", () => {
-    // Mixing a color with `transparent` in a *polar* space (oklch) drops the
-    // result hue to `none`, which renders as hue 0 (red). The chroma survives,
-    // so any palette whose canvas/ink/primary isn't pure gray got a pink-tinted
-    // header (--surface-scrim), hover, and selection — the default palette only
-    // escaped because its anchors are chroma-0. Rectangular spaces (oklab) carry
-    // the hue through, so translucency must mix in oklab. Opaque color->canvas
-    // mixes can stay oklch. This guard keeps every future palette correct by
-    // construction, since palettes only set opaque anchors and never touch these
-    // derived tokens.
     const offenders = [
       ...css.matchAll(/color-mix\(\s*in oklch\b[^;]*?\btransparent\b/g),
     ].map((match) => match[0].replace(/\s+/g, " "));
@@ -323,8 +285,17 @@ describe("theme.css desktop portal hit testing", () => {
   });
 });
 
-// Paint-cost guards for iOS/WebKit: the shimmer sweep and the scroll-anchor
-// exclusion must not restyle or repaint more of the timeline than they need.
+describe("theme.css sidebar width registration", () => {
+  it("registers --sidebar-width as a non-inherited length", () => {
+    const rule = css.match(/@property --sidebar-width\s*\{([^}]*)\}/)?.[1];
+
+    expect(rule).toBeDefined();
+    expect(rule).toMatch(/syntax:\s*"<length>";/);
+    expect(rule).toMatch(/inherits:\s*false;/);
+    expect(rule).toMatch(/initial-value:\s*\d+px;/);
+  });
+});
+
 describe("theme.css shimmer and scroll-anchor paint scope", () => {
   function ruleBody(selector: string, source = css): string {
     const at = source.indexOf(`${selector} {`);
@@ -333,8 +304,6 @@ describe("theme.css shimmer and scroll-anchor paint scope", () => {
   }
 
   it("promotes shimmering elements to their own layer only while active", () => {
-    // `.animate-shine` is only present on active rows, so the layer exists
-    // only while the sweep runs.
     expect(ruleBody("  .animate-shine")).toMatch(/will-change:\s*transform;/);
     expect(ruleBody("  .animate-shine-icon")).toMatch(
       /will-change:\s*transform;/,
@@ -351,8 +320,6 @@ describe("theme.css shimmer and scroll-anchor paint scope", () => {
   });
 
   it("excludes the bottom-anchored wrapper without a universal descendant rule", () => {
-    // `.scroll-bottom-anchor-content *` would restyle every timeline node on
-    // each bottom attach/detach; the wrapper alone excludes its subtree.
     expect(css).not.toMatch(/\.scroll-bottom-anchor-content\s*\*/);
     expect(ruleBody(".scroll-bottom-anchor-content")).toMatch(
       /overflow-anchor:\s*none;/,

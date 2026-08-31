@@ -72,7 +72,6 @@ function bodyText(init: RequestInit | undefined): string | undefined {
 
 function jsonResponse(args: QueuedJsonResponse): Response {
   const status = args.status ?? 200;
-  // 204 is a null-body status; the Response constructor throws on a body.
   if (status === 204) {
     return new Response(null, { status });
   }
@@ -555,7 +554,7 @@ describe("@bb/sdk", () => {
     });
 
     await expect(
-      sdk.providers.list({ hostId: "host_remote" }),
+      sdk.providers.list({ capability: "usage", hostId: "host_remote" }),
     ).resolves.toEqual([]);
     await expect(
       sdk.providers.models({
@@ -568,7 +567,7 @@ describe("@bb/sdk", () => {
       {
         bodyText: undefined,
         method: "GET",
-        url: "http://bb.test/api/v1/system/providers?hostId=host_remote",
+        url: "http://bb.test/api/v1/system/providers?capability=usage&hostId=host_remote",
       },
       {
         bodyText: undefined,
@@ -581,8 +580,8 @@ describe("@bb/sdk", () => {
   it("targets provider usage at an explicit machine", async () => {
     const usage = {
       codex: { status: "unauthenticated" as const },
-      claudeCode: { status: "unauthenticated" as const },
-      cursor: { status: "unauthenticated" as const },
+      "claude-code": { status: "unauthenticated" as const },
+      "acp-cursor": { status: "unauthenticated" as const },
     };
     const queue = createFetchQueue([{ body: usage }]);
     const sdk = createBbSdk({
@@ -594,20 +593,23 @@ describe("@bb/sdk", () => {
     });
 
     await expect(
-      sdk.system.usageLimits({ hostId: "host_remote" }),
+      sdk.system.usageLimits({
+        hostId: "host_remote",
+        providerId: "codex",
+      }),
     ).resolves.toEqual(usage);
     expect(queue.requests).toEqual([
       {
         bodyText: undefined,
         method: "GET",
-        url: "http://bb.test/api/v1/system/usage-limits?hostId=host_remote",
+        url: "http://bb.test/api/v1/system/usage-limits?hostId=host_remote&providerId=codex",
       },
     ]);
   });
 
   it("routes onboarding agent status through a reused environment", async () => {
-    const overview = { agents: [] };
-    const queue = createFetchQueue([{ body: overview }]);
+    const states = { providers: [] };
+    const queue = createFetchQueue([{ body: states }]);
     const sdk = createBbSdk({
       transport: createHttpTransport({
         baseUrl: "http://bb.test",
@@ -617,13 +619,13 @@ describe("@bb/sdk", () => {
     });
 
     await expect(
-      sdk.system.onboardingAgents({ environmentId: "env_remote" }),
-    ).resolves.toEqual(overview);
+      sdk.system.providerStates({ environmentId: "env_remote" }),
+    ).resolves.toEqual(states);
     expect(queue.requests).toEqual([
       {
         bodyText: undefined,
         method: "GET",
-        url: "http://bb.test/api/v1/system/onboarding/agents?environmentId=env_remote",
+        url: "http://bb.test/api/v1/system/providers/state?environmentId=env_remote",
       },
     ]);
   });
@@ -1087,7 +1089,7 @@ describe("@bb/sdk", () => {
   it("forwards every public permission mode through thread surfaces", async () => {
     const queue = createFetchQueue([
       { body: { id: "thr_auto" }, status: 201 },
-      { body: null, status: 204 },
+      { body: { ok: true, delivery: "sent" } },
       { body: { id: "qmsg_full" }, status: 201 },
     ]);
     const sdk = createBbSdk({
@@ -1345,6 +1347,8 @@ describe("@bb/sdk", () => {
       app: { hasApp: false, bundle: null },
       logoUrl: null,
       logoDarkUrl: null,
+      providerIds: [],
+      icons: {},
     };
     const catalog = {
       pluginCount: 1,

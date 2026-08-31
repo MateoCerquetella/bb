@@ -1,7 +1,5 @@
 import type { ComponentType } from "react";
 import type { InlineCode, Nodes, Parent, PhrasingContent, Text } from "mdast";
-// Side-effect import: augments mdast's `Data` with `hName`/`hProperties` so a
-// plain `text` node can carry the custom element instructions below.
 import type {} from "mdast-util-to-hast";
 import { visit } from "unist-util-visit";
 import {
@@ -15,15 +13,16 @@ import {
   resolveThreadMentionResource,
 } from "@/components/thread/timeline/ConversationMessageMentions.js";
 import {
+  isMentionBoundary,
+  isMentionEndBoundary,
+  isRawThreadIdBoundary,
+  isRawThreadIdEndBoundary,
   useRawThreadMentionResource,
   useSidebarThreadMentionResource,
   useThreadMentionResource,
 } from "@/components/thread/ThreadTitleMentions.js";
 import type { TimelineTitleLinkResolver } from "@/components/thread/timeline/TimelineTitleView.js";
 
-// Matches both the serialized generated-message token (`@thread:<id>`) and a
-// raw persisted thread id. Raw ids deliberately use the exact db alphabet and
-// suffix length so lookalike words and other entity ids remain ordinary text.
 const THREAD_MENTION_PATTERN = new RegExp(
   `@thread:([A-Za-z0-9_-]+)|(${RAW_THREAD_ID_PATTERN_SOURCE})`,
   "gu",
@@ -32,19 +31,11 @@ const RAW_THREAD_ID_PATTERN = new RegExp(RAW_THREAD_ID_PATTERN_SOURCE, "gu");
 const THREAD_MENTION_PREFIX = "@thread";
 const THREAD_MENTION_ID_PATTERN = /^[A-Za-z0-9_-]+$/u;
 
-// Custom hast element the remark plugin emits for each token; mapped back to a
-// React pill via the `components` entry below. Lowercase + hyphenated so it is a
-// valid custom-element tag name in the hast tree.
 const THREAD_MENTION_HAST_NAME = "bb-thread-mention";
-// hast property key — `mdast-util-to-hast` lowercases it into the
-// `data-thread-id` DOM attribute that the component reads back.
 const THREAD_MENTION_THREAD_ID_PROPERTY = "dataThreadId";
 const RAW_THREAD_ID_PROPERTY = "dataRawThreadId";
 const RAW_THREAD_INLINE_CODE_PROPERTY = "dataRawThreadInlineCode";
 
-// Builds a real mdast `text` node that, via `data.hName`, renders as the custom
-// element rather than its (empty) text value. `mdast-util-to-hast` honours
-// `data.hName`/`data.hProperties` for any node.
 function threadMentionNode(
   threadId: string,
   rawThreadId = false,
@@ -66,8 +57,6 @@ function threadMentionNode(
   };
 }
 
-// Splits a text node on serialized mentions and raw thread ids, returning the
-// original node when neither is present so untouched text stays plain.
 interface PhrasingTextContext {
   offset: number;
   text: string;
@@ -210,38 +199,11 @@ function collectAuthoredMarkdownLinkNodes(tree: Nodes): WeakSet<object> {
   return linkNodes;
 }
 
-function isMentionBoundary(text: string, index: number): boolean {
-  const previous = text[index - 1];
-  return previous === undefined || !/[\p{L}\p{N}_.+-]/u.test(previous);
-}
-
-function isRawThreadIdBoundary(text: string, index: number): boolean {
-  const previous = text[index - 1];
-  return (
-    previous !== "/" && previous !== "\\" && isMentionBoundary(text, index)
-  );
-}
-
-function isMentionEndBoundary(text: string, index: number): boolean {
-  const next = text[index];
-  if (next === undefined) return true;
-  if (next === ".") {
-    const afterPeriod = text[index + 1];
-    return afterPeriod === undefined || /[\s,;:!?)}\]"'’”]/u.test(afterPeriod);
-  }
-  return !/[\p{L}\p{N}_.+\/-]/u.test(next);
-}
-
-function isRawThreadIdEndBoundary(text: string, index: number): boolean {
-  return text[index] !== "\\" && isMentionEndBoundary(text, index);
-}
-
-export interface RawThreadIdTextSegment {
+interface RawThreadIdTextSegment {
   rawThreadId: string | null;
   text: string;
 }
 
-/** Splits prose-only text using the same exact raw-id boundaries as Markdown. */
 export function splitRawThreadIdsInText(
   text: string,
 ): RawThreadIdTextSegment[] {
@@ -280,16 +242,6 @@ function isDirectiveMentionEndBoundary(parent: Parent, index: number): boolean {
   return next?.type !== "text" || isMentionEndBoundary(next.value, 0);
 }
 
-/**
- * Remark plugin that rewrites serialized thread mentions and raw persisted
- * thread ids into custom inline nodes the `components` map renders as the
- * canonical thread-mention pill. An inline-code node is eligible only when its
- * complete value is one exact raw thread id; mixed inline code, fenced code,
- * and inline code used as an authored Markdown link label remain literal. When
- * `remark-directive` is active, its parser splits `@thread:<id>` into an
- * `@thread` text suffix plus a `:<id>` text directive; the second pass rejoins
- * that exact pair before the directive renderer sees it.
- */
 export function remarkThreadMentions() {
   return (tree: Nodes): void => {
     const authoredMarkdownLinkNodes = collectAuthoredMarkdownLinkNodes(tree);
@@ -396,9 +348,6 @@ interface ThreadMentionElementProps {
   "data-thread-id"?: string;
 }
 
-// `react-markdown`'s `Components` map is keyed by `JSX.IntrinsicElements`, so
-// the custom element the remark plugin emits must be declared there for the
-// `components` entry to type-check. It is render-only (never authored as JSX).
 declare module "react" {
   namespace JSX {
     interface IntrinsicElements {
@@ -418,12 +367,6 @@ function resolveThreadMentionHref(
   return resolveSegmentLinkHref(link) ?? undefined;
 }
 
-/**
- * The `components` renderer for thread mentions, keyed (by the caller) on the
- * custom hast element the remark plugin emits. Resolves the mention's display
- * resource and reuses the canonical `PromptMentionPill`. Serialized mentions
- * retain timeline-resolver routing; raw ids use their resolved target project.
- */
 export function buildThreadMentionComponent({
   mentions,
   resolveSegmentLinkHref,
@@ -468,9 +411,6 @@ export function buildThreadMentionComponent({
     if (threadId.length === 0) {
       return null;
     }
-    // A raw id has no persisted mention contract. Always resolve it through
-    // the authoritative thread lookup so its pill routes through the target
-    // thread's project rather than the project owning the current timeline.
     if (rawThreadId !== undefined) {
       return (
         <RawThreadMentionPillWithQuery

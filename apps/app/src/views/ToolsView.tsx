@@ -5,10 +5,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
-// Route views render icons outside the shell's core set. Importing the
-// extended registry here ships it as a static dependency of this route chunk,
-// so those icons never flash blank waiting for an on-demand load.
+import { useLocation, useNavigate } from "react-router-dom";
 import "@bb/shared-ui/icon-extended";
 import { useMutation } from "@tanstack/react-query";
 import { buildPluginEditThreadPrompt } from "@bb/shared-ui/resource-edit-prompt";
@@ -32,6 +29,7 @@ import {
   PluginDetail,
   PluginDetailBanners,
   pluginIsLocalSource,
+  pluginRemovalDescription,
   pluginRemovalLabel,
 } from "@/components/tools/PluginDetail";
 import {
@@ -56,9 +54,7 @@ import {
   type ToolsSectionId,
 } from "@/components/tools/tools-navigation";
 import { cn } from "@bb/shared-ui/lib/utils";
-import { SkillsLibrary } from "./SkillsView";
-
-export { PluginDetail };
+import { SkillsLibrary } from "@/components/tools/SkillsLibrary";
 
 function ToolsBodyFallback() {
   return (
@@ -74,13 +70,11 @@ function ToolsBodyFallback() {
   );
 }
 
-export function ToolsScrollPage({
+function ToolsScrollPage({
   children,
-  maxWidthClassName = "max-w-5xl",
   fillViewport = false,
 }: {
   children: ReactNode;
-  maxWidthClassName?: string;
   fillViewport?: boolean;
 }) {
   const {
@@ -91,10 +85,6 @@ export function ToolsScrollPage({
     belowOverflow,
   } = useScrollOverflowState<HTMLDivElement>({ measureOverflow: true });
   if (fillViewport) {
-    // The child owns the only scrollable region (a ResourceCollectionViewport),
-    // so this page must NOT constrain its width: the scroller has to span the
-    // whole pane for the wheel to work from the gutters, and each band inside
-    // it centers itself with TOOLS_PAGE_BAND_CLASSES instead.
     return (
       <div className="box-border h-full w-full pb-4 pt-3 md:pt-4">
         {children}
@@ -108,7 +98,7 @@ export function ToolsScrollPage({
         <div
           className={cn(
             "mx-auto box-border min-h-full w-full space-y-4 px-4 pb-4 pt-3 md:px-5 md:pt-4",
-            maxWidthClassName,
+            "max-w-5xl",
           )}
         >
           {children}
@@ -340,9 +330,6 @@ function PluginDetailToolView({ pluginId }: { pluginId: string }) {
   }
 
   return (
-    // The priority notice sits outside the scroll page so runtime conditions
-    // and acquisition blockers share the pane-wide alignment and stay with the
-    // controls that resolve them.
     <div className="flex h-full min-h-0 flex-col">
       {selectedPlugin !== null ? (
         <PluginDetailBanners plugin={selectedPlugin} />
@@ -365,11 +352,7 @@ function PluginDetailToolView({ pluginId }: { pluginId: string }) {
                     ? "Remove plugin from bb?"
                     : "Uninstall plugin?"
                 }
-                description={
-                  pluginIsLocalSource(deleteTarget)
-                    ? `Remove "${deleteTarget.id}" from bb? Its source files will stay on disk.`
-                    : `Uninstall "${deleteTarget.id}" and delete its managed files and settings?`
-                }
+                description={pluginRemovalDescription(deleteTarget)}
                 confirmLabel={pluginRemovalLabel(deleteTarget)}
                 pending={pluginDelete.isPending}
                 onConfirm={() => pluginDelete.mutate(deleteTarget)}
@@ -404,11 +387,20 @@ function PluginDetailToolView({ pluginId }: { pluginId: string }) {
   );
 }
 
-export function ToolsView() {
+export function PluginDetailPaneView({ pluginId }: { pluginId: string }) {
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <Suspense fallback={<ToolsBodyFallback />}>
+          <PluginsToolView pluginId={pluginId} />
+        </Suspense>
+      </div>
+    </div>
+  );
+}
+
+export function ToolsView({ pluginId }: { pluginId?: string } = {}) {
   const location = useLocation();
-  const { pluginId } = useParams<{
-    pluginId?: string;
-  }>();
   const activeSection = resolveToolsSection(location.pathname);
 
   return (

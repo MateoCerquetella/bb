@@ -1,7 +1,6 @@
 import path from "node:path";
 import { chmodSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import type { CustomAcpAgent } from "@bb/config/bb-app-managed-config";
 import { systemExecutionOptionsResponseSchema } from "@bb/server-contract";
 import { describe, expect, it } from "vitest";
 import { getThreadOutput, sendTextMessage } from "../../helpers/api.js";
@@ -10,7 +9,8 @@ import {
   waitForThreadOutputContaining,
   waitForThreadStatus,
 } from "../../helpers/assertions.js";
-import { withHarness } from "../../helpers/harness.js";
+import { withHarness, type IntegrationHarness } from "../../helpers/harness.js";
+import { registerConfiguredAcpProvider } from "../../../../apps/server/test/helpers/provider-registry.js";
 import { scaleTimeoutMs } from "../../helpers/time.js";
 import {
   createProjectFixture,
@@ -19,10 +19,6 @@ import {
   TURN_TIMEOUT_MS,
 } from "./shared.js";
 
-// This smoke performs two provider starts, two follow-up turns, and a daemon
-// restart. Keep the outer Vitest deadline above the sum of the operation-level
-// deadlines so a loaded full-workspace run reports the operation that stalled
-// instead of racing the generic per-test timeout.
 const DYNAMIC_ACP_TEST_TIMEOUT_MS = scaleTimeoutMs(120_000);
 
 const fixturePath = path.resolve(
@@ -31,38 +27,37 @@ const fixturePath = path.resolve(
 );
 chmodSync(fixturePath, 0o755);
 
-function buildDynamicAcpAgents(): CustomAcpAgent[] {
-  return [
-    {
-      id: "smoke",
-      displayName: "Smoke ACP",
-      command: fixturePath,
-      args: [],
-      env: { BB_DYNAMIC_ACP_SMOKE: "thread" },
-      supportsManualCompaction: false,
-      modelCli: {
-        listArgs: ["--list-models"],
-        selectFlag: "--model",
-        primaryModels: ["bb-dynamic-smoke-medium"],
-      },
+async function registerDynamicAcpAgents(
+  harness: IntegrationHarness,
+): Promise<void> {
+  const registry = harness.server.providerRegistry;
+  await registerConfiguredAcpProvider(registry, {
+    id: "smoke",
+    displayName: "Smoke ACP",
+    command: fixturePath,
+    args: [],
+    env: { BB_DYNAMIC_ACP_SMOKE: "thread" },
+    modelCli: {
+      listArgs: ["--list-models"],
+      selectFlag: "--model",
+      primaryModels: ["bb-dynamic-smoke-medium"],
     },
-    {
-      id: "nomodelcli",
-      displayName: "No Model CLI ACP",
-      command: fixturePath,
-      args: [],
-      env: {},
-      supportsManualCompaction: false,
-    },
-  ];
+  });
+  await registerConfiguredAcpProvider(registry, {
+    id: "nomodelcli",
+    displayName: "No Model CLI ACP",
+    command: fixturePath,
+    args: [],
+    env: {},
+  });
 }
 
 describe.sequential("dynamic ACP integration smoke", () => {
   it(
     "spawns configured ACP agents for model list, start, submit, and lazy resume",
     () =>
-      withHarness({ adapterFactory: undefined }, async (harness) => {
-        harness.server.config.customAcpAgents = buildDynamicAcpAgents();
+      withHarness(async (harness) => {
+        await registerDynamicAcpAgents(harness);
 
         const providersResponse = await harness.api.system.providers.$get({});
         expect(providersResponse.status).toBe(200);

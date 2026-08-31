@@ -1,4 +1,5 @@
 import { atom } from "jotai";
+import { DEFAULTS } from "@bb/config/defaults";
 import { defaultAppSettings, defaultAppTheme } from "@bb/domain";
 import type { WorkspaceOpenTarget } from "@bb/host-daemon-contract";
 import type { HostDaemonStatusSnapshot } from "./api-host-daemon";
@@ -9,45 +10,58 @@ import { getBbDesktopInfo } from "./bb-desktop";
 import {
   getBrowserLocalNetworkPermissionQuery,
   resolveLocalHostDaemonAccess,
-  resolveLocalHostDaemonProbePort,
+  resolveLocalHostDaemonProbePorts,
   type LocalHostDaemonAccessState,
 } from "./local-host-daemon-access";
 import { wsManager } from "./ws";
 
-// Offline/unavailable app behavior should fail closed independently of server defaults.
 const unavailableSystemConfig: SystemConfigResponse = {
   generalSettings: defaultAppSettings,
   keybindings: [],
   defaultKeybindings: [],
   keybindingOverrides: [],
   experiments: {
-    claudeCodeMockCliTraffic: false,
+    changelogPreview: false,
     editMessages: false,
-    newOnboarding: false,
+    mobileApp: false,
     providerSessionReaping: false,
+    timelineWindowing: false,
   },
   appearance: defaultAppTheme,
   customThemes: [],
   pluginThemes: [],
   featureFlags: { placeholder: false, timelineWindowEventBudget: 1_500 },
   hostDaemonPort: null,
+  localHelperPorts: [],
   serverUrl: "",
   primaryHostId: null,
   primaryHostPlatform: null,
   voiceTranscriptionEnabled: false,
+  aiServices: {
+    inference: DEFAULTS.inferenceModel,
+    inferenceFallback: DEFAULTS.inferenceFallbackModel,
+    transcription: DEFAULTS.transcriptionModel,
+    services: [],
+  },
   dataDir: "",
 };
 
 type SystemConfigLoadStatus = "failed" | "succeeded" | null;
 type Milliseconds = number;
 
-interface FetchHostStatusWithRetryArgs {
+interface LocalHostDaemonConnection {
   port: number;
+  status: HostDaemonStatusSnapshot;
+}
+
+interface FetchLocalHostConnectionWithRetryArgs {
+  browserOrigin: string | null;
+  ports: readonly number[];
   retryDelaysMs: readonly Milliseconds[];
 }
 
 const LOCAL_HOST_STATUS_RETRY_DELAYS_MS: readonly Milliseconds[] = [
-  100, 250, 500, 1_000,
+  1_000, 1_000,
 ];
 
 let lastSystemConfigLoadStatus: SystemConfigLoadStatus = null;
@@ -85,31 +99,66 @@ function sleep(milliseconds: Milliseconds): Promise<void> {
   });
 }
 
-async function fetchHostStatusWithRetry({
-  port,
+function parseOrigin(url: string): string | null {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return null;
+  }
+}
+
+function selectPreferredLocalHostConnection(
+  connections: readonly LocalHostDaemonConnection[],
+  browserOrigin: string | null,
+): LocalHostDaemonConnection | null {
+  if (browserOrigin !== null) {
+    const currentServerConnection = connections.find(
+      ({ status }) => parseOrigin(status.serverUrl) === browserOrigin,
+    );
+    if (currentServerConnection !== undefined) {
+      return currentServerConnection;
+    }
+  }
+  return connections[0] ?? null;
+}
+
+async function fetchLocalHostConnection(
+  ports: readonly number[],
+  browserOrigin: string | null,
+): Promise<LocalHostDaemonConnection | null> {
+  const results = await Promise.all(
+    ports.map(async (port): Promise<LocalHostDaemonConnection | null> => {
+      const status = await fetchHostStatus(port);
+      return status === null ? null : { port, status };
+    }),
+  );
+  const connections = results.filter(
+    (connection): connection is LocalHostDaemonConnection =>
+      connection !== null,
+  );
+  return selectPreferredLocalHostConnection(connections, browserOrigin);
+}
+
+async function fetchLocalHostConnectionWithRetry({
+  browserOrigin,
+  ports,
   retryDelaysMs,
-}: FetchHostStatusWithRetryArgs): Promise<HostDaemonStatusSnapshot | null> {
-  const firstStatus = await fetchHostStatus(port);
-  if (firstStatus) {
-    return firstStatus;
+}: FetchLocalHostConnectionWithRetryArgs): Promise<LocalHostDaemonConnection | null> {
+  const firstConnection = await fetchLocalHostConnection(ports, browserOrigin);
+  if (firstConnection !== null) {
+    return firstConnection;
   }
 
   for (const delayMs of retryDelaysMs) {
     await sleep(delayMs);
-    const status = await fetchHostStatus(port);
-    if (status) {
-      return status;
+    const connection = await fetchLocalHostConnection(ports, browserOrigin);
+    if (connection !== null) {
+      return connection;
     }
   }
 
   return null;
 }
-
-// ---------------------------------------------------------------------------
-// System config — fetched from the server on startup and re-fetched on
-// reconnects. The first websocket connection only refreshes when the initial
-// load failed, so a healthy startup doesn't immediately duplicate the request.
-// ---------------------------------------------------------------------------
 
 const systemConfigRefreshTickAtom = atom(0);
 systemConfigRefreshTickAtom.onMount = (setRefreshTick) => {
@@ -121,8 +170,9 @@ systemConfigRefreshTickAtom.onMount = (setRefreshTick) => {
   });
   const unsubscribeChanged = wsManager.onChanged((message) => {
     if (
-      message.entity === "system" &&
-      message.changes.includes("config-changed")
+      message.entity === "host" ||
+      (message.entity === "system" &&
+        message.changes.includes("config-changed"))
     ) {
       setRefreshTick((count) => count + 1);
     }
@@ -133,16 +183,10 @@ systemConfigRefreshTickAtom.onMount = (setRefreshTick) => {
   };
 };
 
-export const systemConfigAtom = atom(async (get) => {
+const systemConfigAtom = atom(async (get) => {
   get(systemConfigRefreshTickAtom);
   return loadSystemConfig();
 });
-
-// ---------------------------------------------------------------------------
-// Local host daemon status — probed from the host daemon on startup. Re-probes
-// on server connects/reconnects and host status changes while some UI is
-// subscribed to it. No-daemon is a normal state (e.g., mobile browser).
-// ---------------------------------------------------------------------------
 
 const localHostStatusRefreshTickAtom = atom(0);
 localHostStatusRefreshTickAtom.onMount = (setRefreshTick) => {
@@ -175,7 +219,7 @@ export const localHostDaemonAccessStateAtom = atom<
   const sessionAccessGranted = get(localHostDaemonSessionAccessGrantedAtom);
   const config = await get(systemConfigAtom);
   return resolveLocalHostDaemonAccess({
-    configuredPort: config.hostDaemonPort,
+    configuredPorts: config.localHelperPorts,
     hostname: typeof window === "undefined" ? null : window.location.hostname,
     isDesktop: getBbDesktopInfo() !== null,
     permissions: getBrowserLocalNetworkPermissionQuery(),
@@ -183,43 +227,45 @@ export const localHostDaemonAccessStateAtom = atom<
   });
 });
 
-/**
- * Deliberately request browser-local helper access from a user interaction.
- * The status request is what causes browsers to offer the loopback permission;
- * no permission API exists that can request it directly.
- */
 export const requestLocalHostDaemonAccessAtom = atom(
   null,
   async (get, set): Promise<boolean> => {
     const config = await get(systemConfigAtom);
-    if (config.hostDaemonPort === null) {
+    if (config.localHelperPorts.length === 0) {
       return false;
     }
 
-    const status = await fetchHostStatus(config.hostDaemonPort);
-    if (status !== null) {
+    const connection = await fetchLocalHostConnection(
+      config.localHelperPorts,
+      typeof window === "undefined" ? null : window.location.origin,
+    );
+    if (connection !== null) {
       set(localHostDaemonSessionAccessGrantedAtom, true);
     }
     set(localHostDaemonAccessRefreshTickAtom, (count) => count + 1);
     set(localHostStatusRefreshTickAtom, (count) => count + 1);
-    return status !== null;
+    return connection !== null;
   },
 );
 
-/** The local daemon status, or null if no daemon is reachable. */
+const localHostConnectionAtom = atom<Promise<LocalHostDaemonConnection | null>>(
+  async (get) => {
+    get(localHostStatusRefreshTickAtom);
+    const ports = await get(localHostDaemonProbePortsAtom);
+    if (ports.length === 0) return null;
+    return fetchLocalHostConnectionWithRetry({
+      browserOrigin:
+        typeof window === "undefined" ? null : window.location.origin,
+      ports,
+      retryDelaysMs: LOCAL_HOST_STATUS_RETRY_DELAYS_MS,
+    });
+  },
+);
+
 export const localHostStatusAtom = atom<
   Promise<HostDaemonStatusSnapshot | null>
->(async (get) => {
-  get(localHostStatusRefreshTickAtom);
-  const port = await get(hostDaemonPortAtom);
-  if (!port) return null;
-  return fetchHostStatusWithRetry({
-    port,
-    retryDelaysMs: LOCAL_HOST_STATUS_RETRY_DELAYS_MS,
-  });
-});
+>(async (get) => (await get(localHostConnectionAtom))?.status ?? null);
 
-/** Whether the local host daemon API is reachable. */
 export const localHostDaemonReachableAtom = atom<Promise<boolean>>(
   async (get) => {
     const localHostStatus = await get(localHostStatusAtom);
@@ -227,7 +273,6 @@ export const localHostDaemonReachableAtom = atom<Promise<boolean>>(
   },
 );
 
-/** The host ID reported by the local daemon, even before its server session opens. */
 export const localHostDaemonHostIdAtom = atom<Promise<string | null>>(
   async (get) => {
     const localHostStatus = await get(localHostStatusAtom);
@@ -235,7 +280,6 @@ export const localHostDaemonHostIdAtom = atom<Promise<string | null>>(
   },
 );
 
-/** The local machine's connected host ID, or null if no daemon session is open. */
 export const localHostIdAtom = atom<Promise<string | null>>(async (get) => {
   const localHostStatus = await get(localHostStatusAtom);
   if (!localHostStatus?.connected) {
@@ -244,34 +288,28 @@ export const localHostIdAtom = atom<Promise<string | null>>(async (get) => {
   return localHostStatus.hostId;
 });
 
-/** Workspace open targets available through the local host daemon. */
 export const localWorkspaceOpenTargetsAtom = atom<
   Promise<WorkspaceOpenTarget[]>
 >(async (get) => {
-  const localHostStatus = await get(localHostStatusAtom);
-  if (!localHostStatus) {
+  const connection = await get(localHostConnectionAtom);
+  if (connection === null) {
     return [];
   }
 
-  const port = await get(hostDaemonPortAtom);
-  if (!port) {
-    return [];
-  }
-
-  return fetchWorkspaceOpenTargets(port);
+  return fetchWorkspaceOpenTargets(connection.port);
 });
 
-// ---------------------------------------------------------------------------
-// Derived: host daemon port (sync access after config resolves)
-// ---------------------------------------------------------------------------
+const localHostDaemonProbePortsAtom = atom<Promise<readonly number[]>>(
+  async (get) => {
+    const config = await get(systemConfigAtom);
+    const accessState = await get(localHostDaemonAccessStateAtom);
+    return resolveLocalHostDaemonProbePorts(
+      config.localHelperPorts,
+      accessState,
+    );
+  },
+);
 
-/**
- * The local helper port this browser may probe, or null when unavailable. A
- * remote web origin only receives the port after loopback access was already
- * granted or explicitly requested by the user.
- */
 export const hostDaemonPortAtom = atom<Promise<number | null>>(async (get) => {
-  const config = await get(systemConfigAtom);
-  const accessState = await get(localHostDaemonAccessStateAtom);
-  return resolveLocalHostDaemonProbePort(config.hostDaemonPort, accessState);
+  return (await get(localHostConnectionAtom))?.port ?? null;
 });

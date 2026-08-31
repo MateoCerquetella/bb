@@ -14,7 +14,7 @@
       "icon": "./icons/codex.svg"
     },
     "server": "./server.ts",
-    "host": "./src/bridge/bridge.ts"
+    "host": "./src/host.ts"
   },
   "keywords": [
     "bb-plugin"

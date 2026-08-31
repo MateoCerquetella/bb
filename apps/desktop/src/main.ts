@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { accessSync, constants as fsConstants } from "node:fs";
-import { homedir } from "node:os";
+import { arch, homedir, release, type as osType } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   app,
   BrowserWindow,
   clipboard,
+  dialog,
   ipcMain,
   nativeImage,
   nativeTheme,
@@ -68,6 +69,7 @@ import {
   type CompatibleServerProbeResult,
   type ServerProbeResult,
 } from "./server-probe.js";
+import { loadRemoteServerPage } from "./remote-server-load.js";
 import {
   BUILTIN_SERVER_NAME,
   createServerTargetStore,
@@ -80,6 +82,7 @@ import {
   createConnectServerSync,
   type ConnectAccountServer,
   type ConnectServerSync,
+  type ConnectServerSyncSkipReason,
 } from "./connect-server-sync.js";
 import {
   createCredentialCookieSource,
@@ -106,6 +109,13 @@ import {
   type DesktopBrowserWindowCreator,
   type DesktopWindowFactory,
 } from "./desktop-window-factory.js";
+import { shouldUseLinuxFramelessWindow } from "./desktop-window-frame.js";
+import { shouldUseLinuxTransparentWindow } from "./desktop-window-transparency.js";
+import {
+  createDesktopAboutDialogOptions,
+  createDesktopAboutPanelOptions,
+  type DesktopAboutFacts,
+} from "./desktop-about-panel.js";
 import { registerDesktopContextMenu } from "./desktop-context-menu.js";
 import { resolveBbDesktopPlatform } from "./desktop-platform.js";
 import {
@@ -114,8 +124,8 @@ import {
   type DesktopUpdateService,
 } from "./desktop-update-check.js";
 import {
+  DESKTOP_RELEASE_CHANNEL,
   DESKTOP_RELEASE_INFO,
-  DESKTOP_UPDATE_CHANNEL,
   resolveDesktopUpdateSupport,
 } from "./desktop-update-provider.js";
 import {
@@ -140,6 +150,7 @@ import {
   BB_DESKTOP_CLOSE_WINDOW_RESPONSE_CHANNEL,
   BB_DESKTOP_GET_WINDOW_STATE_CHANNEL,
   BB_DESKTOP_OPEN_NEW_TAB_CHANNEL,
+  BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL,
   BB_DESKTOP_WINDOW_STATE_CHANGED_CHANNEL,
   CLOSE_WINDOW_REQUEST_TIMEOUT_MS,
 } from "./desktop-window-command-ipc.js";
@@ -151,7 +162,6 @@ import { resolveDesktopBrowserAppCommand } from "./desktop-browser-shortcuts.js"
 import { registerDesktopBrowserIpc } from "./desktop-browser-main-ipc.js";
 import { parseDesktopSystemConfig } from "./desktop-system-config.js";
 import { ensurePackagedUserShellPath } from "./desktop-shell-path.js";
-import { clearPackagedSessionHttpCache } from "./desktop-session-cache.js";
 import { resolveDesktopReloadShortcut } from "./desktop-reload-shortcut.js";
 import {
   createLogTailer,
@@ -269,10 +279,6 @@ interface ResolveDesktopUpdateFeedUrlArgs {
 }
 
 interface FetchSystemConfigArgs {
-  /**
-   * Remote servers authenticate with the Electron session cookie, which only
-   * Electron's own network stack carries. Local ones use plain node fetch.
-   */
   fetchImpl: typeof fetch;
   serverUrl: string;
 }
@@ -320,6 +326,7 @@ let enrollingDesktopMachine: Promise<void> | null = null;
 let connectSessionRenewal: ConnectSessionRenewal | null = null;
 let serverTargetGeneration = 0;
 let connectAccountServers: ConnectAccountServer[] = [];
+let connectServerSyncSkipReason: ConnectServerSyncSkipReason | null = null;
 let builtinServerUrl: string = DEFAULT_BB_SERVER_URL;
 let desktopBridgePath: string | null = null;
 let desktopUserDataPath: string | null = null;
@@ -340,14 +347,6 @@ function resolveDesktopServerUrl(args: ResolveDesktopServerUrlArgs): string {
   throw new Error("BB_SERVER_PORT must be a valid TCP port");
 }
 
-/**
- * The URL the main window loads. Defaults to the attached/owned bb server, which
- * serves the built UI. In dev, `run-electron-dev.mjs` sets `BB_DESKTOP_APP_URL`
- * to the running Vite dev server — but only when it has confirmed Vite is
- * actually listening — so the desktop shell loads live source with HMR while
- * still talking to the same server it attached to. It is unset in packaged
- * builds, so production always loads the server itself.
- */
 function resolveDesktopWindowUrl(args: ResolveDesktopWindowUrlArgs): string {
   const rawAppUrl = args.env.BB_DESKTOP_APP_URL?.trim();
   if (rawAppUrl === undefined || rawAppUrl.length === 0) {
@@ -365,17 +364,11 @@ function resolveDesktopWindowUrl(args: ResolveDesktopWindowUrlArgs): string {
   return rawAppUrl;
 }
 
-/**
- * electron-updater unlinks the running AppImage before it moves the downloaded
- * one into place, so both operations need write and search access on the parent
- * directory. Without that access the install deletes the user's app and leaves
- * nothing behind, so this gates the install path rather than the download.
- */
 function canReplaceAppImage(appImagePath: string): boolean {
   try {
     accessSync(
       dirname(appImagePath),
-      // eslint-disable-next-line no-bitwise
+      // oxlint-disable-next-line no-bitwise
       fsConstants.W_OK | fsConstants.X_OK,
     );
     return true;
@@ -401,11 +394,56 @@ function getDesktopVersion(version: string | undefined): string {
   return version;
 }
 
+function readDesktopAboutFacts(applicationName: string): DesktopAboutFacts {
+  return {
+    applicationName,
+    buildDate: process.env.BB_DESKTOP_BUILD_DATE ?? "",
+    channel: DESKTOP_RELEASE_CHANNEL,
+    commit: process.env.BB_DESKTOP_COMMIT ?? "",
+    electronVersion: process.versions.electron,
+    osArch: arch(),
+    osRelease: release(),
+    osType: osType(),
+    platform: process.platform,
+    pluginSdkVersion: process.env.BB_DESKTOP_PLUGIN_SDK_VERSION ?? "",
+    version: getDesktopVersion(process.env.BB_DESKTOP_VERSION),
+  };
+}
+
+function installAboutPanel(applicationName: string): void {
+  app.setAboutPanelOptions(
+    createDesktopAboutPanelOptions(readDesktopAboutFacts(applicationName)),
+  );
+}
+
+async function showAboutDialog(): Promise<void> {
+  const { copyButtonId, ...messageBoxOptions } =
+    createDesktopAboutDialogOptions(
+      readDesktopAboutFacts(app.getName()),
+      Date.now(),
+    );
+  const parentWindow = getFocusedApplicationWindow();
+  const result =
+    parentWindow === null
+      ? await dialog.showMessageBox(messageBoxOptions)
+      : await dialog.showMessageBox(parentWindow, messageBoxOptions);
+  if (result.response === copyButtonId) {
+    clipboard.writeText(messageBoxOptions.detail);
+  }
+}
+
 function getCurrentDesktopInfo(): BbDesktopInfo | null {
-  return mergeDesktopUpdateInfo({
+  const info = mergeDesktopUpdateInfo({
     autoInfo: desktopAutoUpdateService?.getInfo() ?? null,
     feedInfo: desktopUpdateService?.getInfo() ?? null,
   });
+  if (info === null) {
+    return null;
+  }
+  return {
+    ...info,
+    serverDaemonLogsAvailable: shouldEnableServerDaemonLogsMenu(),
+  };
 }
 
 function isRegisteredApplicationWindow(browserWindow: BrowserWindow): boolean {
@@ -437,6 +475,10 @@ function registerApplicationRendererReloadShortcut(
       return;
     }
     event.preventDefault();
+    const browserWindow = resolveApplicationWindow(webContents);
+    if (browserWindow !== null) {
+      desktopBrowserViewManager?.prepareWindowReload(browserWindow);
+    }
     if (shortcut === "force-reload") {
       webContents.reloadIgnoringCache();
     } else {
@@ -543,16 +585,11 @@ function createDesktopPathContext(): DesktopPathContext {
 }
 
 function shouldEnableServerDaemonLogsMenu(): boolean {
-  // Attached runtimes are owned by an external bb-app, so the desktop has no
-  // reliable server/daemon log lifecycle to tail.
   return (
     process.platform === "darwin" && currentRuntime?.ownership === "spawned"
   );
 }
 
-// Close requests routed through the renderer, keyed by webContents id. If the
-// renderer never answers (crashed, hung, or still loading), the timer closes
-// the window from the main process like the native close role used to.
 const pendingCloseWindowRequests = new Map<number, NodeJS.Timeout>();
 
 function requestRendererWindowClose(browserWindow: BrowserWindow): void {
@@ -619,10 +656,6 @@ function connectServerMenuId(handle: string): string {
   return `connect:${handle}`;
 }
 
-/**
- * Synced account servers plus the persisted selection when its handle has
- * dropped out of the account list (so the checkmark never dangles).
- */
 function listMenuConnectServers(): ConnectServerRef[] {
   const servers: ConnectServerRef[] = connectAccountServers.map((server) => ({
     handle: server.handle,
@@ -639,7 +672,7 @@ function listMenuConnectServers(): ConnectServerRef[] {
   return servers;
 }
 
-function buildMenuServerItems(): Array<{
+function buildMenuServerItems(connectServers: ConnectServerRef[]): Array<{
   checked: boolean;
   id: string;
   name: string;
@@ -652,7 +685,7 @@ function buildMenuServerItems(): Array<{
       name: BUILTIN_SERVER_NAME,
     },
   ];
-  for (const server of listMenuConnectServers()) {
+  for (const server of connectServers) {
     items.push({
       checked:
         target.kind === "connect" && target.server.handle === server.handle,
@@ -672,14 +705,20 @@ function buildMenuServerItems(): Array<{
 }
 
 function installCurrentApplicationMenu(): void {
+  const connectServers = listMenuConnectServers();
   installApplicationMenu({
     accelerators: currentApplicationMenuAccelerators,
+    connectServersSkipReason:
+      connectServers.length === 0 ? connectServerSyncSkipReason : null,
     isMac: process.platform === "darwin",
     createNewWindow() {
       void createApplicationWindow({
         initialUrl: currentWindowUrl,
         stateKey: null,
       });
+    },
+    openAbout() {
+      void showAboutDialog();
     },
     openNewTab() {
       const browserWindow = getFocusedApplicationWindow();
@@ -706,6 +745,16 @@ function installCurrentApplicationMenu(): void {
         );
       }
     },
+    reopenClosedTab() {
+      const browserWindow = getFocusedApplicationWindow();
+      if (browserWindow !== null) {
+        sendToApplicationRenderer(
+          browserWindow,
+          BB_DESKTOP_APP_COMMAND_CHANNEL,
+          "panel.reopenClosedTab",
+        );
+      }
+    },
     openSettings() {
       const browserWindow = getFocusedApplicationWindow();
       if (browserWindow !== null) {
@@ -720,6 +769,7 @@ function installCurrentApplicationMenu(): void {
       if (!(browserWindow instanceof BrowserWindow)) {
         return;
       }
+      desktopBrowserViewManager?.prepareWindowReload(browserWindow);
       if (ignoreCache) {
         browserWindow.webContents.reloadIgnoringCache();
       } else {
@@ -728,9 +778,6 @@ function installCurrentApplicationMenu(): void {
     },
     closeWindowOrSideTab(browserWindow) {
       if (browserWindow === undefined) {
-        // A focused detached DevTools window is the key window but never
-        // surfaces as a BaseWindow here; the native close role used to
-        // close it.
         closeFocusedDetachedDevTools();
         return;
       }
@@ -738,8 +785,6 @@ function installCurrentApplicationMenu(): void {
         !(browserWindow instanceof BrowserWindow) ||
         browserWindow === logViewerWindow
       ) {
-        // Windows that don't run the app preload can't answer the renderer
-        // round trip, so close them directly.
         browserWindow.close();
         return;
       }
@@ -755,12 +800,10 @@ function installCurrentApplicationMenu(): void {
       void openSetServerUrlDialog();
     },
     onServerMenuWillShow() {
-      // Refresh the Connect account list (60s-coalesced) so a menu opened
-      // after pairing or adding a machine shows current servers.
       connectServerSync?.onListRequested();
     },
     serverDaemonLogsMenuEnabled: shouldEnableServerDaemonLogsMenu(),
-    servers: buildMenuServerItems(),
+    servers: buildMenuServerItems(connectServers),
   });
 }
 
@@ -773,13 +816,13 @@ function setCurrentRuntime(runtime: DesktopRuntime | null): void {
   if (runtime === null) {
     stopSystemConfigSync();
   } else {
-    // Local runtime is up — pull the Connect account server list.
     connectServerSync?.onRuntimeReady();
   }
   refreshApplicationMenu();
   if (runtime?.ownership !== "spawned") {
     closeServerDaemonLogsWindow();
   }
+  sendDesktopInfoChanged();
 }
 
 function formatApiUrl(args: FetchSystemConfigArgs): string {
@@ -915,15 +958,6 @@ async function refreshSystemConfig(
   }
 }
 
-/**
- * Poll a remote server for keybindings and theme.
- *
- * The realtime socket is not an option here: a remote server authenticates the
- * desktop with the Electron session cookie, and only Electron's own network
- * stack sends it. So the app re-reads the config on start, when it becomes
- * active, and on a slow timer. A keybinding edit lands within a poll instead
- * of instantly.
- */
 function createRemoteSystemConfigSync(serverUrl: string): SystemConfigSync {
   function refresh(): void {
     void refreshSystemConfig({
@@ -960,7 +994,6 @@ function startSystemConfigSync(serverUrl: string): void {
   void refreshSystemConfig({ fetchImpl: fetch, serverUrl });
 }
 
-/** System config for a connect or custom target, with no local server. */
 function startRemoteSystemConfigSync(serverUrl: string): void {
   systemConfigSync?.stop();
   systemConfigSync = createRemoteSystemConfigSync(serverUrl);
@@ -984,10 +1017,6 @@ function registerApplicationWindow(browserWindow: DesktopBrowserWindow): void {
   });
 }
 
-/**
- * Attach to a compatible bb server on this Mac, or start one. The caller pins
- * the system config sync, because a remote target reads its config elsewhere.
- */
 async function ensureBuiltinRuntimeAttached(): Promise<boolean> {
   if (currentRuntime !== null) {
     return true;
@@ -1023,14 +1052,6 @@ async function ensureBuiltinRuntimeAttached(): Promise<boolean> {
   return runtime !== null;
 }
 
-/**
- * Mint and install the Connect session cookie for a remote server.
- *
- * The app's own machine credential is the fast path: it needs no local bb
- * server. A credential the gate refuses (revoked machine, unpaired account) is
- * dropped, and the local server mints the cookie instead — which is also the
- * first-launch path, before the app has enrolled.
- */
 async function authenticateConnectTarget(
   remoteServerUrl: string,
   isCurrent: () => boolean,
@@ -1054,16 +1075,12 @@ async function authenticateConnectTarget(
       );
       await clearCachedConnectCredential();
     } else if (cachedResult.code === "network") {
-      // The gate is unreachable. The local server would call the same gate, so
-      // starting one cannot help — and starting one is what this path avoids.
       return cachedResult;
     }
     cachedFailure = cachedResult;
   }
 
   if (!isCurrent()) {
-    // The app left this server while the gate call ran. Starting the local
-    // server now would undo the switch the user just made.
     return (
       cachedFailure ?? {
         code: "network",
@@ -1091,7 +1108,6 @@ async function authenticateConnectTarget(
     remoteServerUrl,
   });
   if (localResult.ok) {
-    // Enroll for next launch, so this target needs no local server again.
     void ensureDesktopMachineEnrolled();
   }
   return localResult;
@@ -1102,11 +1118,6 @@ async function clearCachedConnectCredential(): Promise<void> {
   await connectCredentialCache?.clear();
 }
 
-/**
- * Give this app its own connect machine credential, using the local server's
- * pairing secret once. Best effort: a failure only means the app keeps asking
- * the local server for session cookies.
- */
 function ensureDesktopMachineEnrolled(): void {
   const cache = connectCredentialCache;
   const localServerUrl = currentRuntime?.serverUrl;
@@ -1119,7 +1130,6 @@ function ensureDesktopMachineEnrolled(): void {
     return;
   }
   if (!cache.canPersist()) {
-    // Enrolling now would burn an account machine slot on every launch.
     createDesktopLogger().info(
       "[desktop] no OS keychain available — keeping the local bb server for bb Connect sessions",
     );
@@ -1142,22 +1152,11 @@ function ensureDesktopMachineEnrolled(): void {
   });
 }
 
-/**
- * Load the saved target and pin the session, config sync, and menu to it.
- *
- * The Server menu starts a switch without waiting, so two of these can overlap
- * and a slow one can finish last. Each run therefore claims a generation and
- * checks it after every wait: a run the user has already superseded stops
- * quietly instead of loading its own server over the newer one.
- */
 async function applyServerTarget(): Promise<void> {
   if (serverTargetStore === null) {
     return;
   }
   const target = serverTargetStore.getTarget();
-  // Retire the outgoing session before any await below. A renewal already in
-  // flight would otherwise still read itself as current while this switch
-  // runs, and its local-server fallback would undo the switch.
   connectSessionRenewal?.stop();
   serverTargetGeneration += 1;
   const generation = serverTargetGeneration;
@@ -1179,8 +1178,6 @@ async function applyServerTarget(): Promise<void> {
       return;
     }
     const localServerUrl = currentRuntime?.serverUrl ?? builtinServerUrl;
-    // Switching back from a remote target leaves that target's config poll
-    // running, so re-pin the sync to the local server here.
     startSystemConfigSync(localServerUrl);
     await loadBbApp(
       resolveDesktopWindowUrl({
@@ -1189,9 +1186,6 @@ async function applyServerTarget(): Promise<void> {
       }),
     );
   } else if (target.kind === "connect") {
-    // Connect servers load as plain web pages behind a session cookie. The
-    // cookie comes from the app's own machine credential when it has one, so
-    // no local bb server has to run.
     const result = await authenticateConnectTarget(
       target.server.url,
       isCurrent,
@@ -1217,22 +1211,41 @@ async function applyServerTarget(): Promise<void> {
       expiresAt: result.expiresAt,
       remoteServerUrl: target.server.url,
     });
-    bbAppLoaded = true;
-    await loadWindowUrl({ url: target.server.url });
+    const loaded = await loadRemoteServerTarget(target.server.url, isCurrent);
     if (!isCurrent()) {
       return;
     }
-    startRemoteSystemConfigSync(target.server.url);
+    if (!loaded) {
+      connectSessionRenewal?.stop();
+    }
   } else {
-    // A custom server is a plain web load with no bb Connect involved.
-    bbAppLoaded = true;
-    await loadWindowUrl({ url: target.url });
+    await loadRemoteServerTarget(target.url, isCurrent);
     if (!isCurrent()) {
       return;
     }
-    startRemoteSystemConfigSync(target.url);
   }
   refreshApplicationMenu();
+}
+
+async function loadRemoteServerTarget(
+  serverUrl: string,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  const loaded = await loadRemoteServerPage({
+    isCurrent,
+    loadStartupError,
+    loadUrl: loadWindowUrl,
+    logWarning: (message) => {
+      createDesktopLogger().warn(message);
+    },
+    serverUrl,
+  });
+  if (!loaded || !isCurrent()) {
+    return loaded;
+  }
+  bbAppLoaded = true;
+  startRemoteSystemConfigSync(serverUrl);
+  return true;
 }
 
 async function setActiveServerTarget(serverId: string): Promise<void> {
@@ -1556,6 +1569,9 @@ function registerDesktopUpdateIpc(): void {
   ipcMain.handle(BB_DESKTOP_GET_WINDOW_STATE_CHANNEL, (event) => {
     return getSenderDesktopWindowState(event);
   });
+  ipcMain.handle(BB_DESKTOP_OPEN_SERVER_DAEMON_LOGS_CHANNEL, async () => {
+    await openServerDaemonLogs();
+  });
   ipcMain.handle(BB_DESKTOP_CHECK_FOR_UPDATES_CHANNEL, async () => {
     await Promise.all([
       desktopUpdateService?.checkForUpdates() ?? Promise.resolve(null),
@@ -1571,10 +1587,6 @@ function registerDesktopUpdateIpc(): void {
       desktopAutoUpdateService.installUpdate();
       return;
     }
-    // finishQuit stops the local runtime, and it cannot be undone. Re-check
-    // that the swap can still succeed first: permissions may have changed
-    // since startup, and on Linux a failed swap would otherwise leave a shell
-    // with no runtime and no application file.
     const appImagePath = process.env.APPIMAGE?.trim() ?? "";
     if (
       process.platform === "linux" &&
@@ -1590,10 +1602,6 @@ function registerDesktopUpdateIpc(): void {
     await finishQuit();
     desktopAutoUpdateService.installUpdate();
   });
-  // Renderer pushes the bb theme preference so the NSWindow appearance —
-  // traffic lights and inactive title-bar chrome — follows an explicit bb
-  // theme or the OS when set to system. `themeSource` is app-global so a
-  // single assignment covers every BrowserWindow, including the log viewer.
   ipcMain.on(BB_DESKTOP_SET_THEME_CHANNEL, (_event, payload: unknown) => {
     const parsed = bbDesktopThemeSchema.safeParse(payload);
     if (!parsed.success) {
@@ -1612,9 +1620,6 @@ function registerDesktopUpdateIpc(): void {
       resolveApplicationWindow(event.sender)?.close();
     }
   });
-  // The in-app browser tab hands off the current address to the system
-  // browser. The URL originates from a possibly-hostile page, so only open
-  // well-formed `http(s)` URLs — never `file:`, custom schemes, or junk.
   ipcMain.on(
     BB_DESKTOP_OPEN_EXTERNAL_URL_CHANNEL,
     (_event, payload: unknown) => {
@@ -1640,13 +1645,6 @@ interface DesktopBrowserWindowLifecycleArgs {
   manager: DesktopBrowserViewManager;
 }
 
-/**
- * After the last `resize` tick of a burst, wait this long before revealing the
- * browser views again. Long enough for the renderer's post-resize relayout and
- * bounds push (~100-150ms on a large window) to land first, short enough that
- * the overlay does not feel missing once the window is at rest. Manual drags
- * usually end through the `resized` event instead and never wait this out.
- */
 const WINDOW_RESIZE_SETTLE_MS = 200;
 
 function registerDesktopBrowserWindowLifecycle({
@@ -1664,15 +1662,6 @@ function registerDesktopBrowserWindowLifecycle({
       manager.endWindowResize(browserWindow);
     }
   };
-  // During a native window resize the host chrome repaints at its own (much
-  // slower) cadence while the native browser views composite independently, so
-  // no bounds protocol keeps a view visually inside its panel mid-drag. Hide
-  // the views for the duration of the resize burst — the chrome's own panel
-  // background shows in their place, always exactly where the chrome painted
-  // it — and reveal them at the settled bounds afterwards. `resized` ends a
-  // manual drag immediately on mouse release; the settle timer covers
-  // programmatic resize streams (maximize animations, setBounds), which never
-  // emit `resized`.
   browserWindow.on("resize", () => {
     manager.beginWindowResize(browserWindow);
     if (resizeSettleTimer !== null) {
@@ -1704,6 +1693,7 @@ async function startOwnedRuntime(
     runtime: resolveBbAppProcessRuntime({
       env: process.env,
       isPackaged: app.isPackaged,
+      platform: process.platform,
       processExecPath: process.execPath,
     }),
   });
@@ -1785,16 +1775,6 @@ interface InitializeRuntimeArgs {
   userDataPath: string;
 }
 
-/**
- * Attaching to a bb this app did not start is invisible to the person using it,
- * so ask first. Local development stays silent, because attaching to a
- * `pnpm dev` server is the whole point there.
- *
- * `BB_DESKTOP_ATTACH_WITHOUT_PROMPT` exists for the packaged smoke test, which
- * points a packaged build at a stub server and has no one to click the dialog.
- * It is deliberately opt-in and never set by the app itself: the prompt is a
- * safety boundary, so suppressing it must be an explicit act by the harness.
- */
 function shouldAskBeforeAttaching(): boolean {
   if (!app.isPackaged || existingServerDialogPreloadPath === null) {
     return false;
@@ -1805,10 +1785,6 @@ function shouldAskBeforeAttaching(): boolean {
   return (process.env.BB_DESKTOP_APP_URL ?? "").trim().length === 0;
 }
 
-/**
- * Wait for the port to close after the other copy was told to stop. A new
- * server cannot bind a port that the old process still holds.
- */
 async function waitForServerToStop(serverUrl: string): Promise<boolean> {
   const deadline = Date.now() + FOREIGN_RUNTIME_STOP_TIMEOUT_MS;
   while (Date.now() <= deadline) {
@@ -1935,9 +1911,6 @@ async function initializeRuntime(args: InitializeRuntimeArgs): Promise<void> {
       serverUrl: existingProbe.serverUrl,
       userDataPath: null,
     });
-    // When attaching to an already-running server (the `pnpm dev` case) load the
-    // Vite dev URL if the launcher provided one, so the shell gets live source
-    // and HMR. The attached server still handles every API/WS request.
     await loadBbApp(
       resolveDesktopWindowUrl({
         env: process.env,
@@ -1978,7 +1951,11 @@ async function runDesktopApp(): Promise<void> {
     platform: process.platform,
   });
 
-  app.setName(app.isPackaged ? DESKTOP_RELEASE_INFO.applicationName : "bb-dev");
+  const applicationName = app.isPackaged
+    ? DESKTOP_RELEASE_INFO.applicationName
+    : "bb-dev";
+  app.setName(applicationName);
+  installAboutPanel(applicationName);
 
   if (!app.requestSingleInstanceLock()) {
     app.quit();
@@ -2011,7 +1988,6 @@ async function runDesktopApp(): Promise<void> {
   app.on("did-become-active", () => {
     void desktopUpdateService?.checkAfterActive();
     void desktopAutoUpdateService?.checkAfterActive();
-    // A remote target has no realtime socket for config changes.
     refreshRemoteSystemConfig?.();
     connectSessionRenewal?.renewIfDue();
   });
@@ -2040,10 +2016,9 @@ async function runDesktopApp(): Promise<void> {
   });
 
   await app.whenReady();
-  await clearPackagedSessionHttpCache({
-    isPackaged: app.isPackaged,
-    session: session.defaultSession,
-  });
+  if (app.isPackaged) {
+    await session.defaultSession.clearCache();
+  }
 
   const paths = createDesktopPathContext();
   const iconPath = resolveDesktopIconPath({
@@ -2095,11 +2070,6 @@ async function runDesktopApp(): Promise<void> {
   });
   assertPathExists({ label: "app icon", path: iconPath });
 
-  // Packaged builds must not call dock.setIcon: it replaces the bundle icon
-  // (already channel-correct via electron-builder) with a raw NSImage that
-  // bypasses the macOS appearance pipeline, so dark mode shows the light
-  // rendering. Dev runs still need it to show icon-dev.png instead of the
-  // stock Electron icon.
   if (
     process.platform === "darwin" &&
     app.dock !== undefined &&
@@ -2129,8 +2099,13 @@ async function runDesktopApp(): Promise<void> {
     onUnauthorized() {
       void clearCachedConnectCredential();
     },
+    onSkipped(reason) {
+      connectServerSyncSkipReason = reason;
+      refreshApplicationMenu();
+    },
     onServers(servers) {
       connectAccountServers = servers;
+      connectServerSyncSkipReason = null;
       const selected = serverTargetStore?.getConnectServer() ?? null;
       const synced = servers.find(
         (server) => server.handle === selected?.handle,
@@ -2170,7 +2145,7 @@ async function runDesktopApp(): Promise<void> {
     platform: desktopPlatform,
   });
   desktopUpdateService = createDesktopUpdateService({
-    channel: DESKTOP_UPDATE_CHANNEL,
+    channel: DESKTOP_RELEASE_CHANNEL,
     currentVersion: desktopVersion,
     enabled:
       desktopUpdateSupport.versionCheck &&
@@ -2257,7 +2232,15 @@ async function runDesktopApp(): Promise<void> {
     },
     displayWorkAreas: null,
     icon: nativeImage.createFromPath(iconPath),
+    isLinuxTransparent: shouldUseLinuxTransparentWindow({
+      argv: process.argv,
+      platform: process.platform,
+    }),
     isMac: process.platform === "darwin",
+    isLinuxFrameless: shouldUseLinuxFramelessWindow({
+      argv: process.argv,
+      platform: process.platform,
+    }),
     isQuitting() {
       return quitting;
     },
@@ -2280,10 +2263,6 @@ async function runDesktopApp(): Promise<void> {
   if (serverTargetStore.getTarget().kind === "builtin") {
     await initializeRuntime({ bridgePath, serverUrl, userDataPath });
   } else {
-    // A saved remote target needs no bb server on this Mac: the session cookie
-    // and the account server list both come from bb Connect. The local server
-    // starts only when the user switches back to "This Mac", or when this app
-    // has no credential of its own yet.
     await applyServerTarget();
     connectServerSync.syncNow().catch(() => {});
   }

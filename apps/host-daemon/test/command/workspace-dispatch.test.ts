@@ -129,13 +129,14 @@ describe("workspace command dispatch", () => {
 
     expect(result.outcome).toBe("available");
     expect(refreshed.state.statusReads).toBe(1);
-    expect(
-      harness.manager.get("env-late-git")?.workspace.isGitRepo,
-    ).toBe(true);
+    expect(harness.manager.get("env-late-git")?.workspace.isGitRepo).toBe(true);
   });
 
   it("covers workspace.pull_request", async () => {
     const harness = createHarness();
+    await harness.manager.replaceBaseShellEnv({
+      PATH: "/Users/test/.local/bin:/usr/bin",
+    });
     await harness.manager.ensureEnvironment({
       environmentId: "env-1",
       workspacePath: "/tmp/env-1",
@@ -170,6 +171,9 @@ describe("workspace command dispatch", () => {
       harness.dispatchOptions(),
     );
     expect(presentResult).toEqual({ outcome: "available", pullRequest });
+    expect(harness.workspaceState.pullRequestLookupShellPath).toBe(
+      "/Users/test/.local/bin:/usr/bin",
+    );
 
     harness.workspaceState.pullRequest = null;
     const absentResult = await dispatchOnlineRpcCommand(
@@ -185,8 +189,6 @@ describe("workspace command dispatch", () => {
     );
     expect(absentResult).toEqual({ outcome: "absent" });
 
-    // A failed gh lookup (missing binary, auth failure, timeout) must stay
-    // distinguishable from "checked and found no PR".
     harness.workspaceState.pullRequestLookupError =
       "gh pr view failed: authentication required";
     const unavailableResult = await dispatchOnlineRpcCommand(
@@ -246,6 +248,9 @@ describe("workspace command dispatch", () => {
 
   it("covers workspace.pull_request_action", async () => {
     const harness = createHarness({ isWorktree: true });
+    await harness.manager.replaceBaseShellEnv({
+      PATH: "/Users/test/.local/bin:/usr/bin",
+    });
     await harness.manager.ensureEnvironment({
       environmentId: "env-1",
       workspacePath: "/tmp/env-1",
@@ -268,6 +273,9 @@ describe("workspace command dispatch", () => {
     expect(harness.workspaceState.lastPullRequestAction).toEqual({
       operation: "ready",
     });
+    expect(harness.workspaceState.pullRequestActionShellPath).toBe(
+      "/Users/test/.local/bin:/usr/bin",
+    );
 
     await expect(
       dispatchCommand(

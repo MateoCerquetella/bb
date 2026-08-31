@@ -1,11 +1,11 @@
 import {
-  type CSSProperties,
   type MouseEvent as ReactMouseEvent,
   type Ref,
   type ReactNode,
 } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useAtom, useStore } from "jotai";
+import { flushSync } from "react-dom";
+import { atom, useAtom, useAtomValue, useStore } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { Link, matchPath, useLocation, useNavigate } from "react-router-dom";
 import type { ProjectResponse } from "@bb/server-contract";
@@ -21,6 +21,7 @@ import {
   useSidebarThreadTitleMentionResources,
 } from "@/components/thread/ThreadTitleMentions";
 import { AppCommandShortcutHint } from "@/components/commands/AppCommandShortcutHint";
+import { CommandPalette } from "@/components/commands/CommandPalette";
 import {
   resolveAutomationBreadcrumbs,
   resolveToolsAreaHeaderMeta,
@@ -40,7 +41,6 @@ import {
 } from "@/hooks/queries/thread-queries";
 import { useRouteState } from "@/hooks/useRouteState";
 import { getThreadDisplayTitle } from "@/lib/thread-title";
-import { applyResizeCursor, clearResizeCursor } from "@/lib/resizeCursor";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { ProjectPathDialog } from "@/components/dialogs/ProjectPathDialog";
 import { ProjectActionsMenu } from "@/components/project/ProjectActionsMenu";
@@ -50,7 +50,11 @@ import {
   PluginPanelHeaderCenter,
 } from "@/components/plugin/PluginPanelHeader";
 import { ThreadActionsProvider } from "@/components/thread/ThreadActionsProvider";
-import { usePluginSlots, type PluginNavPanelSlot } from "@/lib/plugin-slots";
+import {
+  usePluginNavPanelChrome,
+  type PluginNavPanelChrome,
+} from "@/lib/plugin-nav-panel-chrome";
+import type { PluginNavPanelSlot } from "@/lib/plugin-slots";
 import { createLocalStorageSyncStorage } from "@/lib/browser-storage";
 import {
   BROWSER_SIDEBAR_TRIGGER_INSET_CLASS,
@@ -64,6 +68,7 @@ import {
   shouldUseMacosDesktopChrome,
 } from "@/lib/bb-desktop";
 import { useDesktopWindowState } from "@/hooks/useDesktopWindowState";
+import { useServerDaemonLogsCommand } from "@/hooks/useServerDaemonLogsCommand";
 import {
   getLegacyProjectComposeRoutePath,
   getProjectSettingsRoutePath,
@@ -93,7 +98,6 @@ import { wsManager } from "@/lib/ws";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { findPaneByThread } from "@/lib/split-layout";
 import { applyThreadOpenToLayout } from "@/views/thread-detail/splitThreadNavigation";
-import { useThreadSplitsEnabled } from "@/hooks/useThreadSplitsEnabled";
 import { useAppSettingsRouteMemory } from "@/hooks/useAppSettingsRouteMemory";
 import { useSetRootComposeProjectId } from "@/lib/root-compose-selection";
 
@@ -126,12 +130,8 @@ const sidebarWidthAtom = atomWithStorage<number>(
   sidebarWidthStorage,
   { getOnInit: true },
 );
+const sidebarLiveWidthAtom = atom<number | null>(null);
 
-// Held in jotai (rather than as `useState` inside AppLayout) so that toggling
-// the sidebar does not re-render AppLayout — only the small bridge below
-// subscribes. AppLayout's `children` reference stays stable across toggles,
-// so React's element-reference bailout skips re-rendering the entire route
-// subtree (ThreadDetailView, the timeline, etc.).
 const sidebarOpenStorage = createLocalStorageSyncStorage<boolean>({
   parse: (storedValue, initialValue) => {
     if (storedValue === "true") return true;
@@ -148,26 +148,20 @@ const sidebarOpenAtom = atomWithStorage<boolean>(
 );
 
 interface SidebarStateBridgeProps {
-  className?: string;
   providerRef: Ref<HTMLDivElement>;
-  style: CSSProperties;
   children: ReactNode;
 }
 
 type SidebarResizeMouseEvent = ReactMouseEvent<HTMLDivElement>;
 type SidebarOpenChangeHandler = (open: boolean) => void;
 
-type SidebarProviderStyle = CSSProperties & {
-  "--sidebar-width": string;
-};
-
 function SidebarStateBridge({
-  className,
   providerRef,
-  style,
   children,
 }: SidebarStateBridgeProps) {
   const [open, setOpen] = useAtom(sidebarOpenAtom);
+  const sidebarWidth = useAtomValue(sidebarWidthAtom);
+  const sidebarLiveWidth = useAtomValue(sidebarLiveWidthAtom);
   const handleOpenChange = useCallback<SidebarOpenChangeHandler>(
     (nextOpen) => {
       setOpen(nextOpen);
@@ -182,8 +176,7 @@ function SidebarStateBridge({
   return (
     <SidebarProvider
       ref={providerRef}
-      style={style}
-      className={className}
+      width={`${sidebarLiveWidth ?? sidebarWidth}px`}
       data-testid="app-layout-root"
       open={open}
       onOpenChange={handleOpenChange}
@@ -195,8 +188,6 @@ function SidebarStateBridge({
 
 function resetSidebarResizeDocumentState(): void {
   document.body.classList.remove("sidebar-resizing");
-  clearResizeCursor();
-  document.body.style.userSelect = "";
 }
 
 interface SidebarTriggerOverlayProps {
@@ -204,21 +195,6 @@ interface SidebarTriggerOverlayProps {
   usesDesktopChrome: boolean;
 }
 
-/**
- * Sidebar toggle pinned at the app's top-left, rendered once at the layout root
- * — outside the sliding sidebar panel and the content inset — so it holds a
- * constant position while the sidebar animates in/out behind it, instead of
- * riding whichever container would otherwise host it. The collapsed page header
- * reserves its footprint as animated padding (see AppPageHeader), so toggling
- * slides the header content smoothly past it rather than snapping around a
- * toggle that mounts/unmounts in the header.
- *
- * Desktop chrome keeps the strip a window-drag region; only the button itself
- * is no-drag, so the title strip above and below the (shorter) button stays
- * draggable rather than becoming an oversized dead zone. When macOS traffic
- * lights are visible it offsets past them; in fullscreen, where the lights are
- * hidden, it uses the same small top-left inset as browser chrome.
- */
 function SidebarTriggerOverlay({
   reserveMacosTrafficLights,
   usesDesktopChrome,
@@ -244,9 +220,7 @@ function SidebarTriggerOverlay({
           MACOS_WINDOW_DRAG_CLASS,
         )}
       >
-        {/* The overlay's CHROME_ROW_CLASS box-centers the trigger on the shared
-            traffic-light axis, matching the sidebar arrows and page-title
-            header in desktop chrome. */}
+        {}
         <SidebarTrigger
           className={MACOS_CHROME_CONTROL_NO_DRAG_CLASS}
           {...triggerProps}
@@ -279,18 +253,14 @@ function SidebarTriggerOverlay({
   );
 }
 
-const routeTitles: Record<string, { title: string; subtitle?: string }> = {
+const routeTitles: Record<string, { title: string }> = {
   "/": { title: "bb" },
   "/settings": { title: "Settings" },
   "/automations": { title: "Automations" },
   "/skills": { title: "Skills" },
 };
 
-function resolveRouteTitle(
-  pathname: string,
-): { title: string; subtitle?: string } | undefined {
-  // The global settings page owns /settings/:section. Legacy plugin settings
-  // links still match briefly before AppRoutes redirects them to Tools.
+function resolveRouteTitle(pathname: string): { title: string } | undefined {
   if (matchPath(`${SETTINGS_ROUTE_PATH}/*`, pathname)) {
     return routeTitles[SETTINGS_ROUTE_PATH];
   }
@@ -298,24 +268,16 @@ function resolveRouteTitle(
 }
 
 interface AppHeaderProps {
-  /**
-   * True for routes that should use quiet chrome. This suppresses the center
-   * title; project-scoped quiet routes also get project actions on the right.
-   */
   usesProjectChromeStyle: boolean;
   usesDesktopChrome: boolean;
   isSettingsView: boolean;
   projectId?: string;
   project?: ProjectResponse;
-  /** Registered navPanel when this is a plugin panel route (design §5.2):
-   * the shared header shows plugin icon + title, plus the registration's
-   * `headerContent` as the actions. */
   pluginPanel?: PluginNavPanelSlot;
-  /** The panel route's splat remainder ("" at the panel root). */
+  pluginPanelChrome?: PluginNavPanelChrome;
   pluginPanelSubPath?: string;
   meta: {
     title: string;
-    subtitle?: string;
     breadcrumbs?: Array<{ label: string; to?: string }>;
   };
 }
@@ -327,6 +289,7 @@ function AppHeader({
   projectId,
   project,
   pluginPanel,
+  pluginPanelChrome,
   pluginPanelSubPath,
   meta,
 }: AppHeaderProps) {
@@ -334,10 +297,7 @@ function AppHeader({
   const headerTitle =
     headerBreadcrumbs || usesProjectChromeStyle ? undefined : meta.title;
 
-  const hasCenterContent =
-    Boolean(headerBreadcrumbs) ||
-    Boolean(headerTitle) ||
-    Boolean(meta.subtitle);
+  const hasCenterContent = Boolean(headerBreadcrumbs) || Boolean(headerTitle);
 
   const center = headerBreadcrumbs ? (
     <div className="min-w-0 flex-1">
@@ -346,17 +306,12 @@ function AppHeader({
         usesDesktopChrome={usesDesktopChrome}
       />
     </div>
-  ) : pluginPanel ? (
-    <PluginPanelHeaderCenter panel={pluginPanel} />
+  ) : pluginPanelChrome ? (
+    <PluginPanelHeaderCenter chrome={pluginPanelChrome} />
   ) : hasCenterContent ? (
     <div className="min-w-0 flex-1">
       {headerTitle ? (
         <p className="truncate text-sm font-semibold">{headerTitle}</p>
-      ) : null}
-      {meta.subtitle ? (
-        <p className="truncate text-xs text-muted-foreground">
-          {meta.subtitle}
-        </p>
       ) : null}
     </div>
   ) : null;
@@ -403,7 +358,6 @@ interface AppLayoutProps {
 export function AppLayout({ children }: AppLayoutProps) {
   const quickCreateProject = useQuickCreateProjectController();
   const isCompactViewport = useIsCompactViewport();
-  const threadSplitsEnabled = useThreadSplitsEnabled();
   const store = useStore();
   const contentShellRef = useRef<HTMLDivElement>(null);
   const providerRef = useRef<HTMLDivElement>(null);
@@ -470,10 +424,6 @@ export function AppLayout({ children }: AppLayoutProps) {
           projectId: signal.projectId,
           threadId: signal.threadId,
         });
-        if (!threadSplitsEnabled) {
-          void navigate(route);
-          return;
-        }
         const current = store.get(splitLayoutAtom);
         const alreadyOpen =
           current !== null &&
@@ -489,7 +439,7 @@ export function AppLayout({ children }: AppLayoutProps) {
         }
         void navigate(route, alreadyOpen ? { replace: true } : undefined);
       }),
-    [isCompactViewport, navigate, store, threadSplitsEnabled],
+    [isCompactViewport, navigate, store],
   );
   useAppCommandHandler("thread.new", () => {
     if (projectId !== undefined) {
@@ -504,18 +454,15 @@ export function AppLayout({ children }: AppLayoutProps) {
     void navigate(settingsRoutePath);
     return true;
   });
-  // Native server rail "+" tile.
   useAppCommandHandler("settings.openServers", () => {
     void navigate(`${SETTINGS_ROUTE_PATH}/servers`);
     return true;
   });
+  useServerDaemonLogsCommand();
   const archivedSectionId = isArchivedView
     ? new URLSearchParams(location.search).get("sectionId")
     : null;
-  // Plugin panel routes ride the shared header (design §5.2): icon + panel
-  // title in the center, the registration's headerContent as the actions.
-  const { navPanels } = usePluginSlots();
-  // Global settings routes swap the app sidebar for the settings sidebar.
+  const navPanelChrome = usePluginNavPanelChrome();
   const isGlobalSettingsView =
     matchPath(`${SETTINGS_ROUTE_PATH}/*`, location.pathname) !== null;
   const isGlobalToolsView = isToolsRoutePath(location.pathname);
@@ -523,13 +470,15 @@ export function AppLayout({ children }: AppLayoutProps) {
     PLUGIN_PANEL_ROUTE_PATH,
     location.pathname,
   );
-  const pluginPanel = pluginPanelMatch
-    ? navPanels.find(
+  const pluginPanelEntry = pluginPanelMatch
+    ? navPanelChrome.find(
         (candidate) =>
-          candidate.pluginId === pluginPanelMatch.params.pluginId &&
-          candidate.path === pluginPanelMatch.params.panelPath,
+          candidate.chrome.pluginId === pluginPanelMatch.params.pluginId &&
+          candidate.chrome.path === pluginPanelMatch.params.panelPath,
       )
     : undefined;
+  const pluginPanel = pluginPanelEntry?.panel ?? undefined;
+  const pluginPanelChrome = pluginPanelEntry?.chrome;
   const pluginPanelSubPath = pluginPanelMatch?.params["*"] ?? "";
   const sidebarNavigationQuery = useSidebarNavigation();
   const projects = useMemo(
@@ -555,14 +504,11 @@ export function AppLayout({ children }: AppLayoutProps) {
   });
   const hasThreadDetailBootstrapSettled =
     threadDetailBootstrapQuery.isSuccess || threadDetailBootstrapQuery.isError;
-  const [sidebarWidth, setSidebarWidth] = useAtom(sidebarWidthAtom);
   const [isSidebarResizing, setIsSidebarResizing] = useState(false);
   const startXRef = useRef(0);
   const startWidthRef = useRef(0);
-  const liveWidthRef = useRef(sidebarWidth);
+  const liveWidthRef = useRef(0);
   const animationFrameRef = useRef<number | null>(null);
-  // Plugin pages own the same page header + secondary-panel frame whether they
-  // render alone or in a split. Avoid drawing the global header above it.
   const showHeader = !isThreadView && !isRootView && pluginPanelMatch === null;
   const [desktopInfo] = useState(getBbDesktopInfo);
   const desktopWindowState = useDesktopWindowState();
@@ -571,10 +517,6 @@ export function AppLayout({ children }: AppLayoutProps) {
     desktopInfo,
     windowState: desktopWindowState,
   });
-  const sidebarProviderStyle: SidebarProviderStyle = {
-    "--sidebar-width": `${sidebarWidth}px`,
-  };
-
   const project = projectId
     ? projects?.find((candidate) => candidate.id === projectId)
     : undefined;
@@ -608,35 +550,24 @@ export function AppLayout({ children }: AppLayoutProps) {
     location.pathname,
     resourceRouteLabel,
   );
-  // Tools breadcrumbs feed only the document title now; the header's choice
-  // between the Extensions title and automation breadcrumbs lives in the pure
-  // (and tested) resolveToolsAreaHeaderMeta.
   const documentTitleBreadcrumbs = toolsBreadcrumbs ?? automationBreadcrumbs;
   const toolsAreaHeaderMeta = resolveToolsAreaHeaderMeta(
     location.pathname,
-    // Extensions graduated from experiments (#1360): the hub is always on.
-    true,
     resourceRouteLabel,
     location.search,
   );
-  const meta = isThreadView
-    ? {
-        title: thread ? getThreadDisplayTitle(thread) : "Thread",
-        subtitle: undefined,
-      }
-    : toolsAreaHeaderMeta?.kind === "extensions-title"
-      ? { title: toolsAreaHeaderMeta.title, subtitle: undefined }
+  const meta =
+    toolsAreaHeaderMeta?.kind === "extensions-title"
+      ? { title: toolsAreaHeaderMeta.title }
       : toolsAreaHeaderMeta?.kind === "breadcrumbs"
         ? {
             title: "",
-            subtitle: undefined,
             breadcrumbs: toolsAreaHeaderMeta.breadcrumbs,
           }
         : isArchivedView && projectId
           ? isProjectlessProjectId(projectId)
             ? {
                 title: "",
-                subtitle: undefined,
                 breadcrumbs: [
                   { label: "Threads", to: getRootComposeRoutePath() },
                   ...(archivedSectionName
@@ -647,7 +578,6 @@ export function AppLayout({ children }: AppLayoutProps) {
               }
             : {
                 title: "",
-                subtitle: undefined,
                 breadcrumbs: [
                   {
                     label: projectLabel ?? projectId,
@@ -659,7 +589,6 @@ export function AppLayout({ children }: AppLayoutProps) {
           : isSettingsView && projectId
             ? {
                 title: "",
-                subtitle: undefined,
                 breadcrumbs: [
                   {
                     label: projectLabel ?? projectId,
@@ -671,7 +600,6 @@ export function AppLayout({ children }: AppLayoutProps) {
             : projectId
               ? {
                   title: projectLabel ?? projectId,
-                  subtitle: undefined,
                 }
               : (resolveRouteTitle(location.pathname) ?? { title: "" });
 
@@ -706,11 +634,6 @@ export function AppLayout({ children }: AppLayoutProps) {
     const routeTitle = resolveRouteTitle(location.pathname)?.title;
     return routeTitle && routeTitle.length > 0 ? routeTitle : "BB";
   })();
-  // The sidebar list omits archived threads and side chats, so it can't answer
-  // whether the currently-viewed thread is blocked on input. Read the current
-  // thread's pending interactions directly (the thread view already warms this
-  // cache) so an in-view thread waiting on the user always lights the favicon,
-  // mirroring how the in-view unread signal covers every thread kind.
   const currentThreadPendingInteractionsQuery = useThreadPendingInteractions(
     threadId ?? "",
     { enabled: isThreadView && Boolean(threadId) },
@@ -734,12 +657,11 @@ export function AppLayout({ children }: AppLayoutProps) {
       event.preventDefault();
       setIsSidebarResizing(true);
       startXRef.current = event.clientX;
-      startWidthRef.current = liveWidthRef.current;
+      startWidthRef.current = store.get(sidebarWidthAtom);
+      liveWidthRef.current = startWidthRef.current;
       document.body.classList.add("sidebar-resizing");
-      applyResizeCursor("horizontal");
-      document.body.style.userSelect = "none";
     },
-    [],
+    [store],
   );
 
   const finishSidebarResize = useCallback(() => {
@@ -747,25 +669,23 @@ export function AppLayout({ children }: AppLayoutProps) {
       window.cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
-    providerRef.current?.style.setProperty(
-      "--sidebar-width",
-      `${liveWidthRef.current}px`,
-    );
+    flushSync(() => {
+      store.set(sidebarWidthAtom, liveWidthRef.current);
+      store.set(sidebarLiveWidthAtom, null);
+    });
     dispatchBrowserViewBoundsSync();
-    setSidebarWidth(liveWidthRef.current);
     setIsSidebarResizing(false);
     resetSidebarResizeDocumentState();
-  }, [setSidebarWidth]);
+  }, [store]);
 
   useEffect(() => {
     if (!isSidebarResizing) return;
 
     const applyLiveWidth = () => {
       animationFrameRef.current = null;
-      providerRef.current?.style.setProperty(
-        "--sidebar-width",
-        `${liveWidthRef.current}px`,
-      );
+      flushSync(() => {
+        store.set(sidebarLiveWidthAtom, liveWidthRef.current);
+      });
       dispatchBrowserViewBoundsSync();
     };
 
@@ -797,13 +717,10 @@ export function AppLayout({ children }: AppLayoutProps) {
         window.cancelAnimationFrame(animationFrameRef.current);
         animationFrameRef.current = null;
       }
+      store.set(sidebarLiveWidthAtom, null);
       resetSidebarResizeDocumentState();
     };
-  }, [finishSidebarResize, isSidebarResizing]);
-
-  useEffect(() => {
-    liveWidthRef.current = sidebarWidth;
-  }, [sidebarWidth]);
+  }, [finishSidebarResize, isSidebarResizing, store]);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -814,11 +731,7 @@ export function AppLayout({ children }: AppLayoutProps) {
     <ProjectActionsProvider>
       <ThreadTitleMentionResourcesProvider {...titleMentionResources}>
         <ThreadActionsProvider>
-          <IframeDragGuardOverlay active={isSidebarResizing} />
-          <SidebarStateBridge
-            providerRef={providerRef}
-            style={sidebarProviderStyle}
-          >
+          <SidebarStateBridge providerRef={providerRef}>
             <AppLayoutSidebar
               mode={
                 isGlobalSettingsView
@@ -838,7 +751,7 @@ export function AppLayout({ children }: AppLayoutProps) {
               <div
                 ref={contentShellRef}
                 data-testid="app-layout-content-shell"
-                className="relative flex h-full min-h-0 min-w-0 w-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[env(safe-area-inset-bottom)] pl-[env(safe-area-inset-left)]"
+                className="relative flex h-full min-h-0 min-w-0 w-full flex-col pt-[env(safe-area-inset-top)] pr-[env(safe-area-inset-right)] pb-[var(--bb-safe-area-bottom,env(safe-area-inset-bottom))] pl-[env(safe-area-inset-left)]"
               >
                 {showHeader ? (
                   <AppHeader
@@ -850,6 +763,7 @@ export function AppLayout({ children }: AppLayoutProps) {
                     projectId={projectId}
                     project={project}
                     pluginPanel={pluginPanel}
+                    pluginPanelChrome={pluginPanelChrome}
                     pluginPanelSubPath={pluginPanelSubPath}
                     meta={meta}
                   />
@@ -864,6 +778,14 @@ export function AppLayout({ children }: AppLayoutProps) {
               usesDesktopChrome={usesDesktopChrome}
             />
           </SidebarStateBridge>
+          <IframeDragGuardOverlay
+            active={isSidebarResizing}
+            cursor="col-resize"
+          />
+          <CommandPalette
+            threadId={threadId ?? null}
+            projectId={projectId ?? null}
+          />
           <ProjectPathDialog
             target={quickCreateProject.projectPathDialog.target}
             pending={quickCreateProject.isCreating}

@@ -48,10 +48,6 @@ function setup(): { db: DbConnection; thread: Thread } {
   return { db, thread };
 }
 
-/**
- * Turn 1 establishes head state (goal, todos, a still-running workflow), then
- * `turns - 1` further turns bury it far above any budgeted window.
- */
 function seedThreadWithEarlyHeadState(
   db: DbConnection,
   thread: Thread,
@@ -70,6 +66,7 @@ function seedThreadWithEarlyHeadState(
       scope: threadScope(),
       itemId: null,
       itemKind: null,
+      parentToolCallId: null,
       data: JSON.stringify({
         direction: "outbound",
         source: "tell",
@@ -90,6 +87,7 @@ function seedThreadWithEarlyHeadState(
       providerThreadId,
       itemId: null,
       itemKind: null,
+      parentToolCallId: null,
       data: JSON.stringify({}),
     });
     events.push({
@@ -100,6 +98,7 @@ function seedThreadWithEarlyHeadState(
       providerThreadId,
       itemId: null,
       itemKind: null,
+      parentToolCallId: null,
       data: JSON.stringify({ clientRequestId }),
     });
 
@@ -111,6 +110,7 @@ function seedThreadWithEarlyHeadState(
         scope: threadScope(),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           threadId: thread.id,
           providerThreadId,
@@ -127,29 +127,22 @@ function seedThreadWithEarlyHeadState(
         type: "item/completed",
         scope: turnScope(turnId),
         providerThreadId,
-        itemId: "todo-1",
-        itemKind: "toolCall",
+        itemId: "plan-1",
+        itemKind: "planSteps",
+        parentToolCallId: null,
         data: JSON.stringify({
+          providerThreadId,
           item: {
-            type: "toolCall",
-            id: "todo-1",
-            tool: "TodoWrite",
-            arguments: {
-              todos: [
-                {
-                  content: "Ship the thing",
-                  status: "in_progress",
-                  activeForm: "Shipping the thing",
-                },
-                { content: "Write the docs", status: "pending" },
-              ],
-            },
+            type: "planSteps",
+            id: "plan-1",
+            steps: [
+              { step: "Shipping the thing", status: "active" },
+              { step: "Write the docs", status: "pending" },
+            ],
             status: "completed",
-            result: "ok",
           },
         }),
       });
-      // A workflow started early and never completed: the banner must survive.
       events.push({
         threadId: thread.id,
         sequence: (sequence += 1),
@@ -158,6 +151,7 @@ function seedThreadWithEarlyHeadState(
         providerThreadId,
         itemId: "wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId,
           item: {
@@ -184,6 +178,7 @@ function seedThreadWithEarlyHeadState(
         providerThreadId,
         itemId: `${turnId}-item-${item}`,
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             type: "agentMessage",
@@ -207,9 +202,6 @@ const baseOptions = {
 
 describe("timeline head state under a budgeted window", () => {
   it("keeps goal, todos, and a running workflow when the budget excludes the turn that set them", () => {
-    // Head-state banners describe the head of the thread but are extracted by
-    // scanning the window. A budgeted window starts well after turn 1 here, so
-    // without thread-scoped lookups these silently disappear mid-session.
     const { db, thread } = setup();
     seedThreadWithEarlyHeadState(db, thread, 12, 60);
 
@@ -222,7 +214,6 @@ describe("timeline head state under a budgeted window", () => {
       eventBudget: 100,
     });
 
-    // The budget really did cut the window, otherwise this proves nothing.
     expect(budgeted.timelinePage.returnedSegmentCount).toBeLessThan(
       unbudgeted.timelinePage.returnedSegmentCount,
     );
@@ -251,6 +242,7 @@ describe("timeline head state under a budgeted window", () => {
       scope: threadScope(),
       itemId: null,
       itemKind: null,
+      parentToolCallId: null,
       data: JSON.stringify({
         direction: "outbound",
         source: "tell",

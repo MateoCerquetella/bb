@@ -63,6 +63,10 @@ export type {
   WorkspaceOpenTargetRuntime,
 } from "./types.js";
 
+export interface WorkspaceOpenTargetRuntimeOptions {
+  shellPath?: string;
+}
+
 const execFileAsync = promisify(execFile);
 const DESKTOP_APP_TARGET_ID_PREFIX = "desktop-app:";
 const MAC_APP_TARGET_ID_PREFIX = "mac-app:";
@@ -364,6 +368,16 @@ function parseDesktopEntryValue(line: string): [string, string] | null {
   ];
 }
 
+const LINUX_WORKSPACE_APPLICATION_CATEGORIES = new Set([
+  "FileManager",
+  "TerminalEmulator",
+  "TextEditor",
+]);
+
+function parseDesktopEntryList(value: string | undefined): string[] {
+  return value?.split(";").filter(Boolean) ?? [];
+}
+
 function parseLinuxDesktopApplication(
   desktopFilePath: string,
   content: string,
@@ -398,7 +412,14 @@ function parseLinuxDesktopApplication(
 
   const label = fields.get("Name");
   const exec = fields.get("Exec");
-  if (!label || !exec) {
+  const categories = parseDesktopEntryList(fields.get("Categories"));
+  if (
+    !label ||
+    !exec ||
+    !categories.some((category) =>
+      LINUX_WORKSPACE_APPLICATION_CATEGORIES.has(category),
+    )
+  ) {
     return null;
   }
 
@@ -485,8 +506,14 @@ async function execInvocation(
   });
 }
 
-function createDefaultRuntime(): WorkspaceOpenTargetRuntime {
+export function createWorkspaceOpenTargetRuntime(
+  options: WorkspaceOpenTargetRuntimeOptions = {},
+): WorkspaceOpenTargetRuntime {
   const homeDirectory = os.homedir();
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...(options.shellPath !== undefined ? { PATH: options.shellPath } : {}),
+  };
   return {
     applicationDirectories: [
       "/Applications",
@@ -498,7 +525,7 @@ function createDefaultRuntime(): WorkspaceOpenTargetRuntime {
       "/usr/local/share/applications",
       path.join(homeDirectory, ".local/share/applications"),
     ],
-    env: process.env,
+    env,
     execFile: defaultExecFile,
     platform: process.platform,
   };
@@ -1015,11 +1042,27 @@ async function isExecutableAvailable(
   runtime: WorkspaceOpenTargetRuntime,
 ): Promise<boolean> {
   try {
+    await runtime.execFile("which", [executable], { env: runtime.env });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isServiceExecutableAvailable(
+  executable: string,
+  runtime: WorkspaceOpenTargetRuntime,
+): Promise<boolean> {
+  try {
     await runtime.execFile("which", [executable]);
     return true;
   } catch {
     return false;
   }
+}
+
+function isMacServiceExecutable(executable: string): boolean {
+  return executable === "open" || executable === "osascript";
 }
 
 async function resolveMacBundledExecutable(
@@ -1049,7 +1092,7 @@ async function resolveMacBundledExecutable(
   return {
     file: executablePath,
     argsPrefix: bundledExecutable.toArgsPrefix?.(appPath) ?? [],
-    env: bundledExecutable.toEnv?.(runtime.env),
+    env: bundledExecutable.toEnv?.(runtime.env) ?? runtime.env,
   };
 }
 
@@ -1059,8 +1102,16 @@ async function resolveMacCommandExecutable(
   runtime: WorkspaceOpenTargetRuntime,
 ): Promise<ResolvedMacCommandExecutable | null> {
   for (const candidate of [command, ...(command.fallbackExecutables ?? [])]) {
-    if (await isExecutableAvailable(candidate.executable, runtime)) {
-      return { file: candidate.executable, argsPrefix: [] };
+    const serviceExecutable = isMacServiceExecutable(candidate.executable);
+    const available = serviceExecutable
+      ? await isServiceExecutableAvailable(candidate.executable, runtime)
+      : await isExecutableAvailable(candidate.executable, runtime);
+    if (available) {
+      return {
+        file: candidate.executable,
+        argsPrefix: [],
+        ...(serviceExecutable ? {} : { env: runtime.env }),
+      };
     }
     if (candidate.bundledExecutable !== undefined) {
       const resolved = await resolveMacBundledExecutable(
@@ -1207,7 +1258,9 @@ async function maybeResolveMacFileOpenInvocation(
     return null;
   }
 
-  if (!(await isExecutableAvailable(fileOpenCommand.executable, runtime))) {
+  if (
+    !(await isServiceExecutableAvailable(fileOpenCommand.executable, runtime))
+  ) {
     return null;
   }
 
@@ -1266,9 +1319,7 @@ async function resolveXcodeXedPath(
         return selectedXedPath;
       }
     }
-  } catch {
-    // Fall through to the app bundle below.
-  }
+  } catch {}
 
   const appPath = await findMacApplicationPath(definition, runtime);
   if (appPath === null) {
@@ -1348,6 +1399,7 @@ async function maybeResolveXcodeOpenInvocation(
         : ["--line", String(args.lineNumber)]),
       args.existingPath.path,
     ],
+    env: runtime.env,
   };
 }
 
@@ -1539,6 +1591,7 @@ async function resolvePlatformDefaultOpenInvocation(
   return {
     file: executable,
     args: [args.existingPath.path],
+    env: runtime.env,
   };
 }
 
@@ -1561,6 +1614,7 @@ async function resolvePlatformFileManagerOpenInvocation(
   return {
     file: executable,
     args: [openPath],
+    env: runtime.env,
   };
 }
 
@@ -1598,12 +1652,15 @@ async function resolvePlatformTerminalOpenInvocation(
     });
   }
 
-  return buildLinuxTerminalOpenInvocation(executable, {
-    columnNumber: args.columnNumber,
-    lineNumber: args.lineNumber,
-    path: args.existingPath.path,
-    pathType: args.existingPath.type,
-  });
+  return {
+    ...buildLinuxTerminalOpenInvocation(executable, {
+      columnNumber: args.columnNumber,
+      lineNumber: args.lineNumber,
+      path: args.existingPath.path,
+      pathType: args.existingPath.type,
+    }),
+    env: runtime.env,
+  };
 }
 
 async function resolvePlatformTerminalRemoteSshOpenInvocation(
@@ -1625,7 +1682,10 @@ async function resolvePlatformTerminalRemoteSshOpenInvocation(
     });
   }
 
-  return buildLinuxTerminalRemoteSshInvocation(executable, args);
+  return {
+    ...buildLinuxTerminalRemoteSshInvocation(executable, args),
+    env: runtime.env,
+  };
 }
 
 function splitDesktopExec(exec: string): string[] {
@@ -1765,10 +1825,13 @@ async function resolveLinuxDesktopApplicationOpenInvocation(
       message: `Workspace open target is unavailable: ${args.desktopFileId}`,
     });
   }
-  return buildLinuxDesktopApplicationInvocation(
-    application,
-    args.existingPath.path,
-  );
+  return {
+    ...buildLinuxDesktopApplicationInvocation(
+      application,
+      args.existingPath.path,
+    ),
+    env: runtime.env,
+  };
 }
 
 async function resolvePlatformOpenInvocation(
@@ -1937,11 +2000,14 @@ export async function openPathInTargetWithRuntime(
 export async function listWorkspaceOpenTargets(
   options: ListWorkspaceOpenTargetsOptions = {},
 ): Promise<WorkspaceOpenTarget[]> {
-  return listWorkspaceOpenTargetsWithRuntime(createDefaultRuntime(), options);
+  return listWorkspaceOpenTargetsWithRuntime(
+    createWorkspaceOpenTargetRuntime(),
+    options,
+  );
 }
 
 export async function openPathInTarget(
   args: OpenPathInTargetArgs,
 ): Promise<void> {
-  await openPathInTargetWithRuntime(args, createDefaultRuntime());
+  await openPathInTargetWithRuntime(args, createWorkspaceOpenTargetRuntime());
 }

@@ -1,14 +1,16 @@
 import type { ThreadTimelineGoal } from "@bb/domain";
-import { PromptStackCard } from "@/components/promptbox/banner/PromptStackCard";
+import {
+  PROMPT_STACK_CARD_ROW_HEIGHT,
+  PromptStackCard,
+} from "@/components/promptbox/banner/PromptStackCard";
 import {
   activityIconClass,
   activityRowClass,
   activityTextClass,
-} from "@/components/ui/activity-row-styles";
+} from "@bb/shared-ui/activity-row-styles";
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
 
-const GOAL_CARD_ROW_HEIGHT = 32;
 const GOAL_HEADER_GROUP_CLASS = activityRowClass(
   "active",
   "flex w-full items-stretch rounded-none px-0 py-0",
@@ -40,7 +42,7 @@ function formatTokenUsage(goal: ThreadTimelineGoal): string {
   return `${used} / ${goal.tokenBudget.toLocaleString()} tokens`;
 }
 
-export interface ThreadGoalCardProps {
+interface ThreadGoalCardProps {
   goal: ThreadTimelineGoal | null;
   isClearPending?: boolean;
   isExpanded: boolean;
@@ -51,14 +53,6 @@ export interface ThreadGoalCardProps {
 const BODY_ID = "thread-goal-card-body";
 const TOGGLE_ID = "thread-goal-card-toggle";
 
-/**
- * Collapsible goal card for the prompt stack above the composer. Surfaces the
- * provider's current durable objective (Codex `thread/goal/*` events projected
- * onto the timeline). Collapsed: goal state. Expanded: full objective +
- * token/time usage. Mirrors the ThreadPromptModeCard header/body split. Only
- * rendered while the goal is active — once the provider marks it complete (or
- * paused / budget-limited) it drops out of the prompt stack.
- */
 export function ThreadGoalCard({
   goal,
   isClearPending = false,
@@ -74,7 +68,7 @@ export function ThreadGoalCard({
     <PromptStackCard
       ariaLabel="Goal"
       className="overflow-hidden"
-      style={{ minHeight: GOAL_CARD_ROW_HEIGHT }}
+      style={{ minHeight: PROMPT_STACK_CARD_ROW_HEIGHT }}
     >
       <div
         role="group"

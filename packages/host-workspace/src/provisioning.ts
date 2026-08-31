@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   DEFAULT_ENV_SETUP_SCRIPT_NAME,
+  DEFAULT_ENV_TEARDOWN_SCRIPT_NAME,
   WORKTREE_INCLUDE_FILE_NAME,
   createTerminalOutputLineReader,
   readTerminalOutputLines,
@@ -16,6 +18,7 @@ import {
 import { Workspace } from "./workspace.js";
 import { tryWithCheckoutMutationLock } from "./checkout-mutation-lock.js";
 import {
+  getGitCommonDir,
   pathExists,
   readDefaultBranch,
   readGitRepositoryState,
@@ -23,6 +26,8 @@ import {
   WorkspaceError,
   type GitCommandResult,
 } from "./git.js";
+import { withGitRefMutationLock } from "./git-ref-mutation-lock.js";
+import { ProcessLocalQueuedLockTimeoutError } from "./process-local-queued-lock.js";
 import {
   runGitWithWorktreeMetadataLock,
   withWorktreeMetadataLock,
@@ -42,54 +47,106 @@ type EmitStepArgs = {
   metadata?: ProvisioningTranscriptEntry["metadata"];
 };
 
-export interface CreateWorkspaceArgs {
-  /** Local repo path for worktrees */
+interface CreateWorkspaceArgs {
   sourcePath: string;
   targetPath: string;
-  /** Name of the new branch to create on the workspace. */
   branchName: string;
-  /**
-   * Branch to base the new branch on (start point for git worktree add / git
-   * checkout). Pass `null` to use the source's default branch (resolved by
-   * the daemon).
-   */
   baseBranch: string | null;
-  /** Setup script timeout in ms. Controlled by the server. */
   timeoutMs: number;
-  /** Resolved user-shell PATH for the setup script. */
-  setupPath?: string;
+  shellPath?: string;
   onProgress?: ProgressCallback;
   pruneEmptyParent?: boolean;
   signal?: AbortSignal;
 }
 
-export interface RunSetupScriptArgs {
+interface RunSetupScriptArgs {
+  workspacePath: string;
+  timeoutMs: number;
+  shellPath?: string;
+  onProgress?: ProgressCallback;
+  signal?: AbortSignal;
+}
+
+interface RunTeardownScriptArgs {
   workspacePath: string;
   timeoutMs: number;
   /** Resolved user-shell PATH. Falls back to the daemon process PATH. */
-  setupPath?: string;
+  shellPath?: string;
   onProgress?: ProgressCallback;
-  signal?: AbortSignal;
 }
 
-export interface RemoveWorktreeArgs {
+interface RemoveWorktreeArgs {
   path: string;
+  /** Teardown script timeout in ms. Controlled by the server. */
+  timeoutMs: number;
   force?: boolean;
   pruneEmptyParent?: boolean;
+  shellPath?: string;
+  onProgress?: ProgressCallback;
 }
 
-interface SetupScriptCommand {
+interface LifecycleScriptCommand {
   command: string;
   args: string[];
   text: string;
 }
 
-interface BuildSetupScriptCommandArgs {
+interface BuildLifecycleScriptCommandArgs {
   platform: NodeJS.Platform;
   scriptPath: string;
 }
 
+interface RunLifecycleScriptArgs extends RunSetupScriptArgs {
+  kind: "setup" | "teardown";
+  scriptName: string;
+}
+
 const SETUP_SCRIPT_ABORT_KILL_GRACE_MS = 2_000;
+const REMOTE_BASE_FETCH_TIMEOUT_MS = 60_000;
+const REMOTE_REF_LOCK_RETRY_INTERVAL_MS = 200;
+const REMOTE_REF_LOCK_RETRY_TIMEOUT_MS = 2_000;
+
+type ConcurrentRemoteRefUpdateErrorKind = "stale-value" | "lock-file-exists";
+
+function classifyConcurrentRemoteRefUpdateError(
+  error: unknown,
+  remoteRef: string,
+): ConcurrentRemoteRefUpdateErrorKind | null {
+  if (
+    !(error instanceof WorkspaceError) ||
+    error.code !== "git_command_failed"
+  ) {
+    return null;
+  }
+
+  if (
+    error.message.endsWith(
+      `error: fetching ref ${remoteRef} failed: reference already exists`,
+    )
+  ) {
+    return "lock-file-exists";
+  }
+
+  const lockFailurePrefix = `cannot lock ref '${remoteRef}': `;
+  const lockFailureDetail = error.message.split(lockFailurePrefix)[1];
+  if (lockFailureDetail === undefined) {
+    return null;
+  }
+
+  if (
+    /^is at [0-9a-f]+ but expected [0-9a-f]+(?:\n|$)/u.test(lockFailureDetail)
+  ) {
+    return "stale-value";
+  }
+  if (
+    /^Unable to create '.+\.lock': File exists\.(?:\n|$)/u.test(
+      lockFailureDetail,
+    )
+  ) {
+    return "lock-file-exists";
+  }
+  return null;
+}
 
 function emitProgress(
   onProgress: ProgressCallback | undefined,
@@ -154,12 +211,15 @@ function emitGitOutput(
 async function ensureExistingWorkspaceMatches(
   targetPath: string,
   branchName: string,
+  shellPath: string | undefined,
 ): Promise<boolean> {
   if (!(await pathExists(targetPath))) {
     return false;
   }
 
-  const workspace = new Workspace(targetPath);
+  const workspace = new Workspace(targetPath, {
+    ...(shellPath !== undefined ? { shellPath } : {}),
+  });
   if (!(await workspace.isGitRepo)) {
     throw new WorkspaceError(
       "path_exists",
@@ -183,16 +243,17 @@ async function ensureWorkspaceParentDirectory(
   await fs.mkdir(path.dirname(targetPath), { recursive: true });
 }
 
-async function resolveSetupScriptPath(
+async function resolveLifecycleScriptPath(
   workspacePath: string,
+  scriptName: string,
 ): Promise<string | null> {
-  const scriptPath = path.join(workspacePath, DEFAULT_ENV_SETUP_SCRIPT_NAME);
+  const scriptPath = path.join(workspacePath, scriptName);
   return (await pathExists(scriptPath)) ? scriptPath : null;
 }
 
 export function buildSetupScriptCommand(
-  args: BuildSetupScriptCommandArgs,
-): SetupScriptCommand {
+  args: BuildLifecycleScriptCommandArgs,
+): LifecycleScriptCommand {
   if (args.platform === "win32") {
     throw new WorkspaceError(
       "setup_script_failed",
@@ -207,6 +268,21 @@ export function buildSetupScriptCommand(
   };
 }
 
+function buildTeardownScriptCommand(args: BuildLifecycleScriptCommandArgs) {
+  if (args.platform === "win32") {
+    throw new WorkspaceError(
+      "setup_script_failed",
+      `POSIX shell teardown scripts are not supported on Windows: ${DEFAULT_ENV_TEARDOWN_SCRIPT_NAME}`,
+    );
+  }
+
+  return {
+    command: "env",
+    args: ["bash", args.scriptPath],
+    text: `env bash ${DEFAULT_ENV_TEARDOWN_SCRIPT_NAME}`,
+  };
+}
+
 function createProvisionCancelledError(cause?: unknown): WorkspaceError {
   return new WorkspaceError(
     "provision_cancelled",
@@ -215,7 +291,7 @@ function createProvisionCancelledError(cause?: unknown): WorkspaceError {
   );
 }
 
-function throwIfProvisionAborted(signal: AbortSignal | undefined): void {
+export function throwIfProvisionAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) {
     throw createProvisionCancelledError(signal.reason);
   }
@@ -227,16 +303,41 @@ function isProvisionAbortError(error: unknown): boolean {
   );
 }
 
+async function waitForProvisionRetry(
+  delayMs: number,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  try {
+    await delay(
+      delayMs,
+      undefined,
+      signal !== undefined ? { signal } : undefined,
+    );
+  } catch (error) {
+    if (signal?.aborted) {
+      throw createProvisionCancelledError(error);
+    }
+    throw error;
+  }
+}
+
 async function resolveRemoteBaseBranch(
   sourcePath: string,
   baseBranch: string,
+  shellPath: string | undefined,
   signal: AbortSignal | undefined,
 ): Promise<{ remote: string; branch: string } | null> {
   if (!baseBranch.includes("/")) {
     return null;
   }
 
-  const remotes = (await runGit(["remote"], { cwd: sourcePath, signal })).stdout
+  const remotes = (
+    await runGit(["remote"], {
+      cwd: sourcePath,
+      signal,
+      ...(shellPath !== undefined ? { shellPath } : {}),
+    })
+  ).stdout
     .split("\n")
     .map((remote) => remote.trim())
     .filter(Boolean);
@@ -258,15 +359,18 @@ async function resolveRemoteBaseBranch(
   };
 }
 
-async function fetchRemoteBaseBranch(args: {
+export async function fetchRemoteBaseBranch(args: {
   sourcePath: string;
   baseBranch: string;
+  fetchTimeoutMs: number;
   onProgress: ProgressCallback | undefined;
+  shellPath: string | undefined;
   signal: AbortSignal | undefined;
 }): Promise<void> {
   const remoteBase = await resolveRemoteBaseBranch(
     args.sourcePath,
     args.baseBranch,
+    args.shellPath,
     args.signal,
   );
   if (!remoteBase) {
@@ -282,12 +386,77 @@ async function fetchRemoteBaseBranch(args: {
     startedAt,
   });
 
-  const refspec = `+refs/heads/${remoteBase.branch}:refs/remotes/${remoteBase.remote}/${remoteBase.branch}`;
+  const remoteRef = `refs/remotes/${remoteBase.remote}/${remoteBase.branch}`;
+  const refspec = `+refs/heads/${remoteBase.branch}:${remoteRef}`;
+  const gitProcessOptions = {
+    ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
+    ...(args.signal !== undefined ? { signal: args.signal } : {}),
+  };
   try {
-    await runGit(["fetch", "--quiet", remoteBase.remote, refspec], {
-      cwd: args.sourcePath,
-      signal: args.signal,
-    });
+    throwIfProvisionAborted(args.signal);
+    const commonDir = await getGitCommonDir(args.sourcePath, gitProcessOptions);
+    const fetchBaseBranch = async (): Promise<void> => {
+      try {
+        await withGitRefMutationLock(
+          commonDir,
+          () =>
+            runGit(["fetch", "--quiet", remoteBase.remote, refspec], {
+              cwd: args.sourcePath,
+              ...gitProcessOptions,
+              env: { GIT_TERMINAL_PROMPT: "0", LC_ALL: "C" },
+              timeoutMs: args.fetchTimeoutMs,
+            }),
+          args.signal !== undefined ? { signal: args.signal } : {},
+        );
+      } catch (error) {
+        if (args.signal?.aborted && !isProvisionAbortError(error)) {
+          throw createProvisionCancelledError(error);
+        }
+        if (error instanceof ProcessLocalQueuedLockTimeoutError) {
+          throw new WorkspaceError(
+            "git_command_timeout",
+            `Timed out waiting to fetch ${args.baseBranch} because another Git ref update is still running`,
+            { cause: error },
+          );
+        }
+        throw error;
+      }
+    };
+    let staleValueRetried = false;
+    let lockFileRetryDeadline: number | undefined;
+    while (true) {
+      try {
+        await fetchBaseBranch();
+        break;
+      } catch (error) {
+        const errorKind = classifyConcurrentRemoteRefUpdateError(
+          error,
+          remoteRef,
+        );
+        if (errorKind === null) {
+          throw error;
+        }
+        if (errorKind === "stale-value") {
+          if (staleValueRetried) {
+            throw error;
+          }
+          staleValueRetried = true;
+          throwIfProvisionAborted(args.signal);
+          continue;
+        }
+
+        lockFileRetryDeadline ??= Date.now() + REMOTE_REF_LOCK_RETRY_TIMEOUT_MS;
+        const remainingRetryMs = lockFileRetryDeadline - Date.now();
+        if (remainingRetryMs <= 0) {
+          throw error;
+        }
+        throwIfProvisionAborted(args.signal);
+        await waitForProvisionRetry(
+          Math.min(REMOTE_REF_LOCK_RETRY_INTERVAL_MS, remainingRetryMs),
+          args.signal,
+        );
+      }
+    }
     emitStep({
       onProgress: args.onProgress,
       key: "git-fetch-completed",
@@ -317,12 +486,22 @@ export async function createWorktree(
   args: CreateWorkspaceArgs,
 ): Promise<{ path: string }> {
   throwIfProvisionAborted(args.signal);
-  if (await ensureExistingWorkspaceMatches(args.targetPath, args.branchName)) {
+  if (
+    await ensureExistingWorkspaceMatches(
+      args.targetPath,
+      args.branchName,
+      args.shellPath,
+    )
+  ) {
     return { path: args.targetPath };
   }
 
   throwIfProvisionAborted(args.signal);
-  switch (await readGitRepositoryState(args.sourcePath)) {
+  switch (
+    await readGitRepositoryState(args.sourcePath, {
+      ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
+    })
+  ) {
     case "not_git":
       throw new WorkspaceError(
         "not_git_repo",
@@ -342,7 +521,10 @@ export async function createWorktree(
 
   throwIfProvisionAborted(args.signal);
   const baseBranch =
-    args.baseBranch ?? (await readDefaultBranch(args.sourcePath));
+    args.baseBranch ??
+    (await readDefaultBranch(args.sourcePath, {
+      ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
+    }));
   if (!baseBranch) {
     throw new WorkspaceError(
       "missing_default_branch",
@@ -353,7 +535,9 @@ export async function createWorktree(
   await fetchRemoteBaseBranch({
     sourcePath: args.sourcePath,
     baseBranch,
+    fetchTimeoutMs: REMOTE_BASE_FETCH_TIMEOUT_MS,
     onProgress: args.onProgress,
+    shellPath: args.shellPath,
     signal: args.signal,
   });
 
@@ -377,6 +561,7 @@ export async function createWorktree(
   try {
     const result = await runGitWithWorktreeMetadataLock(gitArgs, {
       cwd: args.sourcePath,
+      ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
       signal: args.signal,
     });
     emitGitOutput(args.onProgress, "git-worktree", result);
@@ -398,12 +583,13 @@ export async function createWorktree(
       sourcePath: args.sourcePath,
       targetPath: args.targetPath,
       onProgress: args.onProgress,
+      shellPath: args.shellPath,
       signal: args.signal,
     });
     await runSetupScript({
       workspacePath: args.targetPath,
       timeoutMs: args.timeoutMs,
-      setupPath: args.setupPath,
+      shellPath: args.shellPath,
       onProgress: args.onProgress,
       signal: args.signal,
     });
@@ -421,17 +607,15 @@ export async function createWorktree(
     }
     await removeWorktree({
       path: args.targetPath,
+      timeoutMs: args.timeoutMs,
       force: true,
       pruneEmptyParent: args.pruneEmptyParent,
+      shellPath: args.shellPath,
     });
     throw error;
   }
 }
 
-/**
- * Cap on paths named in one transcript entry. A broad pattern can match
- * thousands of files, and the daemon keeps and forwards the whole transcript.
- */
 const WORKTREE_INCLUDE_TRANSCRIPT_PATH_LIMIT = 20;
 
 function summarizePaths(paths: readonly string[]): string {
@@ -441,18 +625,11 @@ function summarizePaths(paths: readonly string[]): string {
   return `${shown.join(", ")}${suffix}`;
 }
 
-/**
- * Copy the untracked files listed in `.worktreeinclude` into the new worktree
- * and report the result in the provisioning transcript. This runs before the
- * setup script so the script can read a copied `.env`.
- *
- * A failure here never fails provisioning: the transcript reports what bb
- * skipped and the thread still starts. Only cancellation propagates.
- */
 async function copyIncludedFiles(args: {
   sourcePath: string;
   targetPath: string;
   onProgress: ProgressCallback | undefined;
+  shellPath: string | undefined;
   signal: AbortSignal | undefined;
 }): Promise<void> {
   throwIfProvisionAborted(args.signal);
@@ -462,6 +639,7 @@ async function copyIncludedFiles(args: {
     result = await copyWorktreeIncludeFiles({
       sourcePath: args.sourcePath,
       targetPath: args.targetPath,
+      shellPath: args.shellPath,
       signal: args.signal,
     });
   } catch (error) {
@@ -515,34 +693,41 @@ async function copyIncludedFiles(args: {
   });
 }
 
-export async function runSetupScript(
-  args: RunSetupScriptArgs,
+async function runLifecycleScript(
+  args: RunLifecycleScriptArgs,
 ): Promise<{ ran: boolean; exitCode?: number; output?: string }> {
-  throwIfProvisionAborted(args.signal);
-  const scriptPath = await resolveSetupScriptPath(args.workspacePath);
+  if (args.kind === "setup") {
+    throwIfProvisionAborted(args.signal);
+  }
+  const scriptPath = await resolveLifecycleScriptPath(
+    args.workspacePath,
+    args.scriptName,
+  );
   if (!scriptPath) {
     return { ran: false };
   }
 
-  throwIfProvisionAborted(args.signal);
-  const command = buildSetupScriptCommand({
-    platform: process.platform,
-    scriptPath,
-  });
+  if (args.kind === "setup") {
+    throwIfProvisionAborted(args.signal);
+  }
+  const command =
+    args.kind === "setup"
+      ? buildSetupScriptCommand({ platform: process.platform, scriptPath })
+      : buildTeardownScriptCommand({ platform: process.platform, scriptPath });
   const startedAt = Date.now();
   emitStep({
     onProgress: args.onProgress,
-    key: "setup-started",
-    text: "Running .bb-env-setup.sh",
+    key: `${args.kind}-started`,
+    text: `Running ${args.scriptName}`,
     status: "started",
     startedAt,
   });
 
   const { timeoutMs } = args;
-  const env = sanitizeInheritedChildProcessEnv({ env: process.env });
-  if (args.setupPath !== undefined) {
-    env.PATH = args.setupPath;
-  }
+  const env = sanitizeInheritedChildProcessEnv({
+    env: process.env,
+    ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
+  });
   const child = spawnPortableOutputProcess({
     command: command.command,
     args: command.args,
@@ -558,17 +743,17 @@ export async function runSetupScript(
   let abortRequested = false;
   let timedOut = false;
 
-  const emitSetupOutputLines = (lines: string[]): void => {
+  const emitScriptOutputLines = (lines: string[]): void => {
     for (const line of lines) {
       outputIndex += 1;
-      emitOutput(args.onProgress, `setup-output-${outputIndex}`, line);
+      emitOutput(args.onProgress, `${args.kind}-output-${outputIndex}`, line);
     }
   };
 
   const handleChunk = (chunk: Buffer) => {
     const text = chunk.toString("utf8");
     outputChunks.push(text);
-    emitSetupOutputLines(outputLineReader.push(text));
+    emitScriptOutputLines(outputLineReader.push(text));
   };
 
   child.stdout.on("data", handleChunk);
@@ -581,7 +766,7 @@ export async function runSetupScript(
       signal: "SIGKILL",
     });
   }, timeoutMs);
-  const abortSetupScript = () => {
+  const abortLifecycleScript = () => {
     if (abortRequested) {
       return;
     }
@@ -597,9 +782,13 @@ export async function runSetupScript(
       });
     }, SETUP_SCRIPT_ABORT_KILL_GRACE_MS);
   };
-  args.signal?.addEventListener("abort", abortSetupScript, { once: true });
-  if (args.signal?.aborted) {
-    abortSetupScript();
+  if (args.kind === "setup") {
+    args.signal?.addEventListener("abort", abortLifecycleScript, {
+      once: true,
+    });
+    if (args.signal?.aborted) {
+      abortLifecycleScript();
+    }
   }
 
   try {
@@ -612,13 +801,13 @@ export async function runSetupScript(
     });
 
     const output = outputChunks.join("");
-    emitSetupOutputLines(outputLineReader.flush());
+    emitScriptOutputLines(outputLineReader.flush());
     const durationMs = Date.now() - startedAt;
-    if (abortRequested || args.signal?.aborted) {
+    if (args.kind === "setup" && (abortRequested || args.signal?.aborted)) {
       emitStep({
         onProgress: args.onProgress,
-        key: "setup-cancelled",
-        text: ".bb-env-setup.sh cancelled",
+        key: `${args.kind}-cancelled`,
+        text: `${args.scriptName} cancelled`,
         status: "failed",
         startedAt,
         metadata: { durationMs },
@@ -629,52 +818,52 @@ export async function runSetupScript(
     if (timedOut) {
       emitStep({
         onProgress: args.onProgress,
-        key: "setup-failed",
-        text: ".bb-env-setup.sh failed",
+        key: `${args.kind}-failed`,
+        text: `${args.scriptName} failed`,
         status: "failed",
         startedAt,
         metadata: { durationMs },
       });
       throw new WorkspaceError(
         "setup_script_failed",
-        `Setup script timed out after ${timeoutMs}ms: ${scriptPath}`,
+        `${args.kind === "setup" ? "Setup" : "Teardown"} script timed out after ${timeoutMs}ms: ${scriptPath}`,
       );
     }
 
     if (result.signal) {
       emitStep({
         onProgress: args.onProgress,
-        key: "setup-failed",
-        text: ".bb-env-setup.sh failed",
+        key: `${args.kind}-failed`,
+        text: `${args.scriptName} failed`,
         status: "failed",
         startedAt,
         metadata: { durationMs },
       });
       throw new WorkspaceError(
         "setup_script_failed",
-        `Setup script exited via signal ${result.signal}: ${scriptPath}`,
+        `${args.kind === "setup" ? "Setup" : "Teardown"} script exited via signal ${result.signal}: ${scriptPath}`,
       );
     }
 
     if ((result.exitCode ?? 0) !== 0) {
       emitStep({
         onProgress: args.onProgress,
-        key: "setup-failed",
-        text: ".bb-env-setup.sh failed",
+        key: `${args.kind}-failed`,
+        text: `${args.scriptName} failed`,
         status: "failed",
         startedAt,
         metadata: { durationMs },
       });
       throw new WorkspaceError(
         "setup_script_failed",
-        `Setup script failed with exit code ${result.exitCode}: ${scriptPath}`,
+        `${args.kind === "setup" ? "Setup" : "Teardown"} script failed with exit code ${result.exitCode}: ${scriptPath}`,
       );
     }
 
     emitStep({
       onProgress: args.onProgress,
-      key: "setup-completed",
-      text: ".bb-env-setup.sh finished",
+      key: `${args.kind}-completed`,
+      text: `${args.scriptName} finished`,
       status: "completed",
       startedAt,
       metadata: { durationMs },
@@ -685,7 +874,57 @@ export async function runSetupScript(
     if (abortKillTimeout) {
       clearTimeout(abortKillTimeout);
     }
-    args.signal?.removeEventListener("abort", abortSetupScript);
+    if (args.kind === "setup") {
+      args.signal?.removeEventListener("abort", abortLifecycleScript);
+    }
+  }
+}
+
+export function runSetupScript(
+  args: RunSetupScriptArgs,
+): Promise<{ ran: boolean; exitCode?: number; output?: string }> {
+  return runLifecycleScript({
+    ...args,
+    kind: "setup",
+    scriptName: DEFAULT_ENV_SETUP_SCRIPT_NAME,
+  });
+}
+
+export async function runTeardownScript(
+  args: RunTeardownScriptArgs,
+): Promise<{ ran: boolean; exitCode?: number; output?: string }> {
+  const startedAt = Date.now();
+  let failureReported = false;
+  const onProgress: ProgressCallback = (entry) => {
+    if (entry.type === "step" && entry.key === "teardown-failed") {
+      failureReported = true;
+    }
+    args.onProgress?.(entry);
+  };
+  try {
+    return await runLifecycleScript({
+      ...args,
+      onProgress,
+      kind: "teardown",
+      scriptName: DEFAULT_ENV_TEARDOWN_SCRIPT_NAME,
+    });
+  } catch (error) {
+    if (!failureReported) {
+      emitStep({
+        onProgress: args.onProgress,
+        key: "teardown-failed",
+        text: `${DEFAULT_ENV_TEARDOWN_SCRIPT_NAME} failed`,
+        status: "failed",
+        startedAt,
+        metadata: { durationMs: Date.now() - startedAt },
+      });
+    }
+    emitOutput(
+      args.onProgress,
+      "teardown-error",
+      error instanceof Error ? error.message : String(error),
+    );
+    return { ran: true };
   }
 }
 
@@ -700,8 +939,16 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
     return;
   }
 
+  await runTeardownScript({
+    workspacePath,
+    timeoutMs: args.timeoutMs,
+    ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
+    ...(args.onProgress !== undefined ? { onProgress: args.onProgress } : {}),
+  });
+
   const commonDirResult = await runGit(["rev-parse", "--git-common-dir"], {
     cwd: workspacePath,
+    ...(args.shellPath !== undefined ? { shellPath: args.shellPath } : {}),
     allowFailure: true,
   });
 
@@ -710,40 +957,37 @@ export async function removeWorktree(args: RemoveWorktreeArgs): Promise<void> {
       workspacePath,
       commonDirResult.stdout.trim(),
     );
-    // Lock order is checkout mutation first, worktree metadata second. Keep
-    // every path that needs both locks in this order so two callers cannot each
-    // hold one git lock domain while waiting for the other.
-    await tryWithCheckoutMutationLock(workspacePath, () =>
-      withWorktreeMetadataLock(commonDir, () =>
-        runGit(
-          [
-            "--git-dir",
-            commonDir,
-            "worktree",
-            "remove",
-            workspacePath,
-            ...(force ? ["--force"] : []),
-          ],
-          {
-            cwd: path.dirname(workspacePath),
-            allowFailure: true,
-          },
+    await tryWithCheckoutMutationLock(
+      workspacePath,
+      () =>
+        withWorktreeMetadataLock(commonDir, () =>
+          runGit(
+            [
+              "--git-dir",
+              commonDir,
+              "worktree",
+              "remove",
+              workspacePath,
+              ...(force ? ["--force"] : []),
+            ],
+            {
+              cwd: path.dirname(workspacePath),
+              ...(args.shellPath !== undefined
+                ? { shellPath: args.shellPath }
+                : {}),
+              allowFailure: true,
+            },
+          ),
         ),
-      ),
+      undefined,
+      args.shellPath === undefined ? {} : { shellPath: args.shellPath },
     );
   }
 
-  // Git metadata cleanup is best-effort because broken teardown states often
-  // leave a directory that no longer resolves as a worktree. The managed
-  // workspace directory itself is the authoritative cleanup target.
   await fs.rm(workspacePath, { recursive: true, force: true });
   if (args.pruneEmptyParent) {
     await removeDirectoryIfEmpty(parentPath);
   }
-}
-
-export async function removeDirectory(args: { path: string }): Promise<void> {
-  await fs.rm(args.path, { recursive: true, force: true });
 }
 
 async function removeDirectoryIfEmpty(pathToRemove: string): Promise<void> {

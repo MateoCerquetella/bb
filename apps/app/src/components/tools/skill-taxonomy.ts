@@ -3,7 +3,6 @@ import type {
   SkillScope,
   SkillSummary,
 } from "@bb/server-contract";
-import { getProviderIconInfo } from "@/lib/provider-icon";
 
 const SKILL_ROOT_LABELS: Record<
   Exclude<SkillScope, "provider-user" | "provider-project">,
@@ -17,28 +16,15 @@ const SKILL_ROOT_LABELS: Record<
   plugin: "Plugin",
 };
 
-/**
- * Provider scopes are labelled from the skill's own `provider` field rather
- * than from the scope, which used to spell the provider out (`claude-user`,
- * `codex-project`, …) and therefore could not name a plugin provider at all.
- */
 export function skillScopeLabel(
   skill: Pick<SkillSummary, "scope" | "provider">,
-  /**
-   * The provider's display name from the server roster. Without it the label
-   * falls back to the icon's per-tier aria label, which every unknown `acp-*`
-   * agent shares ("ACP provider").
-   */
   providerDisplayName?: string,
 ): string {
   if (skill.scope === "provider-user" || skill.scope === "provider-project") {
     const root = skill.scope === "provider-user" ? "user" : "project";
     const provider = skill.provider;
     const providerLabel =
-      providerDisplayName ??
-      (provider === null
-        ? "Provider"
-        : (getProviderIconInfo(provider)?.ariaLabel ?? provider));
+      providerDisplayName ?? (provider === null ? "Provider" : provider);
     return `${providerLabel} · ${root}`;
   }
   return SKILL_ROOT_LABELS[skill.scope];

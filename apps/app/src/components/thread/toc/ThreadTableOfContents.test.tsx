@@ -18,9 +18,6 @@ import type {
   TimelineRow,
 } from "@bb/server-contract";
 
-// The minimap now sources items from the conversation-outline query, so the
-// component needs a QueryClient unless we mock the hook. Mocking also lets us
-// drive the outline (and the scroll surface) directly without a provider tree.
 vi.mock("@/components/ui/bottom-anchored-scroll-body.js", () => ({
   useBottomAnchoredScroll: vi.fn(),
 }));
@@ -43,13 +40,6 @@ import {
 } from "./ThreadTableOfContents";
 import { ThreadTitleMentionResourcesProvider } from "@/components/thread/ThreadTitleMentions";
 
-/**
- * Models the part of ResizeObserver the TOC depends on: `observe` delivers the
- * target's current content box immediately, and the content box is the border
- * box minus horizontal padding. The TOC reads that entry instead of forcing a
- * style recalculation, so the arithmetic belongs here in the platform stand-in
- * rather than in the component.
- */
 class ResizeObserverMock implements ResizeObserver {
   constructor(private readonly callback: ResizeObserverCallback) {}
 
@@ -105,14 +95,15 @@ function TocHost({
   hostPaddingX = 0,
   hostWidth = 1_200,
   loadOlderTimelineRows = () => {},
+  onNavigateToRow,
   threadId = "thr_toc_test",
   timelineRows,
 }: {
   hasOlderTimelineRows?: boolean;
-  /** Horizontal padding on each side, as the real scroll overlay has. */
   hostPaddingX?: number;
   hostWidth?: number;
   loadOlderTimelineRows?: () => void | Promise<void>;
+  onNavigateToRow?: (rowId: string) => void;
   threadId?: string;
   timelineRows: readonly TimelineRow[];
 }) {
@@ -136,6 +127,7 @@ function TocHost({
         timelineRows={timelineRows}
         hasOlderTimelineRows={hasOlderTimelineRows}
         loadOlderTimelineRows={loadOlderTimelineRows}
+        onNavigateToRow={onNavigateToRow}
       />
     </div>
   );
@@ -347,7 +339,6 @@ beforeEach(() => {
     captureScrollAnchor: vi.fn(),
   } as unknown as ReturnType<typeof useBottomAnchoredScroll>);
 
-  // Default: outline not loaded, so the minimap falls back to timelineRows.
   setOutline(undefined);
 });
 
@@ -411,9 +402,6 @@ describe("ThreadTableOfContents", () => {
     );
   });
 
-  // The overlay pads itself, so its border box runs 24px ahead of the content
-  // box both the `@container` rule and the ResizeObserver entry report. The JS
-  // boundary and the CSS breakpoint must agree.
   it("does not request the outline when padding hides the TOC", () => {
     render(
       <TocHost
@@ -675,16 +663,52 @@ describe("ThreadTableOfContents", () => {
       },
     ]);
 
-    // timelineRows is empty: the minimap lists the full thread from the outline,
-    // not just the loaded window.
     render(<TocHost timelineRows={[]} />);
     openTocPanel();
 
     expect(await screen.findByText("First question")).not.toBeNull();
     expect(screen.getByText("Second question")).not.toBeNull();
     expect(screen.getByText("Image attachment")).not.toBeNull();
-    // The agent tab is offered because the outline has assistant messages.
     expect(screen.getByText("Agent messages")).not.toBeNull();
+  });
+
+  it("merges live timeline messages into the cached full outline", async () => {
+    setOutline([
+      {
+        id: "row_user_1",
+        role: "user",
+        preview: "First cached question",
+        attachmentSummary: null,
+      },
+      {
+        id: "row_user_2",
+        role: "user",
+        preview: "Second cached question",
+        attachmentSummary: null,
+      },
+      {
+        id: "row_user_3",
+        role: "user",
+        preview: "Stale third question",
+        attachmentSummary: null,
+      },
+    ]);
+
+    render(
+      <TocHost
+        timelineRows={[userConversationRow(3), userConversationRow(4)]}
+      />,
+    );
+    openTocPanel();
+
+    expect(await screen.findByText("First cached question")).not.toBeNull();
+    expect(
+      screen.getByText("Loaded after client-side navigation 3"),
+    ).not.toBeNull();
+    expect(
+      screen.getByText("Loaded after client-side navigation 4"),
+    ).not.toBeNull();
+    expect(screen.queryByText("Stale third question")).toBeNull();
   });
 
   it("renders an agent-to-agent message source as a thread mention", async () => {
@@ -795,6 +819,7 @@ describe("ThreadTableOfContents", () => {
   it("scrolls straight to a message already loaded in the window", async () => {
     scrollElement.appendChild(timelineRowElement("u2"));
     const loadOlder = vi.fn();
+    const onNavigateToRow = vi.fn();
     setOutline([
       {
         id: "u1",
@@ -821,18 +846,18 @@ describe("ThreadTableOfContents", () => {
         timelineRows={[]}
         hasOlderTimelineRows
         loadOlderTimelineRows={loadOlder}
+        onNavigateToRow={onNavigateToRow}
       />,
     );
     openTocPanel();
     fireEvent.click(await screen.findByText("Loaded question"));
 
     await waitFor(() => expect(scrollElementIntoView).toHaveBeenCalledTimes(1));
+    expect(onNavigateToRow).toHaveBeenCalledWith("u2");
     expect(loadOlder).not.toHaveBeenCalled();
   });
 
   it("auto-paginates older pages to reach an unloaded message, then scrolls to it", async () => {
-    // The target isn't in the loaded window; loadOlder simulates it paginating
-    // in, mirroring the real controller prepending older rows to the DOM.
     const loadOlder = vi.fn(() => {
       scrollElement.appendChild(timelineRowElement("u_old"));
     });
@@ -904,7 +929,6 @@ describe("ThreadTableOfContents", () => {
     openTocPanel();
     fireEvent.click(await screen.findByText("Unreachable"));
 
-    // hasOlder is false, so the loop body never runs; no scroll, no pagination.
     await waitFor(() => expect(loadOlder).not.toHaveBeenCalled());
     expect(scrollElementIntoView).not.toHaveBeenCalled();
   });
@@ -993,14 +1017,11 @@ describe("ThreadTableOfContents", () => {
   });
 
   it("finds active items with logarithmic row measurements", () => {
-    const allItems = Array.from(
-      { length: 256 },
-      (_, index): TocItem => ({
-        id: `item-${index}`,
-        label: `Message ${index}`,
-        role: index % 2 === 0 ? "user" : "assistant",
-      }),
-    );
+    const allItems = Array.from({ length: 256 }, (_, index): TocItem => ({
+      id: `item-${index}`,
+      label: `Message ${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+    }));
     const manyUserItems = allItems.filter((item) => item.role === "user");
     const manyAgentItems = allItems.filter((item) => item.role === "assistant");
     const visibleIndex = 200;

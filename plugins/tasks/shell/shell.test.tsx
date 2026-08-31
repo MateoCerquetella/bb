@@ -1,9 +1,8 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { loadPluginApp, renderSlot } from "@get-bb/plugin-sdk/testing/app";
 
-// jsdom lacks matchMedia; the vendored Dialog's responsive root needs it.
 if (!window.matchMedia) {
   window.matchMedia = (query: string) => ({
     matches: false,
@@ -17,15 +16,15 @@ if (!window.matchMedia) {
   });
 }
 
-// loadPluginApp installs the fake SDK runtime; routes.ts (via the app) must
-// not be imported before that happens.
 const app = await loadPluginApp(() => import("../app"));
 const { parseTasksRoute, tasksRouteToSubPath } = await import("./routes.js");
 const { pagerPosition } = await import("./topbar.js");
 const { loadViewMode } = await import("./view-preference.js");
+const { querySnapshotStorageKey, resetQuerySnapshotStateForTest } =
+  await import("./query-snapshot.js");
 
 const tasksRegistration = app.navPanels[0]!;
-const navigationView = tasksRegistration.experimental_fixedTabs?.[0]!;
+const navigationView = tasksRegistration.fixedTabs?.[0]!;
 const navigationRegistration = {
   ...tasksRegistration,
   component: navigationView.component,
@@ -88,20 +87,17 @@ describe("tasks route grammar", () => {
       { kind: "task", taskKey: "TSK-4" },
       { kind: "project", projectId: PROJECT_ID, view: "list" },
       { kind: "project", projectId: PROJECT_ID, view: "board" },
-      // No view marker: the shell fills it from the stored preference.
       { kind: "project", projectId: PROJECT_ID, view: null },
     ] as const;
     for (const route of routes) {
       expect(parseTasksRoute(tasksRouteToSubPath(route))).toEqual(route);
     }
-    // The host hands the splat through URL-encoded per segment.
     expect(parseTasksRoute(`${PROJECT_ID}%3Fview%3Dboard`)).toEqual({
       kind: "project",
       projectId: PROJECT_ID,
       view: "board",
     });
     expect(parseTasksRoute("")).toEqual({ kind: "all" });
-    // An unknown marker is as good as none — never a silent "list".
     expect(parseTasksRoute(`${PROJECT_ID}?view=kanban`)).toEqual({
       kind: "project",
       projectId: PROJECT_ID,
@@ -120,7 +116,6 @@ describe("project view preference", () => {
 
   it("restores the remembered view when the URL names none", async () => {
     const listed = openProject(`${PROJECT_ID}?view=list`);
-    // The toggle is the only way a user picks a view; it must persist.
     fireEvent.click(await listed.findByRole("button", { name: "Board" }));
     expect(listed.navigateCalls).toContainEqual({
       method: "toPluginPanel",
@@ -129,7 +124,6 @@ describe("project view preference", () => {
     });
     listed.lifecycle.unmount();
 
-    // Reopening the project without a marker (sidebar click, deep link).
     const reopened = openProject(PROJECT_ID);
     const boardSegment = await reopened.findByRole("button", { name: "Board" });
     expect(boardSegment.getAttribute("aria-pressed")).toBe("true");
@@ -142,8 +136,6 @@ describe("project view preference", () => {
     slot.lifecycle.unmount();
 
     expect(loadViewMode(PROJECT_ID)).toBe("board");
-    // A project opened for the first time follows the most recent choice
-    // rather than snapping back to the list.
     expect(loadViewMode(OTHER_PROJECT_ID)).toBe("board");
 
     const other = renderSlot(
@@ -199,12 +191,10 @@ function pagerTask(key: string, status: string, position: number) {
     createdAt: "2026-07-15T00:00:00.000Z",
     updatedAt: "2026-07-15T00:00:00.000Z",
     labelIds: [],
-    // Only key/status/position matter to the pager; the rest satisfies Task.
   } as never;
 }
 
 describe("task pager", () => {
-  // List order: canonical status groups, server (board) order within a group.
   const tasks = [
     pagerTask("TSK-3", "done", 1),
     pagerTask("TSK-1", "in_progress", 1),
@@ -213,7 +203,6 @@ describe("task pager", () => {
   ];
 
   it("orders siblings like the list view and exposes neighbors", () => {
-    // Visual order: TSK-2, TSK-4 (todo) → TSK-1 (in_progress) → TSK-3 (done).
     expect(pagerPosition(tasks, "TSK-4")).toEqual({
       index: 2,
       total: 4,
@@ -261,7 +250,7 @@ describe("task pager", () => {
 
 describe("tasks app shell", () => {
   it("registers navigation as a BB-owned fixed panel tab", () => {
-    expect(tasksRegistration.experimental_fixedTabs).toMatchObject([
+    expect(tasksRegistration.fixedTabs).toMatchObject([
       {
         id: "navigation",
         title: "Navigation",
@@ -470,13 +459,10 @@ describe("tasks app shell", () => {
     const refresh = slot.getByRole("button", { name: "Refresh tasks" });
     const newTask = slot.getByRole("button", { name: /New task/i });
 
-    // Icon-only: no visible "Refresh" text; accessible name remains.
     expect(refresh.textContent?.trim() ?? "").not.toMatch(/Refresh/i);
     expect(refresh.getAttribute("aria-label")).toBe("Refresh tasks");
     expect(refresh.className).toMatch(/size-7/);
 
-    // DOM and tab order: refresh → New task. BB owns the right-panel toggle
-    // outside this plugin surface.
     expect(
       refresh.compareDocumentPosition(newTask) &
         Node.DOCUMENT_POSITION_FOLLOWING,
@@ -489,7 +475,6 @@ describe("tasks app shell", () => {
       ).toBe(Node.DOCUMENT_POSITION_FOLLOWING);
     }
 
-    // Focus-visible path: control is a native button and can take focus.
     refresh.focus();
     expect(document.activeElement).toBe(refresh);
   });
@@ -519,8 +504,6 @@ describe("tasks app shell", () => {
             if (!holdListTasks) {
               return { tasks: [{ ...task, title }] };
             }
-            // Generation-driven fetches stay pending until released so the
-            // shared in-flight bit tracks real request completion.
             return new Promise((resolve) => {
               pendingResolvers.push(() =>
                 resolve({ tasks: [{ ...task, title }] }),
@@ -547,7 +530,6 @@ describe("tasks app shell", () => {
     expect(refresh.disabled).toBe(false);
     expect(idleClassName).toMatch(/active:bg-state-active/);
 
-    // Accessible name is the stable tooltip/label contract.
     fireEvent.pointerMove(refresh);
     fireEvent.focus(refresh);
     expect(refresh.getAttribute("aria-label")).toBe("Refresh tasks");
@@ -556,22 +538,18 @@ describe("tasks app shell", () => {
     title = "Flight title B";
     fireEvent.click(refresh);
     await waitFor(() => expect(listTasksCalls).toBeGreaterThan(baselineCalls));
-    // In-flight while the deferred RPC is still pending.
     expect(refresh.disabled).toBe(true);
     expect(refresh.getAttribute("aria-busy")).toBe("true");
     expect(refresh.className).toBe(idleClassName);
 
     const callsWhilePending = listTasksCalls;
-    // Rapid re-activation while pending must not bump generation again.
     fireEvent.click(refresh);
     fireEvent.click(refresh);
-    // Browser keyboard activation synthesizes click; exercise that path.
     refresh.focus();
     fireEvent.click(refresh);
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(listTasksCalls).toBe(callsWhilePending);
 
-    // Stay pending well past any former fixed timer; still disabled.
     await new Promise((resolve) => setTimeout(resolve, 600));
     expect(refresh.disabled).toBe(true);
     expect(listTasksCalls).toBe(callsWhilePending);
@@ -588,7 +566,6 @@ describe("tasks app shell", () => {
       ).toBe(false);
     });
 
-    // Deliberate second refresh after completion works.
     title = "Flight title C";
     fireEvent.click(slot.getByRole("button", { name: "Refresh tasks" }));
     await waitFor(() =>
@@ -638,9 +615,7 @@ describe("tasks app shell", () => {
 
     shouldFail = true;
     fireEvent.click(slot.getByRole("button", { name: "Refresh tasks" }));
-    // Prior data stays on screen (useTasksQuery retains data on error).
     await waitFor(() => expect(slot.getByText("Stable title")).toBeDefined());
-    // Failed generation work clears the shared in-flight bit.
     await waitFor(() => {
       expect(
         (
@@ -698,6 +673,210 @@ describe("tasks app shell", () => {
     );
   });
 
+  describe("last-known snapshot", () => {
+    const projectsKey = querySnapshotStorageKey("projects");
+    const foldersKey = querySnapshotStorageKey("folders");
+    const summaryKey = querySnapshotStorageKey("sidebar-summary");
+    const summary = {
+      projectId: PROJECT_ID,
+      taskCount: 3,
+      activeAgentCount: 1,
+    };
+    function deferred<T>() {
+      let resolve!: (value: T) => void;
+      const promise = new Promise<T>((r) => {
+        resolve = r;
+      });
+      return { promise, resolve };
+    }
+
+    it("never paints the empty state while projects are unknown", async () => {
+      const projects = deferred<{ projects: never[] }>();
+      const slot = renderSlot(
+        app.navPanels[0]!,
+        { subPath: "" },
+        {
+          rpc: seededRpc({
+            listProjects: () => projects.promise,
+            sidebarSummary: () => ({ projects: [] }),
+          }),
+        },
+      );
+      expect(slot.queryByText("No projects yet")).toBeNull();
+      projects.resolve({ projects: [] });
+      await slot.findByText("No projects yet");
+    });
+
+    it("paints the last-known empty state before listProjects resolves", () => {
+      window.localStorage.setItem(projectsKey, JSON.stringify([]));
+      window.localStorage.setItem(foldersKey, JSON.stringify([]));
+      window.localStorage.setItem(summaryKey, JSON.stringify([]));
+      const projects = deferred<{ projects: never[] }>();
+      const slot = renderSlot(
+        app.navPanels[0]!,
+        { subPath: "" },
+        {
+          rpc: seededRpc({
+            listProjects: () => projects.promise,
+            sidebarSummary: () => ({ projects: [] }),
+          }),
+        },
+      );
+      expect(slot.getByText("No projects yet")).toBeTruthy();
+    });
+
+    it("paints last-known projects before listProjects resolves and never flashes empty", async () => {
+      window.localStorage.setItem(projectsKey, JSON.stringify([project]));
+      window.localStorage.setItem(foldersKey, JSON.stringify([folder]));
+      window.localStorage.setItem(summaryKey, JSON.stringify([summary]));
+      const projects = deferred<{ projects: (typeof project)[] }>();
+      const rpc = seededRpc({ listProjects: () => projects.promise });
+      const panel = renderSlot(
+        navigationRegistration,
+        { subPath: "" },
+        { rpc },
+      );
+      const page = renderSlot(app.navPanels[0]!, { subPath: "" }, { rpc });
+      expect(panel.getByText(project.name)).toBeTruthy();
+      expect(page.queryByText("No projects yet")).toBeNull();
+      projects.resolve({ projects: [project] });
+      await waitFor(() => expect(panel.getByText(project.name)).toBeTruthy());
+      expect(page.queryByText("No projects yet")).toBeNull();
+    });
+
+    it("ignores a malformed snapshot and loads normally", async () => {
+      window.localStorage.setItem(projectsKey, "{not json");
+      window.localStorage.setItem(
+        summaryKey,
+        JSON.stringify([{ projectId: 1 }]),
+      );
+      const slot = renderSlot(
+        app.navPanels[0]!,
+        { subPath: "" },
+        { rpc: emptyRpc },
+      );
+      expect(slot.queryByText("No projects yet")).toBeNull();
+      await slot.findByText("No projects yet");
+    });
+
+    it("prunes snapshots written under an older storage version", async () => {
+      resetQuerySnapshotStateForTest();
+      window.localStorage.setItem(
+        "bb-tasks:query-snapshot:v0:projects",
+        JSON.stringify([]),
+      );
+      const slot = renderSlot(
+        navigationRegistration,
+        { subPath: "" },
+        { rpc: seededRpc() },
+      );
+      await slot.findByText(project.name);
+      expect(
+        window.localStorage.getItem("bb-tasks:query-snapshot:v0:projects"),
+      ).toBeNull();
+      expect(window.localStorage.getItem(projectsKey)).not.toBeNull();
+    });
+
+    it("records the fetched projects and counts for the next mount", async () => {
+      const slot = renderSlot(
+        navigationRegistration,
+        { subPath: "" },
+        { rpc: seededRpc() },
+      );
+      await slot.findByText(project.name);
+      await waitFor(() => {
+        expect(
+          JSON.parse(window.localStorage.getItem(projectsKey) ?? "null"),
+        ).toEqual([project]);
+        expect(
+          JSON.parse(window.localStorage.getItem(foldersKey) ?? "null"),
+        ).toEqual([folder]);
+        expect(
+          JSON.parse(window.localStorage.getItem(summaryKey) ?? "null"),
+        ).toEqual([summary]);
+      });
+    });
+
+    it("keeps the newer projects snapshot when an older request resolves later", async () => {
+      const olderProject = { ...project, name: "Older truth" };
+      const newerProject = { ...project, name: "Newer truth" };
+      const older = deferred<{ projects: (typeof project)[] }>();
+      let calls = 0;
+      const rpc = seededRpc({
+        listProjects: () => {
+          calls += 1;
+          return calls === 1 ? older.promise : { projects: [newerProject] };
+        },
+      });
+      renderSlot(navigationRegistration, { subPath: "" }, { rpc });
+      const second = renderSlot(
+        navigationRegistration,
+        { subPath: "" },
+        { rpc },
+      );
+      await second.findByText("Newer truth");
+      await waitFor(() =>
+        expect(
+          JSON.parse(window.localStorage.getItem(projectsKey) ?? "null"),
+        ).toEqual([newerProject]),
+      );
+      older.resolve({ projects: [olderProject] });
+      await act(async () => {
+        await older.promise;
+      });
+      expect(
+        JSON.parse(window.localStorage.getItem(projectsKey) ?? "null"),
+      ).toEqual([newerProject]);
+    });
+
+    it.each(["listFolders", "sidebarSummary"])(
+      "keeps loaded projects navigable when %s fails",
+      async (method) => {
+        const slot = renderSlot(
+          navigationRegistration,
+          { subPath: "all" },
+          {
+            rpc: seededRpc({
+              [method]: () => Promise.reject(new Error("boom")),
+            }),
+          },
+        );
+        fireEvent.click(await slot.findByText(project.name));
+        expect(slot.navigateCalls).toContainEqual({
+          method: "toPluginPanel",
+          path: "tasks",
+          options: { subPath: PROJECT_ID },
+        });
+      },
+    );
+  });
+
+  it("shows the error, not the previous route's rows, when a route change fails", async () => {
+    const tasks = [
+      {
+        ...pagerTask("TSK-4", "todo", 1),
+        title: "Scope truth",
+        description: "",
+        labelIds: [],
+      },
+    ];
+    const rpc = seededRpc({
+      listLabels: () => ({ labels: [] }),
+      listTasks: (input: { activeOnly?: boolean }) =>
+        input.activeOnly === true
+          ? Promise.reject(new Error("active fetch failed"))
+          : { tasks },
+    });
+    const Panel = app.navPanels[0]!.component;
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "all" }, { rpc });
+    await slot.findByText("Scope truth");
+
+    slot.lifecycle.rerender(<Panel subPath="active" />);
+    await slot.findByText("Couldn't load tasks");
+    expect(slot.queryByText("Scope truth")).toBeNull();
+    expect(slot.queryByText("No agents working right now")).toBeNull();
+  });
+
   it("shows the empty state and opens the New project dialog", async () => {
     const slot = renderSlot(
       app.navPanels[0]!,
@@ -711,13 +890,49 @@ describe("tasks app shell", () => {
     await slot.findByText("Projects group tasks under a shared key prefix.");
   });
 
+  it("does not paint another scope's empty state while its own rows load", async () => {
+    const tasks = [
+      {
+        ...pagerTask("TSK-4", "todo", 1),
+        title: "Scope truth",
+        description: "",
+        labelIds: [],
+      },
+    ];
+    let deferAll = false;
+    let releaseAll: (() => void) | null = null;
+    const rpc = seededRpc({
+      listLabels: () => ({ labels: [] }),
+      listTasks: (input: { activeOnly?: boolean }) => {
+        if (input.activeOnly === true) return { tasks: [] };
+        if (!deferAll) return { tasks };
+        return new Promise((resolve) => {
+          releaseAll = () => resolve({ tasks });
+        });
+      },
+    });
+    const Panel = app.navPanels[0]!.component;
+    const slot = renderSlot(app.navPanels[0]!, { subPath: "all" }, { rpc });
+    await slot.findByText("Scope truth");
+
+    slot.lifecycle.rerender(<Panel subPath="active" />);
+    await slot.findByText("No agents working right now");
+
+    deferAll = true;
+    slot.lifecycle.rerender(<Panel subPath="all" />);
+    await waitFor(() => expect(releaseAll).not.toBeNull());
+    expect(slot.queryByText("No tasks yet")).toBeNull();
+    expect(slot.queryByText("Scope truth")).toBeNull();
+    act(() => releaseAll!());
+    await slot.findByText("Scope truth");
+  });
+
   it("renders board and task subPaths without plugin-owned sidebar chrome", async () => {
     const boardSlot = renderSlot(
       app.navPanels[0]!,
       { subPath: `${PROJECT_ID}?view=board` },
       { rpc: seededRpc() },
     );
-    // The real board renders its status columns (empty listTasks → 0 cards).
     await boardSlot.findByText("Backlog");
     await boardSlot.findByText("In Review");
     expect(boardSlot.getByText("Tasks Plugin")).toBeDefined();
@@ -729,9 +944,7 @@ describe("tasks app shell", () => {
       { subPath: "task/TSK-4" },
       { rpc: seededRpc() },
     );
-    // Seeded getTaskByKey is null, so the real detail view lands on not-found.
     await taskSlot.findByText(/Task TSK-4 was not found/);
-    // Esc returns to the previous list/board (default: all tasks).
     fireEvent.keyDown(window, { key: "Escape" });
     expect(taskSlot.navigateCalls).toContainEqual({
       method: "toPluginPanel",
@@ -820,10 +1033,7 @@ describe("tasks app shell", () => {
     );
     await slot.findByText("All tasks");
     fireEvent.keyDown(window, { key: "c" });
-    // The New task dialog mounts (project select defaults to the only project).
     await slot.findByRole("dialog");
-    // With the dialog open, another 'c' must not stack a second overlay, and
-    // Esc still closes the dialog rather than navigating.
     fireEvent.keyDown(window, { key: "c" });
     expect(slot.getAllByRole("dialog")).toHaveLength(1);
   });
@@ -835,6 +1045,7 @@ describe("tasks app shell", () => {
       providerId: "claude-code",
       modelId: "claude-sonnet-5",
       reasoningLevel: "medium",
+      serviceTier: null,
       permissionMode: "accept-edits",
       environmentKind: "project-default",
       baseBranch: null,
@@ -886,7 +1097,6 @@ describe("tasks app shell", () => {
     const before = projectCalls;
     await slot.emitRealtime("projects:changed", { projectId: null });
     await waitFor(() => expect(projectCalls).toBeGreaterThan(before));
-    // Unrelated channels leave the projects query alone.
     const settled = projectCalls;
     await slot.emitRealtime("comments:changed", { taskId: "x" });
     expect(projectCalls).toBe(settled);

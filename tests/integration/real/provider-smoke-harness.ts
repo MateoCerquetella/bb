@@ -1,4 +1,3 @@
-// Shared real-provider end-to-end test helpers.
 import { execFile as execFileCb } from "node:child_process";
 import fs from "node:fs/promises";
 import { promisify } from "node:util";
@@ -38,7 +37,7 @@ import {
   timelineHasAssistantConversation,
 } from "../helpers/timeline-response.js";
 
-export type RealProviderId = "codex" | "claude-code" | "pi";
+type RealProviderId = "codex" | "claude-code" | "pi";
 
 export const REAL_PROVIDER_IDS: ReadonlyArray<RealProviderId> = [
   "codex",
@@ -57,7 +56,7 @@ type RealProviderExecutionTemplate = Omit<
   "model"
 >;
 
-export type ProviderSmokeHarness = Awaited<
+type ProviderSmokeHarness = Awaited<
   ReturnType<typeof createIntegrationHarness>
 >;
 
@@ -67,12 +66,12 @@ interface WaitForThreadEventArgs {
   threadId: string;
 }
 
-export interface WaitForTurnStartedResult {
+interface WaitForTurnStartedResult {
   sequence: number;
   turnId: string;
 }
 
-export interface WaitForInputAcceptedResult {
+interface WaitForInputAcceptedResult {
   clientRequestId: ClientTurnRequestId;
   sequence: number;
   turnId: string;
@@ -114,17 +113,12 @@ interface ResolveExecutionOptionsArgs {
   providerId: RealProviderId;
 }
 
-// Active-turn waits: enough time to confirm the provider has started a long-running turn.
 export const ACTIVE_TIMEOUT_MS = scaleTimeoutMs(15_000);
 export const REAL_POLL_INTERVAL_MS = 200;
-// Whole-turn waits: real providers can take much longer than the fake adapter to respond.
 export const TURN_TIMEOUT_MS = scaleTimeoutMs(60_000);
-// Stop waits: give the daemon time to interrupt an in-flight real-provider turn cleanly.
 export const STOP_TIMEOUT_MS = scaleTimeoutMs(30_000);
-// Per-test budget: end-to-end provider checks include real network and provider startup latency.
 export const TEST_TIMEOUT_MS = scaleTimeoutMs(120_000);
 
-// Concurrent real-provider harnesses each install daemon shutdown handlers.
 process.setMaxListeners(Math.max(process.getMaxListeners(), 64));
 
 const providerPrerequisitePromises = new Map<RealProviderId, Promise<void>>();
@@ -457,7 +451,6 @@ async function assertCliInstalled(command: string): Promise<void> {
     if (isErrnoException(error) && error.code === "ENOENT") {
       throw new Error(`${command} CLI is not installed or not on PATH`);
     }
-    // --help returned non-zero but the binary exists - that's fine.
   }
 }
 
@@ -476,7 +469,7 @@ export function hasAssistantTimelineMessage(
 
 export async function createRealThread(args: CreateRealThreadArgs) {
   await assertProviderPrerequisites(args.providerId);
-  const harness = await createIntegrationHarness({ adapterFactory: undefined });
+  const harness = await createIntegrationHarness();
   const project = await createProjectFixture(harness, {
     name: `Real Provider ${args.providerId}`,
   });
@@ -485,9 +478,7 @@ export async function createRealThread(args: CreateRealThreadArgs) {
       harness,
       providerId: args.providerId,
     }),
-    input: [
-      { type: "text", text: REAL_PROVIDER_BOOTSTRAP_TEXT, mentions: [] },
-    ],
+    input: [{ type: "text", text: REAL_PROVIDER_BOOTSTRAP_TEXT, mentions: [] }],
     projectId: project.id,
     providerId: args.providerId,
     timeoutMs: TURN_TIMEOUT_MS,

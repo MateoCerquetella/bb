@@ -10,7 +10,7 @@ import {
 
 type NewTabPageFileSearchProps = Omit<NewTabFileSearchProps, "idleActions">;
 
-export interface NewTabPageProps extends NewTabPageFileSearchProps {
+interface NewTabPageProps extends NewTabPageFileSearchProps {
   onOpenBrowser?: OpenBrowserHandler;
   onStartTerminal?: StartTerminalHandler;
   pluginActions?: readonly PluginPanelActionEntry[];
@@ -18,11 +18,6 @@ export interface NewTabPageProps extends NewTabPageFileSearchProps {
   startTerminalTrailing?: ReactNode;
 }
 
-/**
- * Browser-style "New Tab" landing page for the secondary panel. The tab body
- * keeps file search primary while secondary commands live in-page, avoiding
- * overlays that can be occluded by native browser/webview surfaces.
- */
 export function NewTabPage({
   autoFocus,
   currentThreadId,

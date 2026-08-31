@@ -1,23 +1,23 @@
-export interface ResolveAbsoluteFilePathArgs {
+interface ResolveAbsoluteFilePathArgs {
   path: string;
   rootPath: string | null | undefined;
 }
 
-export interface BuildAbsoluteFilePathArgs {
+interface BuildAbsoluteFilePathArgs {
   path: string;
   rootPath: string;
 }
 
-export interface GetAbsoluteDirnameArgs {
+interface GetAbsoluteDirnameArgs {
   path: string;
 }
 
-export interface IsAbsoluteFilePathWithinRootArgs {
+interface IsAbsoluteFilePathWithinRootArgs {
   candidatePath: string;
   rootPath: string;
 }
 
-export interface NormalizeAbsoluteFilePathArgs {
+interface NormalizeAbsoluteFilePathArgs {
   path: string;
 }
 
@@ -113,10 +113,6 @@ export function resolveAbsoluteFilePath({
   return buildAbsoluteFilePath({ path, rootPath });
 }
 
-/**
- * Parent directory of an absolute path, used as the base for resolving relative
- * links inside a previewed file. Returns the filesystem root for top-level paths.
- */
 export function getAbsoluteDirname({ path }: GetAbsoluteDirnameArgs): string {
   const trimmed = trimTrailingSlash(path);
   const lastSlashIndex = trimmed.lastIndexOf("/");

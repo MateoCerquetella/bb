@@ -3,6 +3,7 @@ import {
   useCallback,
   useState,
   type CSSProperties,
+  type MouseEvent,
   type MouseEventHandler,
 } from "react";
 import { Button } from "@bb/shared-ui/button";
@@ -29,7 +30,7 @@ import {
   SIDEBAR_HOVER_ACTIONS_ROW_CLASS,
 } from "@/components/ui/sidebar-hover-actions.js";
 import { cn } from "@bb/shared-ui/lib/utils";
-import type { CollapsedChildActivity } from "@/lib/thread-activity";
+import type { CollapsedChildActivity } from "@bb/client-core";
 import {
   SIDEBAR_MORE_ACTION_TRIGGER_CLASS,
   SIDEBAR_ROW_BASE_CLASS,
@@ -40,26 +41,27 @@ import { SidebarChildToggleChevron } from "./SidebarChildToggleChevron";
 import { CollapsedThreadStatusGlyph } from "./ThreadRow";
 import type { SidebarSortableDragBindings } from "./sortableMotion";
 import type { ConsumeDragClickSuppression } from "@/components/ui/use-drag-click-suppression";
-import { useThreadSplitsEnabled } from "@/hooks/useThreadSplitsEnabled";
 import {
   useThreadGroupSplitIndicator,
   type ThreadSplitIndicatorTarget,
 } from "./paneContentSplitIndicator";
 import { SplitPaneMiniMap } from "./SplitPaneMiniMap";
+import { usePluginThreadRowStatusForThreads } from "@/lib/plugin-thread-row-status";
 
 const EMPTY_SPLIT_INDICATOR_THREADS: readonly ThreadSplitIndicatorTarget[] = [];
 
+function stopActionsClick(event: MouseEvent<HTMLElement>) {
+  event.stopPropagation();
+}
+
 interface SidebarSectionRowProps {
-  // Leaf segment shown on the header ("Q3").
   name: string;
   label: string;
-  // Render depth (section nesting + section offset); drives indentation.
   depth: number;
   activity: CollapsedChildActivity;
   collapsedThreads?: readonly ThreadSplitIndicatorTarget[];
   isCollapsed: boolean;
   onToggleCollapsed: () => void;
-  // Pin depth among parent rows when sticky; absent = not pinned (past the cap).
   stickyLevel?: number;
   consumeClickSuppression?: ConsumeDragClickSuppression;
   dragBindings?: SidebarSortableDragBindings;
@@ -69,9 +71,6 @@ interface SidebarSectionRowProps {
   onRemove?: () => void;
 }
 
-// The "Work › Q3" disclosure header for a section. Not a thread: clicking
-// toggles collapse, there is no navigation. It stays visually quieter than a
-// project row while still mirroring parent-thread disclosure behavior.
 function SidebarSectionRowComponent({
   name,
   label,
@@ -89,16 +88,13 @@ function SidebarSectionRowComponent({
   stickyLevel,
 }: SidebarSectionRowProps) {
   const [isActionsOpen, setIsActionsOpen] = useState(false);
-  const threadSplitsEnabled = useThreadSplitsEnabled();
   const collapsedSplitIndicator = useThreadGroupSplitIndicator(
     collapsedThreads,
-    threadSplitsEnabled && isCollapsed,
+    isCollapsed,
   );
+  const pluginStatus = usePluginThreadRowStatusForThreads(collapsedThreads);
   const hasMenuActions = Boolean(onRename || onRemove);
   const hasActions = Boolean(onCreateThread || hasMenuActions);
-  // Collapsed: the header speaks for its hidden descendants through one
-  // trailing indicator. Split membership takes the slot when present, matching
-  // the individual thread row; otherwise activity keeps its normal priority.
   const showRollupIndicator =
     isCollapsed &&
     (collapsedSplitIndicator.miniMap !== null ||
@@ -106,21 +102,23 @@ function SidebarSectionRowComponent({
       activity.working ||
       activity.hasUnsubmittedDraft ||
       activity.unread ||
-      activity.unreadError);
+      activity.unreadError ||
+      pluginStatus !== null);
   const renderRollupIndicator = () =>
     collapsedSplitIndicator.miniMap ? (
       <SplitPaneMiniMap
         slots={collapsedSplitIndicator.miniMap}
         label={`${label} — contains a thread open in split`}
-        isWorking={activity.working}
+        isWorking={activity.working || pluginStatus?.tone === "running"}
       />
     ) : (
-      <CollapsedThreadStatusGlyph activity={activity} />
+      <CollapsedThreadStatusGlyph
+        activity={activity}
+        pluginStatus={pluginStatus}
+      />
     );
   const className = cn(
     SIDEBAR_HOVER_ACTIONS_ROW_CLASS,
-    // Only the non-sticky header needs `relative`; a sticky tier is already a
-    // positioned box. Mirrors ThreadRow / EnvironmentThreadGroupHeader.
     stickyLevel === undefined && "relative",
     SIDEBAR_ROW_BASE_CLASS,
     LIST_HOVER_TRANSITION,
@@ -142,16 +140,9 @@ function SidebarSectionRowComponent({
     },
     [consumeClickSuppression],
   );
-  const stopActionsClick = useCallback<MouseEventHandler<HTMLElement>>(
-    (event) => {
-      event.stopPropagation();
-    },
-    [],
-  );
   const content = (
     <>
-      {/* Full-bleed toggle target for pointer users; the chevron owns keyboard
-          focus (mirrors the project row's hidden focus button). */}
+      {}
       <button
         type="button"
         aria-hidden="true"

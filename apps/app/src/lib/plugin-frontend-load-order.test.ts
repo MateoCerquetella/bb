@@ -3,7 +3,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { definePluginApp } from "./plugin-app-definition";
 import {
-  createBatchedPluginCssApplier,
   createPluginFrontendReconcileState,
   orderPluginFrontendCandidates,
   PLUGIN_FRONTEND_LOAD_CONCURRENCY,
@@ -31,7 +30,6 @@ function pluginModule(): Record<string, unknown> {
   return { default: definePluginApp(() => {}) };
 }
 
-/** Deferred import per URL so a test controls when each bundle "arrives". */
 function makeDeferredImports() {
   const started: string[] = [];
   const resolvers = new Map<string, () => void>();
@@ -48,8 +46,6 @@ function makeDeferredImports() {
       const [url, resolve] = [...resolvers][0]!;
       resolvers.delete(url);
       resolve();
-      // Let the reconcile worker observe the settled import and pick the
-      // next candidate.
       for (let i = 0; i < 10; i += 1) await Promise.resolve();
     },
   };
@@ -63,6 +59,7 @@ function makeDeps(
     fetchCandidates: async () => candidates,
     importModule: async () => pluginModule(),
     applyCss: vi.fn(),
+    retainCss: vi.fn(() => vi.fn()),
     resetCrashedSlots: vi.fn(),
     setRegistrations: vi.fn(),
     removeRegistrations: vi.fn(),
@@ -117,8 +114,6 @@ describe("reconcilePluginFrontends load scheduling", () => {
     const done = reconcilePluginFrontends(state, deps);
     for (let i = 0; i < 10; i += 1) await Promise.resolve();
 
-    // Route-owning plugin first, then smallest first; a fourth import must
-    // wait for a lane to free up (five candidates, three lanes).
     expect(PLUGIN_FRONTEND_LOAD_CONCURRENCY).toBe(3);
     expect(imports.started).toEqual([
       "/api/v1/plugins/panel/assets/app.js?h=h",
@@ -163,61 +158,5 @@ describe("reconcilePluginFrontends load scheduling", () => {
     expect(state.records.get("broken")?.status).toBe("failed");
     expect(state.records.get("fine")?.status).toBe("loaded");
     expect(state.records.get("also")?.status).toBe("loaded");
-  });
-});
-
-describe("createBatchedPluginCssApplier", () => {
-  it("coalesces insertions that land before the next frame into one flush", () => {
-    const apply = vi.fn();
-    const frames: Array<() => void> = [];
-    const applyCss = createBatchedPluginCssApplier({
-      apply,
-      requestFrame: (callback) => {
-        frames.push(callback);
-      },
-    });
-
-    applyCss("a", "/a.css");
-    applyCss("b", "/b.css");
-    applyCss("a", "/a2.css"); // newer URL for the same plugin replaces
-    expect(apply).not.toHaveBeenCalled();
-    expect(frames).toHaveLength(1);
-
-    frames[0]!();
-    expect(apply.mock.calls).toEqual([
-      ["a", "/a2.css"],
-      ["b", "/b.css"],
-    ]);
-
-    // A later insertion requests a fresh frame rather than being dropped.
-    applyCss("c", "/c.css");
-    expect(frames).toHaveLength(2);
-    frames[1]!();
-    expect(apply).toHaveBeenLastCalledWith("c", "/c.css");
-  });
-
-  it("removes synchronously and cancels a pending insertion for that plugin", () => {
-    const apply = vi.fn();
-    const frames: Array<() => void> = [];
-    const applyCss = createBatchedPluginCssApplier({
-      apply,
-      requestFrame: (callback) => {
-        frames.push(callback);
-      },
-    });
-
-    applyCss("a", "/a.css");
-    applyCss("b", "/b.css");
-    applyCss("a", null);
-    // Teardown/disposal must not leave a sheet behind, so removal does not
-    // wait for the frame.
-    expect(apply.mock.calls).toEqual([["a", null]]);
-
-    frames[0]!();
-    // The pending insertion for "a" was cancelled by the removal.
-    expect(apply.mock.calls).toEqual([
-      ["a", null],
-      ["b", "/b.css"],
-    ]);
   });
 });

@@ -15,7 +15,6 @@ import {
   dispatchManagedEnvironmentReprovision,
   hasActiveManagedEnvironmentProvision,
   MANAGED_REPROVISION_IN_PROGRESS,
-  MANAGED_REPROVISION_STARTED,
 } from "../environments/environment-provisioning-internal.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import {
@@ -36,7 +35,7 @@ export interface ReadyThreadEnvironment extends Environment {
   status: "ready";
 }
 
-export interface DispatchTurnDuringReprovisionArgs {
+interface DispatchTurnDuringReprovisionArgs {
   beforeRequestAppendInTransaction?: (args: { tx: DbTransaction }) => void;
   deps: LoggedPendingInteractionWorkSessionDeps;
   environment: Environment;
@@ -44,20 +43,11 @@ export interface DispatchTurnDuringReprovisionArgs {
   initiator: ThreadTurnInitiator;
   input: PromptInput[];
   inputGroups?: PromptInput[][];
-  onStarted?: () => void;
   senderThreadId: string | null;
-  // Family-B taxonomy fields for `initiator: "system"` reprovision dispatches.
-  // Threaded onto the deferred `client/turn/requested` event the reprovision
-  // queues once the workspace is ready.
   systemMessageKind?: SystemMessageKind;
   systemMessageSubject?: SystemMessageSubject | null;
   thread: Thread;
 }
-
-type ThreadTurnDispatchReadDeps = Pick<
-  LoggedPendingInteractionWorkSessionDeps,
-  "db"
->;
 
 function reprovisionStartedText(
   workspaceProvisionType: Environment["workspaceProvisionType"],
@@ -73,7 +63,7 @@ function reprovisionStartedText(
 }
 
 function canRecoverPreStartErroredThread(
-  deps: ThreadTurnDispatchReadDeps,
+  deps: Pick<LoggedPendingInteractionWorkSessionDeps, "db">,
   thread: Thread,
 ): boolean {
   return (
@@ -111,10 +101,6 @@ export async function dispatchTurnDuringReprovision(
     return false;
   }
 
-  // A destroying/destroyed environment is gone and is never reprovisioned.
-  // Surface the "environment is gone" condition the frontend banner keys off
-  // instead of dispatching a reprovision. Error-recovery reprovision for an
-  // `error`-status environment is still legitimate and falls through.
   const goneDetails = goneThreadEnvironmentDetails(args.environment);
   if (goneDetails) {
     throwThreadEnvironmentUnavailable(goneDetails);
@@ -138,9 +124,6 @@ export async function dispatchTurnDuringReprovision(
     hostId: args.environment.hostId,
   });
 
-  // Stronger than the run.preparing table cell on purpose: an errored
-  // thread may reprovision only when it never started (no provider thread id),
-  // an event-log condition the thread row cannot express.
   if (
     args.thread.status === "idle" ||
     canRecoverPreStartErroredThread(args.deps, args.thread)
@@ -200,10 +183,5 @@ export async function dispatchTurnDuringReprovision(
       "Environment is already provisioning",
     );
   }
-  if (reprovisionResult.status !== MANAGED_REPROVISION_STARTED) {
-    throw new ApiError(500, "internal_error", "Unexpected reprovision result");
-  }
-
-  args.onStarted?.();
   return true;
 }

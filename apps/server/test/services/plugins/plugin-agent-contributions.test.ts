@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createConnection, migrate, type DbConnection } from "@bb/db";
 import { encodeClientTurnRequestIdNumber } from "@bb/domain";
 import type { Logger } from "@bb/logger";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginService,
@@ -100,6 +101,7 @@ describe("plugin skills tier", () => {
     migrate(db);
     workDir = await mkdtemp(join(tmpdir(), "bb-plugin-skills-test-"));
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       hub: {
@@ -127,12 +129,12 @@ describe("plugin skills tier", () => {
     await service.installPath(rootDir);
 
     const builtinRoot = join(workDir, "builtin-skills");
-    await writeSkill(builtinRoot, "alpha"); // loses to the plugin copy
+    await writeSkill(builtinRoot, "alpha");
     await writeSkill(builtinRoot, "builtin-only");
     const dataDir = join(workDir, "data");
-    await writeSkill(join(dataDir, "skills"), "beta"); // beats the plugin copy
+    await writeSkill(join(dataDir, "skills"), "beta");
     const projectRoot = join(workDir, "project-skills");
-    const projectGamma = await writeSkill(projectRoot, "gamma"); // beats the plugin copy
+    const projectGamma = await writeSkill(projectRoot, "gamma");
 
     const skillTreeRegistry = new SkillTreeRegistry();
     const entries = resolveSkillCatalogEntries(testLogger, {
@@ -169,7 +171,6 @@ describe("plugin skills tier", () => {
     });
     expect(byName.get("gamma")?.sourceType).toBe("project");
     expect(builtinOnly.sourceType).toBe("builtin");
-    // No duplicates: each name resolved to exactly one source.
     expect(sources).toHaveLength(byName.size);
   });
 
@@ -284,7 +285,6 @@ describe("plugin agent contributions reach thread runtime config", () => {
         entryPath: "SKILL.md",
       }),
     );
-    // A skill added after install lands on the next turn after reload.
     await writeSkill(join(rootDir, "skills"), "late-skill");
     await harness.pluginService.reload("ctxdemo");
     const reloaded = await buildCommand(2);

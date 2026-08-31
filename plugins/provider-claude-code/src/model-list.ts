@@ -17,16 +17,6 @@ import {
   type ClaudeCodeCatalogEntry,
 } from "./model-catalog.js";
 
-const OPUS_4_7_REASONING_EFFORTS: readonly ModelReasoningEffort[] =
-  CLAUDE_XHIGH_CAPABLE_REASONING_EFFORTS;
-
-const OPUS_4_6_REASONING_EFFORTS: readonly ModelReasoningEffort[] = [
-  LOW_REASONING_EFFORT,
-  MEDIUM_REASONING_EFFORT,
-  HIGH_REASONING_EFFORT,
-  MAX_REASONING_EFFORT,
-];
-
 const SONNET_REASONING_EFFORTS: readonly ModelReasoningEffort[] = [
   LOW_REASONING_EFFORT,
   MEDIUM_REASONING_EFFORT,
@@ -88,7 +78,7 @@ const CLAUDE_CODE_SELECTED_ONLY_CATALOG: readonly ClaudeCodeCatalogEntry[] = [
     displayName: "Opus 4.7 (Legacy)",
     description:
       "Legacy Opus 4.7 model retained for existing non-1M selections",
-    supportedReasoningEfforts: OPUS_4_7_REASONING_EFFORTS,
+    supportedReasoningEfforts: CLAUDE_XHIGH_CAPABLE_REASONING_EFFORTS,
     defaultReasoningEffort: "medium",
   },
   {
@@ -96,7 +86,7 @@ const CLAUDE_CODE_SELECTED_ONLY_CATALOG: readonly ClaudeCodeCatalogEntry[] = [
     model: withOneMillionContext(CLAUDE_OPUS_4_6_MODEL),
     displayName: "Opus 4.6 (1M, Legacy)",
     description: "Legacy Opus 4.6 1M model retained for existing selections",
-    supportedReasoningEfforts: OPUS_4_6_REASONING_EFFORTS,
+    supportedReasoningEfforts: SONNET_REASONING_EFFORTS,
     defaultReasoningEffort: "medium",
   },
   {
@@ -104,7 +94,7 @@ const CLAUDE_CODE_SELECTED_ONLY_CATALOG: readonly ClaudeCodeCatalogEntry[] = [
     model: CLAUDE_OPUS_4_6_MODEL,
     displayName: "Opus 4.6 (Legacy)",
     description: "Legacy Opus 4.6 model retained for existing selections",
-    supportedReasoningEfforts: OPUS_4_6_REASONING_EFFORTS,
+    supportedReasoningEfforts: SONNET_REASONING_EFFORTS,
     defaultReasoningEffort: "medium",
   },
   {
@@ -259,7 +249,7 @@ function markDefaultModel(
   );
 }
 
-export interface ListClaudeCodeModelsResult {
+interface ListClaudeCodeModelsResult {
   models: AvailableModel[];
   selectedOnlyModels: AvailableModel[];
 }
@@ -267,20 +257,7 @@ export interface ListClaudeCodeModelsResult {
 export function buildClaudeCodeModels(
   discoveredModels: readonly ModelInfo[],
 ): ListClaudeCodeModelsResult {
-  // The curated catalog is always offered and discovery is purely additive, so
-  // the picker keeps a stable, well-labelled base set no matter what a probe
-  // returns. The trade-off is deliberate: a curated row can name a model this
-  // account cannot run (an entitlement it lacks, or a CLI too old for Fable),
-  // and that only surfaces when a turn is submitted. In exchange, a probe that
-  // returns a narrow list can never strand the picker.
-  //
-  // Because absence from this list is therefore no longer evidence that a model
-  // was retired, callers must not use it to retire a stored selection.
   const models = CLAUDE_CODE_ACTIVE_CATALOG.map(buildCatalogModel);
-  // Discovery can move faster than BB's curated labels, so an account-scoped row
-  // BB has no metadata for is appended rather than dropped. Prefer non-"default"
-  // rows so aliases carrying the same resolved id provide the useful provider
-  // label.
   for (const discovered of [
     ...discoveredModels.filter((model) => model.value !== "default"),
     ...discoveredModels.filter((model) => model.value === "default"),
@@ -291,8 +268,6 @@ export function buildClaudeCodeModels(
     }
     models.push(buildDiscoveredModel(discovered));
   }
-  // Selected-only rows stay discovery-gated: they exist to label a selection the
-  // user already has, not to offer new ones, so there is nothing to keep stable.
   const selectedOnlyModels = CLAUDE_CODE_SELECTED_ONLY_CATALOG.filter(
     (entry) =>
       modelIsDiscovered(entry.model, discoveredModels) &&

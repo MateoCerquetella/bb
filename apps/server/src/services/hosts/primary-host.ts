@@ -11,16 +11,12 @@ import {
 
 type PrimaryHostDeps = Pick<AppDeps, "config" | "db" | "hub">;
 
-export interface ReadPrimaryHostIdArgs {
+interface ReadPrimaryHostIdArgs {
   dataDir: string;
 }
 
-export interface AssertUsableHostIdArgs {
+interface AssertUsableHostIdArgs {
   hostId: string;
-}
-
-function unusableHostError(): ApiError {
-  return new ApiError(400, "unsupported_host", "Host cannot run threads");
 }
 
 function primaryHostUnavailableError(): ApiError {
@@ -31,7 +27,7 @@ function primaryHostUnavailableError(): ApiError {
   );
 }
 
-export function readPrimaryHostIdFromDataDir(
+function readPrimaryHostIdFromDataDir(
   args: ReadPrimaryHostIdArgs,
 ): string | null {
   try {
@@ -83,18 +79,11 @@ export function requirePrimaryHostId(deps: PrimaryHostDeps): string {
   return hostId;
 }
 
-/**
- * Validates an explicit execution target. Any non-destroyed persistent host is
- * accepted; connectivity remains a dispatch-time concern.
- */
 export function assertUsableHostId(
   deps: PrimaryHostDeps,
   args: AssertUsableHostIdArgs,
 ): void {
-  const host = requireNonDestroyedHostWithStatus(deps, args.hostId);
-  if (host.type !== "persistent") {
-    throw unusableHostError();
-  }
+  requireNonDestroyedHostWithStatus(deps, args.hostId);
 }
 
 export function requireConnectedPrimaryHostId(deps: PrimaryHostDeps): string {

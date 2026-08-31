@@ -57,7 +57,7 @@ interface RecoverOrphanedEnvironmentDestroyRequestsArgs {
   updatedBefore: number;
 }
 
-export interface RecoverOrphanedEnvironmentDestroyRequestsResult {
+interface RecoverOrphanedEnvironmentDestroyRequestsResult {
   destroyed: number;
   errored: number;
 }
@@ -67,7 +67,9 @@ type EnvironmentDestroyCommand =
 type EnvironmentDestroyCommandResultReport =
   CommandResultReportForType<"environment.destroy">;
 
-export interface SettleEnvironmentDestroyCommandResultArgs {
+const TEARDOWN_TIMEOUT_MS = 15 * 60 * 1000;
+
+interface SettleEnvironmentDestroyCommandResultArgs {
   command: EnvironmentDestroyCommand;
   deps: EnvironmentCleanupSettlementDeps;
   execution: HostDaemonCommandExecutionRecord;
@@ -96,23 +98,12 @@ interface EnvironmentCleanupSettlementDeps extends EnvironmentCleanupWriteDeps {
 }
 
 type EnvironmentCleanupDecisionDeps = Pick<AppDeps, "db">;
-type EnvironmentCleanupHostConnectionDeps = Pick<AppDeps, "db" | "hub">;
-
-function hasConnectedHostDaemon(
-  deps: EnvironmentCleanupHostConnectionDeps,
-  hostId: string,
-): boolean {
-  return deps.hub.hasDaemonForHost(hostId);
-}
 
 function workspaceCanBeDestroyedNow(
   deps: LoggedWorkSessionDeps,
   environmentId: string,
 ): boolean {
   const environment = getEnvironment(deps.db, environmentId);
-  // Not lifecycle: destroy precondition — only a cleanup-owned workspace is
-  // eligible for a destroy command; destroy.started re-asserts the row state
-  // atomically when the destroy actually starts.
   if (
     !environment ||
     !environment.managed ||
@@ -122,7 +113,7 @@ function workspaceCanBeDestroyedNow(
     return false;
   }
 
-  if (!hasConnectedHostDaemon(deps, environment.hostId)) {
+  if (!deps.hub.hasDaemonForHost(environment.hostId)) {
     return false;
   }
 
@@ -197,9 +188,6 @@ export function settleEnvironmentDestroyCommandResult(
   if (!environment) {
     return emptyCommandResultSideEffects();
   }
-  // Not lifecycle: idempotent re-settlement routing — a repeated success
-  // report for an already-destroyed environment still finalizes its threads
-  // and terminals below.
   if (environment.status !== "destroyed") {
     const outcome = applyLoggedEnvironmentLifecycleEventInTransaction(
       args.deps,
@@ -228,10 +216,6 @@ export function settleEnvironmentDestroyCommandResult(
   return {
     postCommitActions: [
       {
-        name: "Terminal cleanup after environment destroy",
-        context: {
-          environmentId: environment.id,
-        },
         run: (deps) =>
           deps.terminalSessions.closeDestroyedEnvironmentTerminals({
             environmentId: environment.id,
@@ -270,6 +254,7 @@ function dispatchEnvironmentDestroy(
       type: "environment.destroy",
       environmentId: environment.id,
       workspaceContext: workspaceContextFromPath(environment),
+      teardownTimeoutMs: TEARDOWN_TIMEOUT_MS,
     },
     execution,
     hostId: environment.hostId,
@@ -337,8 +322,6 @@ async function advanceEnvironmentCleanup(
   args: AdvanceEnvironmentCleanupArgs,
 ): Promise<void> {
   const environment = getEnvironment(deps.db, args.environmentId);
-  // Not lifecycle: advance routing — "destroyed" is terminal, and stale
-  // destroying rows are owned by the orphan-destroy recovery sweep.
   if (
     !environment ||
     !environment.managed ||
@@ -387,9 +370,6 @@ async function advanceEnvironmentCleanup(
     return;
   }
 
-  // Stronger caller-side guard kept: destroy.started re-asserts the lifecycle
-  // state atomically; the recheck only avoids burning an execution record and
-  // a noisy no-op log on an obviously stale advance.
   const refreshedEnvironment = getEnvironment(deps.db, environment.id);
   if (
     !refreshedEnvironment ||
@@ -399,17 +379,6 @@ async function advanceEnvironmentCleanup(
     return;
   }
 
-  // Archive grace window: a freshly retired managed worktree stays revivable
-  // (worktree intact, undoable via unarchive → retire.cancelled) for the
-  // configured grace window so an accidental archive can be undone losslessly.
-  // `retireRequestedAt` is stamped by the lifecycle event and survives restart
-  // without moving when unrelated environment metadata changes. Scope: only
-  // the path-bearing `retiring` case waits; a pathless env (handled above) has
-  // no worktree to lose, and `error` is failed cleanup rather than an
-  // accidental-archive brick. The window applies only when the environment
-  // still has a revivable archived thread — an env left retiring by a
-  // deleted/tombstoned thread has nothing to unarchive, so it is cleaned up
-  // immediately rather than lingering.
   if (
     refreshedEnvironment.status === "retiring" &&
     refreshedEnvironment.path !== null &&

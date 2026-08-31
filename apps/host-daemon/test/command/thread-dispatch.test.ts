@@ -5,7 +5,6 @@ import type {
   AgentRuntimeOptions,
 } from "@bb/agent-runtime";
 import type {
-  HostDaemonAcpLaunchSpec,
   HostDaemonBridgeLaunch,
   HostDaemonCommand,
 } from "@bb/host-daemon-contract";
@@ -45,7 +44,7 @@ function textPromptInput(text: string): TextPromptInput {
   return { type: "text", text, mentions: [] };
 }
 
-function customAcpLaunchSpec(): HostDaemonAcpLaunchSpec {
+function customAcpLaunchSpec() {
   return {
     displayName: "Custom ACP",
     command: "custom-agent",
@@ -87,7 +86,7 @@ describe("thread command dispatch", () => {
         model: "gpt-5",
         serviceTier: "default",
         reasoningLevel: "medium",
-        workflowsEnabled: false,
+        providerOptions: {},
         permissionMode: "full",
         permissionScope: "full",
         approvalReviewer: null,
@@ -142,7 +141,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,
@@ -214,7 +213,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -316,7 +315,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -375,7 +374,9 @@ describe("thread command dispatch", () => {
     const bridgeBytes = Buffer.from("export const bridge = true;\n");
     const sha256 = createHash("sha256").update(bridgeBytes).digest("hex");
     const harness = createHarness({ workspacePath: "/tmp/env-bridge-start" });
-    const fetchPluginHostArtifact = vi.fn(async () => new Uint8Array(bridgeBytes));
+    const fetchPluginHostArtifact = vi.fn(
+      async () => new Uint8Array(bridgeBytes),
+    );
 
     await dispatchCommand(
       {
@@ -390,12 +391,15 @@ describe("thread command dispatch", () => {
         providerId: "echo-agent",
         bridgeLaunch: {
           pluginId: "provider-echo",
+          providerOptions: {},
+          envPassthrough: [],
           source: {
             kind: "artifact",
             digest: sha256,
             byteLength: bridgeBytes.byteLength,
           },
           capabilities: {
+            providerInstallation: false,
             supportsServiceTier: false,
             permissionModes: ["full"] as const,
             supportsThreadArchive: false,
@@ -409,7 +413,7 @@ describe("thread command dispatch", () => {
           model: "echo-default",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -431,13 +435,16 @@ describe("thread command dispatch", () => {
       "plugin-host-artifacts",
       "provider-echo",
       sha256,
-      "host.js",
+      "host.mjs",
     );
     expect(harness.runtimeState.startedBridgeLaunch).toEqual({
       pluginId: "provider-echo",
       dataDir: path.join(dataDir, "plugins", "provider-echo", "bridge-data"),
+      providerOptions: {},
+      envPassthrough: [],
       source: { kind: "artifact", digest: sha256, artifactPath },
       capabilities: {
+        providerInstallation: false,
         supportsServiceTier: false,
         permissionModes: ["full"],
         supportsThreadArchive: false,
@@ -454,15 +461,20 @@ describe("thread command dispatch", () => {
     const bridgeBytes = Buffer.from("export const archiveBridge = true;\n");
     const sha256 = createHash("sha256").update(bridgeBytes).digest("hex");
     const harness = createHarness({ workspacePath: "/tmp/env-bridge-archive" });
-    const fetchPluginHostArtifact = vi.fn(async () => new Uint8Array(bridgeBytes));
+    const fetchPluginHostArtifact = vi.fn(
+      async () => new Uint8Array(bridgeBytes),
+    );
     const bridgeLaunch: HostDaemonBridgeLaunch = {
       pluginId: "provider-echo",
+      providerOptions: {},
+      envPassthrough: [],
       source: {
         kind: "artifact",
         digest: sha256,
         byteLength: bridgeBytes.byteLength,
       },
       capabilities: {
+        providerInstallation: false,
         supportsServiceTier: false,
         permissionModes: ["full"],
         supportsThreadArchive: true,
@@ -477,14 +489,17 @@ describe("thread command dispatch", () => {
         kind: "artifact" as const,
         digest: sha256,
         artifactPath: path.join(
-      dataDir,
-      "plugin-host-artifacts",
-      "provider-echo",
-      sha256,
-      "host.js",
-    ),
+          dataDir,
+          "plugin-host-artifacts",
+          "provider-echo",
+          sha256,
+          "host.mjs",
+        ),
       },
+      providerOptions: {},
+      envPassthrough: [],
       capabilities: {
+        providerInstallation: false,
         supportsServiceTier: false,
         permissionModes: ["full"],
         supportsThreadArchive: true,
@@ -534,7 +549,9 @@ describe("thread command dispatch", () => {
     const bridgeBytes = Buffer.from("export const resumeBridge = true;\n");
     const sha256 = createHash("sha256").update(bridgeBytes).digest("hex");
     const harness = createHarness({ workspacePath: "/tmp/env-bridge-resume" });
-    const fetchPluginHostArtifact = vi.fn(async () => new Uint8Array(bridgeBytes));
+    const fetchPluginHostArtifact = vi.fn(
+      async () => new Uint8Array(bridgeBytes),
+    );
 
     await dispatchCommand(
       {
@@ -548,7 +565,7 @@ describe("thread command dispatch", () => {
           model: "echo-default",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -564,12 +581,15 @@ describe("thread command dispatch", () => {
           providerThreadId: "provider-bridge-resume",
           bridgeLaunch: {
             pluginId: "provider-echo",
+            providerOptions: {},
+            envPassthrough: [],
             source: {
               kind: "artifact",
               digest: sha256,
               byteLength: bridgeBytes.byteLength,
             },
             capabilities: {
+              providerInstallation: false,
               supportsServiceTier: false,
               permissionModes: ["full"] as const,
               supportsThreadArchive: false,
@@ -597,14 +617,17 @@ describe("thread command dispatch", () => {
         kind: "artifact" as const,
         digest: sha256,
         artifactPath: path.join(
-      dataDir,
-      "plugin-host-artifacts",
-      "provider-echo",
-      sha256,
-      "host.js",
-    ),
+          dataDir,
+          "plugin-host-artifacts",
+          "provider-echo",
+          sha256,
+          "host.mjs",
+        ),
       },
+      providerOptions: {},
+      envPassthrough: [],
       capabilities: {
+        providerInstallation: false,
         supportsServiceTier: false,
         permissionModes: ["full"],
         supportsThreadArchive: false,
@@ -658,7 +681,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,
@@ -719,7 +742,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -783,7 +806,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -845,7 +868,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -923,7 +946,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,
@@ -995,7 +1018,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,
@@ -1057,7 +1080,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,
@@ -1112,7 +1135,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,
@@ -1173,7 +1196,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1252,8 +1275,6 @@ describe("thread command dispatch", () => {
     expect(harness.runtimeState.unarchivedProviderThreadId).toBe(
       "provider-thread-1",
     );
-    // The archive removed the thread from the runtime, so the later stop is
-    // an idempotent no-op that never reaches the provider.
     expect(harness.runtimeState.stoppedThreadId).toBeUndefined();
     expect(harness.manager.listActiveThreads()).toEqual([]);
   });
@@ -1279,7 +1300,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1308,7 +1329,6 @@ describe("thread command dispatch", () => {
     expect(harness.runtimeState.stoppedThreadId).toBe("thread-stop");
     expect(harness.runtime.hasThread("thread-stop")).toBe(false);
 
-    // A second stop is an idempotent no-op that never reaches the provider.
     harness.runtimeState.stoppedThreadId = undefined;
     await expect(
       dispatchCommand(
@@ -1379,7 +1399,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1424,7 +1444,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1515,7 +1535,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1551,7 +1571,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1610,7 +1630,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1634,7 +1654,6 @@ describe("thread command dispatch", () => {
       },
       harness.dispatchOptions(),
     );
-    // The provider finishes the turn; the runtime clears its active turn.
     harness.threadControls.endActiveTurn("thread-1");
     expect(harness.manager.listActiveThreads()).toEqual([]);
 
@@ -1650,7 +1669,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1677,7 +1696,6 @@ describe("thread command dispatch", () => {
 
     expect(result).toEqual({ appliedAs: "new-turn" });
     expect(harness.runtimeState.ranTurnText).toBe("resume work");
-    // The runtime still hosts the thread, so no resume round-trip happens.
     expect(harness.runtimeState.resumedThreadId).toBeUndefined();
     expect(harness.manager.listActiveThreads()).toEqual([
       {
@@ -1706,7 +1724,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1740,23 +1758,24 @@ describe("thread command dispatch", () => {
     ]);
   });
 
-  it("falls back to a new turn when auto turn.submit sees a stale turn", async () => {
+  it("re-steers the newer active turn when auto turn.submit sees a stale target", async () => {
     const harness = createHarness();
     const requestId = nextClientRequestId();
+    const steeredTurnIds: string[] = [];
     await harness.manager.ensureEnvironment({
       environmentId: "env-1",
       workspacePath: "/tmp/env-1",
     });
-    harness.threadControls.setProviderSession("thread-1", {
-      providerId: "fake",
-      providerThreadId: "provider-1",
-    });
+    harness.threadControls.setActiveTurn("thread-1", "turn-old");
     harness.runtime.steerTurn = async (args) => {
-      harness.runtimeState.steeredTurnId = args.expectedTurnId;
-      harness.runtimeState.steeredClientRequestId = args.clientRequestId;
+      steeredTurnIds.push(args.expectedTurnId);
+      if (args.expectedTurnId === "turn-new") {
+        return { status: "steered" };
+      }
+      harness.threadControls.setActiveTurn("thread-1", "turn-new");
       return {
         status: "stale",
-        activeTurnId: null,
+        activeTurnId: "turn-new",
       };
     };
 
@@ -1767,12 +1786,12 @@ describe("thread command dispatch", () => {
         environmentId: "env-1",
         threadId: "thread-1",
         requestId,
-        input: [textPromptInput("send anyway")],
+        input: [textPromptInput("adjust the newer turn")],
         options: {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1797,11 +1816,86 @@ describe("thread command dispatch", () => {
       harness.dispatchOptions(),
     );
 
-    expect(result).toEqual({ appliedAs: "new-turn" });
-    expect(harness.runtimeState.steeredTurnId).toBe("turn-old");
-    expect(harness.runtimeState.steeredClientRequestId).toBe(requestId);
-    expect(harness.runtimeState.ranTurnText).toBe("send anyway");
-    expect(harness.runtimeState.ranTurnClientRequestId).toBe(requestId);
+    expect(result).toEqual({ appliedAs: "steer" });
+    expect(steeredTurnIds).toEqual(["turn-old", "turn-new"]);
+    expect(harness.runtimeState.ranTurnClientRequestId).toBeUndefined();
+  });
+
+  it("waits for a newer starting turn and re-steers it after a stale target", async () => {
+    const harness = createHarness();
+    const requestId = nextClientRequestId();
+    const steeredTurnIds: string[] = [];
+    let activeTurnId: string | null = "turn-old";
+    let pendingTurnStart = false;
+    let waitCalls = 0;
+    await harness.manager.ensureEnvironment({
+      environmentId: "env-1",
+      workspacePath: "/tmp/env-1",
+    });
+    harness.threadControls.setProviderSession("thread-1", {
+      providerId: "fake",
+      providerThreadId: "provider-1",
+    });
+    harness.runtime.getActiveTurnId = () => activeTurnId;
+    harness.runtime.getLiveThreadIds = () =>
+      activeTurnId !== null || pendingTurnStart ? ["thread-1"] : [];
+    harness.runtime.waitForActiveTurn = async () => {
+      waitCalls += 1;
+      pendingTurnStart = false;
+      activeTurnId = "turn-new";
+      return activeTurnId;
+    };
+    harness.runtime.steerTurn = async (args) => {
+      steeredTurnIds.push(args.expectedTurnId);
+      if (args.expectedTurnId === "turn-new") {
+        return { status: "steered" };
+      }
+      activeTurnId = null;
+      pendingTurnStart = true;
+      return { status: "stale", activeTurnId: null };
+    };
+
+    const result = await dispatchCommand(
+      {
+        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        type: "turn.submit",
+        environmentId: "env-1",
+        threadId: "thread-1",
+        requestId,
+        input: [textPromptInput("adjust once the turn starts")],
+        options: {
+          model: "gpt-5",
+          serviceTier: "default",
+          reasoningLevel: "medium",
+          providerOptions: {},
+          permissionMode: "full",
+          permissionScope: "full",
+          approvalReviewer: null,
+          permissionEscalation: null,
+        },
+        resumeContext: {
+          bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+          workspaceContext: {
+            workspacePath: "/tmp/env-1",
+            workspaceProvisionType: "unmanaged",
+          },
+          projectId: "project-1",
+          providerId: "fake",
+          providerThreadId: "provider-1",
+          instructions: "Be a helpful coding agent.",
+          dynamicTools: [],
+          injectedSkillSources: [],
+          instructionMode: "append",
+        },
+        target: { mode: "steer", expectedTurnId: "turn-old" },
+      },
+      harness.dispatchOptions(),
+    );
+
+    expect(result).toEqual({ appliedAs: "steer" });
+    expect(steeredTurnIds).toEqual(["turn-old", "turn-new"]);
+    expect(waitCalls).toBe(1);
+    expect(harness.runtimeState.ranTurnClientRequestId).toBeUndefined();
   });
 
   it("falls back to a new turn when explicit steer sees a stale turn", async () => {
@@ -1832,7 +1926,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1886,7 +1980,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -1919,7 +2013,10 @@ describe("thread command dispatch", () => {
 
   it("lazily resumes a missing thread runtime before turn.submit", async () => {
     const harness = createHarness({ workspacePath: "/tmp/env-lazy" });
-    const acpLaunchSpec = customAcpLaunchSpec();
+    const resumeLaunch = {
+      ...DISPATCH_TEST_BRIDGE_LAUNCH,
+      providerOptions: { acpLaunchSpec: customAcpLaunchSpec() },
+    };
 
     const result = await dispatchCommand(
       {
@@ -1927,28 +2024,26 @@ describe("thread command dispatch", () => {
         type: "turn.submit",
         environmentId: "env-lazy",
         threadId: "thread-1",
-        acpLaunchSpec,
         requestId: nextClientRequestId(),
         input: [textPromptInput("hello")],
         options: {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
           permissionEscalation: null,
         },
         resumeContext: {
-          bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+          bridgeLaunch: resumeLaunch,
           workspaceContext: {
             workspacePath: "/tmp/env-lazy",
             workspaceProvisionType: "unmanaged",
           },
           projectId: "project-1",
           providerId: "fake",
-          acpLaunchSpec,
           providerThreadId: "provider-1",
           instructions: "Be a helpful coding agent.",
           dynamicTools: [],
@@ -1969,7 +2064,9 @@ describe("thread command dispatch", () => {
       }),
     ]);
     expect(harness.runtimeState.resumedEnvironmentId).toBe("env-lazy");
-    expect(harness.runtimeState.resumedAcpLaunchSpec).toBe(acpLaunchSpec);
+    expect(harness.runtimeState.resumedBridgeLaunch).toMatchObject({
+      providerOptions: { acpLaunchSpec: { command: "custom-agent" } },
+    });
     expect(harness.runtimeState.resumedProviderThreadId).toBe("provider-1");
     expect(harness.runtimeState.ranTurnText).toBe("hello");
   });
@@ -2032,7 +2129,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -2058,8 +2155,6 @@ describe("thread command dispatch", () => {
     );
 
     expect(result).toEqual({ appliedAs: "new-turn" });
-    // The exit dropped the environment entry, so the dispatch creates a fresh
-    // runtime and resumes the thread there instead of reusing the dead one.
     expect(createRuntimeCalls).toBe(2);
     expect(replacementFake.state.resumedThreadId).toBe("thread-1");
     expect(replacementFake.state.ranTurnText).toBe("after exit");
@@ -2067,11 +2162,9 @@ describe("thread command dispatch", () => {
 
   it("covers provider.list_models", async () => {
     const harness = createHarness();
-    const acpLaunchSpec = customAcpLaunchSpec();
     let capturedListModelsArgs:
       | {
           providerId: string;
-          acpLaunchSpec?: HostDaemonAcpLaunchSpec;
           bridgeLaunch?: AgentRuntimeBridgeLaunch;
           cwd?: string;
         }
@@ -2082,7 +2175,6 @@ describe("thread command dispatch", () => {
         bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
         type: "provider.list_models",
         providerId: "fake",
-        acpLaunchSpec,
         cwd: "/tmp/worktree",
       },
       {
@@ -2119,7 +2211,6 @@ describe("thread command dispatch", () => {
 
     expect(capturedListModelsArgs).toEqual({
       providerId: "fake",
-      acpLaunchSpec,
       bridgeLaunch: DISPATCH_TEST_RUNTIME_BRIDGE_LAUNCH,
       cwd: "/tmp/worktree",
     });
@@ -2152,7 +2243,10 @@ describe("thread command dispatch", () => {
   it("uses the server-provided thread runtime config", async () => {
     const threadStorage = await makeTempDir("bb-thread-runtime-");
     const harness = createHarness({ workspacePath: threadStorage });
-    const acpLaunchSpec = customAcpLaunchSpec();
+    const startLaunch = {
+      ...DISPATCH_TEST_BRIDGE_LAUNCH,
+      providerOptions: { acpLaunchSpec: customAcpLaunchSpec() },
+    };
     const threadInstructions = [
       "You are a thread in a project inside bb.",
       "Prefer concise user updates.",
@@ -2163,7 +2257,7 @@ describe("thread command dispatch", () => {
 
     await dispatchCommand(
       {
-        bridgeLaunch: DISPATCH_TEST_BRIDGE_LAUNCH,
+        bridgeLaunch: startLaunch,
         type: "thread.start",
         environmentId: "env-parent",
         threadId: "thread-parent",
@@ -2173,14 +2267,13 @@ describe("thread command dispatch", () => {
         },
         projectId: "project-1",
         providerId: "fake",
-        acpLaunchSpec,
         requestId: nextClientRequestId(),
         input: [textPromptInput("hello")],
         options: {
           model: "claude-opus-4-7",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -2213,7 +2306,9 @@ describe("thread command dispatch", () => {
     expect(harness.runtimeState.startedDynamicTools).toEqual([
       expect.objectContaining({ name: "notify_user" }),
     ]);
-    expect(harness.runtimeState.startedAcpLaunchSpec).toBe(acpLaunchSpec);
+    expect(harness.runtimeState.startedBridgeLaunch).toMatchObject({
+      providerOptions: { acpLaunchSpec: { command: "custom-agent" } },
+    });
     expect(harness.runtimeState.startedInstructions).toBe(threadInstructions);
   });
 
@@ -2240,7 +2335,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -2280,7 +2375,7 @@ describe("thread command dispatch", () => {
           model: "gpt-5",
           serviceTier: "default",
           reasoningLevel: "medium",
-          workflowsEnabled: false,
+          providerOptions: {},
           permissionMode: "full",
           permissionScope: "full",
           approvalReviewer: null,
@@ -2320,7 +2415,7 @@ describe("thread command dispatch", () => {
             model: "gpt-5",
             serviceTier: "default",
             reasoningLevel: "medium",
-            workflowsEnabled: false,
+            providerOptions: {},
             permissionMode: "full",
             permissionScope: "full",
             approvalReviewer: null,

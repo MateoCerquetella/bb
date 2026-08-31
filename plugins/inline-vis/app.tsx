@@ -1,9 +1,6 @@
-// bb-plugin-inline-vis frontend — assistant message directive that previews
-// a workspace HTML file through the same path-shaped, sandboxed iframe route
-// as bb's sidebar HTML preview. Scripts, relative assets, and normal web
-// resources work inside an opaque origin that cannot access the host page.
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { Icon } from "@bb/shared-ui/icon";
+import { Skeleton } from "@bb/shared-ui/skeleton";
 import {
   definePluginApp,
   useRpc,
@@ -21,26 +18,6 @@ type LoadState =
 const DEFAULT_HEIGHT_PX = 224;
 const MIN_HEIGHT_PX = 120;
 const MAX_HEIGHT_PX = 1_200;
-
-interface PrepareHtmlPreviewRpcResult {
-  file: string;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function parsePrepareHtmlPreviewRpcResult(
-  value: unknown,
-): PrepareHtmlPreviewRpcResult {
-  if (!isRecord(value)) {
-    throw new Error("Plugin returned an unexpected response.");
-  }
-  if (typeof value.file !== "string") {
-    throw new Error("Plugin returned an unexpected response.");
-  }
-  return { file: value.file };
-}
 
 function encodePathSegments(file: string): string {
   return file.split("/").map(encodeURIComponent).join("/");
@@ -60,6 +37,29 @@ function parsePreviewHeight(value: string | undefined): number | null {
     height <= MAX_HEIGHT_PX
     ? height
     : null;
+}
+
+function PreviewCard({
+  file,
+  action,
+  children,
+}: {
+  file: string;
+  action: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <div className="my-2 overflow-hidden rounded-lg border border-border bg-background">
+      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
+        <div className="flex min-w-0 flex-1 items-center gap-2">
+          <span className="shrink-0 font-semibold">inline-vis</span>
+          <span className="truncate opacity-70">{file}</span>
+        </div>
+        {action}
+      </div>
+      {children}
+    </div>
+  );
 }
 
 function InlineVisDirective({
@@ -99,12 +99,10 @@ function InlineVisDirective({
 
     void (async () => {
       try {
-        const result = parsePrepareHtmlPreviewRpcResult(
-          await rpc.call("prepareHtmlPreview", {
-            threadId: message.threadId,
-            file: fileAttr,
-          }),
-        );
+        const result = await rpc.call("prepareHtmlPreview", {
+          threadId: message.threadId,
+          file: fileAttr,
+        });
         if (cancelled) return;
         setState({
           status: "ready",
@@ -152,12 +150,24 @@ function InlineVisDirective({
 
   if (state.status === "loading") {
     return (
-      <div
-        className="my-2 rounded-md border border-border bg-muted px-3 py-2 text-sm text-muted-foreground"
-        aria-busy="true"
+      <PreviewCard
+        file={state.file}
+        action={
+          openWorkspaceFile === null ? null : (
+            <span aria-hidden className="size-5 shrink-0" />
+          )
+        }
       >
-        Loading visualization {state.file}…
-      </div>
+        <div
+          role="status"
+          aria-busy="true"
+          aria-label={`Loading visualization ${state.file}`}
+          style={{ height: previewHeight ?? DEFAULT_HEIGHT_PX }}
+          className="w-full p-3"
+        >
+          <Skeleton className="size-full" />
+        </div>
+      </PreviewCard>
     );
   }
 
@@ -176,13 +186,10 @@ function InlineVisDirective({
   const previewUrl = buildWorktreePreviewUrl(message.threadId, state.file);
 
   return (
-    <div className="my-2 overflow-hidden rounded-lg border border-border bg-background">
-      <div className="flex items-center gap-2 border-b border-border px-3 py-1.5 text-xs text-muted-foreground">
-        <div className="flex min-w-0 flex-1 items-center gap-2">
-          <span className="shrink-0 font-semibold">inline-vis</span>
-          <span className="truncate opacity-70">{state.file}</span>
-        </div>
-        {openWorkspaceFile === null ? null : (
+    <PreviewCard
+      file={state.file}
+      action={
+        openWorkspaceFile === null ? null : (
           <button
             type="button"
             aria-label={`Open ${state.file} in sidebar`}
@@ -194,18 +201,17 @@ function InlineVisDirective({
           >
             <Icon name="ExternalLink" aria-hidden className="size-3" />
           </button>
-        )}
-      </div>
+        )
+      }
+    >
       <iframe
         title={`inline-vis: ${state.file}`}
         src={previewUrl}
-        // Scripts run, but without allow-same-origin they get an opaque origin
-        // and cannot access the bb page, its cookies/storage, forms, or popups.
         sandbox="allow-scripts"
         style={{ height: previewHeight ?? DEFAULT_HEIGHT_PX }}
         className="block w-full border-0 bg-background"
       />
-    </div>
+    </PreviewCard>
   );
 }
 

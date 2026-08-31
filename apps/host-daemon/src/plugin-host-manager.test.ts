@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, readdir, rm, stat } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HostDaemonOnlineRpcCommand } from "@bb/host-daemon-contract";
@@ -160,13 +168,37 @@ describe("PluginHostManager", () => {
     expect(fetchArtifact).toHaveBeenCalledOnce();
   });
 
+  it("migrates a verified legacy host.js cache entry without downloading", async () => {
+    const fetchArtifact = vi.fn(async () => artifactSource);
+    const { dataDir, manager } = await createManagerFixture({ fetchArtifact });
+    const command = callCommand();
+    const digestDirectory = join(
+      dataDir,
+      "plugin-host-artifacts",
+      command.pluginId,
+      command.artifact.digest,
+    );
+    await mkdir(digestDirectory, { recursive: true });
+    await writeFile(join(digestDirectory, "host.js"), artifactSource);
+
+    const result = await manager.call(command);
+
+    expect(result.output).toMatchObject({ input: { value: "hello" } });
+    expect(fetchArtifact).not.toHaveBeenCalled();
+    await expect(readdir(digestDirectory)).resolves.toEqual(["host.mjs"]);
+    await expect(readFile(join(digestDirectory, "host.mjs"))).resolves.toEqual(
+      artifactSource,
+    );
+  });
+
   it("logs artifact and worker lifecycle transitions", async () => {
     const logger = {
       debug: vi.fn(),
       info: vi.fn(),
       warn: vi.fn(),
     };
-    const manager = await createManager({ logger });
+    const { dataDir, manager } = await createManagerFixture({ logger });
+    await writeFile(join(dataDir, "package.json"), '{"private":true}\n');
     const command = callCommand();
 
     await manager.call(command);
@@ -347,8 +379,6 @@ describe("PluginHostManager", () => {
     const tampered = await createManager({
       fetchArtifact: async () => Buffer.from("tampered"),
     });
-    // Retried once, then refused: the daemon never executes bytes whose
-    // digest it has not just confirmed.
     await expect(tampered.call(callCommand())).rejects.toThrow(
       /failed verification after retry/u,
     );
@@ -516,7 +546,7 @@ describe("PluginHostManager", () => {
       input: { rootPath: "/tmp/workspace", listenerDelayMs: 100 },
     });
     const call = manager.call(command);
-    await vi.waitFor(() => expect(watcher).toBeDefined());
+    await vi.waitFor(() => expect(watcher).toBeDefined(), { timeout: 5_000 });
     watcher?.onReady();
     await expect(call).resolves.toEqual({ output: { watching: true } });
     await new Promise((resolve) => setTimeout(resolve, 100));

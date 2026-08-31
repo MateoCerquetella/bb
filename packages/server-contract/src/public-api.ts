@@ -1,5 +1,4 @@
 import type { Hono } from "hono";
-import { hc, type ClientRequestOptions } from "hono/client";
 import type {
   AppTheme,
   AppThemeSelection,
@@ -21,10 +20,7 @@ import {
   appThemeSelectionSchema,
   experimentsSchema,
 } from "@bb/domain";
-import type {
-  DiscoverReposResult,
-  ProviderUsageResponse,
-} from "@bb/host-daemon-contract";
+import type { ProviderUsageResponse } from "@bb/host-daemon-contract";
 import {
   binaryResponse,
   defineRoute,
@@ -139,6 +135,7 @@ import type {
   ResolveThreadMentionsResponse,
   RespondPluginInteractionRequest,
   SendMessageRequest,
+  SendMessageResponse,
   SetQueuedMessageGroupBoundaryRequest,
   SendQueuedMessageRequest,
   SendQueuedMessageResponse,
@@ -154,9 +151,7 @@ import type {
   SystemExecutionOptionsResponse,
   SystemProviderInfo,
   SystemProvidersQuery,
-  OnboardingAgentOverview,
-  OnboardingTelemetryEvent,
-  SystemOnboardingReposQuery,
+  SystemProviderStatesResponse,
   SystemUsageLimitsQuery,
   SystemVersionQuery,
   SystemVersionResponse,
@@ -194,6 +189,7 @@ import type {
   ThreadStorageContentQuery,
   ThreadStorageFileListResponse,
   ThreadStorageFilesQuery,
+  ThreadStorageLocationResponse,
   ThreadStoragePathListResponse,
   ThreadStoragePathsQuery,
   ThreadTimelineQuery,
@@ -215,7 +211,7 @@ import type {
   WorkspacePathListResponse,
 } from "./api-types.js";
 import type {
-  ThreadTabsResponse,
+  ThreadTabsWireResponse,
   UpdateThreadTabsRequest,
 } from "./api/thread-tabs.js";
 import { updateThreadTabsRequestSchema } from "./api/thread-tabs.js";
@@ -280,8 +276,6 @@ import {
   sendQueuedMessageRequestSchema,
   systemExecutionOptionsQuerySchema,
   systemProvidersQuerySchema,
-  onboardingTelemetryEventSchema,
-  systemOnboardingReposQuerySchema,
   systemUsageLimitsQuerySchema,
   systemVersionQuerySchema,
   threadEventWaitQuerySchema,
@@ -840,10 +834,6 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<WorkspacePathListResponse>(),
     }),
-    /**
-     * Execute an environment action such as commit or squash_merge.
-     * Returns 409 when the action is blocked by environment state.
-     */
     actions: defineRoute({
       path: "/environments/:id/actions",
       method: "post",
@@ -972,25 +962,14 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: jsonResponse<ThreadChildSummaryResponse>(),
     }),
-    /**
-     * Send a message to a thread.
-     * mode=queue-if-active queues when the thread is active; otherwise it
-     * starts a turn. mode=steer-if-active steers when the thread is active;
-     * otherwise it starts a turn. Legacy mode=auto starts idle threads and
-     * uses the provider's auto target for active turns.
-     */
     send: defineRoute({
       path: "/threads/:id/send",
       method: "post",
       request: jsonRequest<PathId, SendMessageRequest>(
         sendMessageRequestSchema,
       ),
-      response: jsonResponse<{ ok: true }>(),
+      response: jsonResponse<SendMessageResponse>(),
     }),
-    /**
-     * Replace an accepted root user turn and every later turn. A running
-     * thread is stopped and allowed to settle before history is rewritten.
-     */
     editMessage: defineRoute({
       path: "/threads/:id/edit-message",
       method: "post",
@@ -1005,10 +984,6 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: jsonResponse<ThreadQueuedMessageListResponse>(),
     }),
-    /**
-     * Create a queued message; senderThreadId preserves agent-to-agent context
-     * until send time.
-     */
     createQueuedMessage: defineRoute({
       path: "/threads/:id/queued-messages",
       method: "post",
@@ -1026,10 +1001,6 @@ export const publicApiRoutes = {
       >(updateQueuedMessageRequestSchema),
       response: jsonResponse<ThreadQueuedMessage>(),
     }),
-    /**
-     * Send a previously queued message in the requested mode, then delete the
-     * queued message.
-     */
     sendQueuedMessage: defineRoute({
       path: "/threads/:id/queued-messages/:queuedMessageId/send",
       method: "post",
@@ -1112,7 +1083,7 @@ export const publicApiRoutes = {
       path: "/threads/:id/tabs",
       method: "get",
       request: noRequest<PathId>(),
-      response: jsonResponse<ThreadTabsResponse>(),
+      response: jsonResponse<ThreadTabsWireResponse>(),
     }),
     updateTabs: defineRoute({
       path: "/threads/:id/tabs",
@@ -1121,7 +1092,7 @@ export const publicApiRoutes = {
         updateThreadTabsRequestSchema,
       ),
       response: [
-        jsonResponse<ThreadTabsResponse>(),
+        jsonResponse<ThreadTabsWireResponse>(),
         jsonResponse<ApiError>({ status: 409 }),
       ],
     }),
@@ -1269,6 +1240,12 @@ export const publicApiRoutes = {
       ),
       response: jsonResponse<ThreadStorageFileListResponse>(),
     }),
+    storageLocation: defineRoute({
+      path: "/threads/:id/thread-storage/location",
+      method: "get",
+      request: noRequest<PathId>(),
+      response: jsonResponse<ThreadStorageLocationResponse>(),
+    }),
     storageFile: defineRoute({
       path: "/threads/:id/thread-storage/files/:filePath{.+}",
       method: "get",
@@ -1406,29 +1383,13 @@ export const publicApiRoutes = {
       request: noRequest<PathId>(),
       response: binaryResponse<Uint8Array>(),
     }),
-    onboardingEvent: defineRoute({
-      path: "/system/onboarding/event",
-      method: "post",
-      request: jsonRequest<EmptyInput, OnboardingTelemetryEvent>(
-        onboardingTelemetryEventSchema,
-      ),
-      response: jsonResponse<{ ok: true }>(),
-    }),
-    onboardingAgents: defineRoute({
-      path: "/system/onboarding/agents",
+    providerStates: defineRoute({
+      path: "/system/providers/state",
       method: "get",
       request: optionalQueryRequest<EmptyInput, SystemProvidersQuery>(
         systemProvidersQuerySchema,
       ),
-      response: jsonResponse<OnboardingAgentOverview>(),
-    }),
-    onboardingRepos: defineRoute({
-      path: "/system/onboarding/repos",
-      method: "get",
-      request: optionalQueryRequest<EmptyInput, SystemOnboardingReposQuery>(
-        systemOnboardingReposQuerySchema,
-      ),
-      response: jsonResponse<DiscoverReposResult>(),
+      response: jsonResponse<SystemProviderStatesResponse>(),
     }),
     usageLimits: defineRoute({
       path: "/system/usage-limits",
@@ -1460,43 +1421,3 @@ export type PublicApiSchema = ApiSchemaFromRouteDescriptors<
 >;
 
 export type PublicApiRoutes = Hono<{}, PublicApiSchema, "/">;
-
-export type PublicApiFetch = (
-  ...args: Parameters<typeof fetch>
-) => ReturnType<typeof fetch>;
-
-/** Omit the options object to use global fetch; provide it to override fetch. */
-export interface PublicApiClientOptions {
-  fetch: PublicApiFetch;
-}
-
-function toHonoClientOptions(
-  options: PublicApiClientOptions | undefined,
-): ClientRequestOptions | undefined {
-  if (options === undefined) {
-    return undefined;
-  }
-  // Hono types custom fetch as typeof fetch, but only calls the function.
-  return { fetch: options.fetch as typeof fetch };
-}
-
-export function createPublicApiClient(
-  baseUrl: string,
-  options?: PublicApiClientOptions,
-) {
-  return hc<PublicApiRoutes>(`${baseUrl}/api/v1`, toHonoClientOptions(options));
-}
-
-export function createApiClient(
-  baseUrl: string,
-  options?: PublicApiClientOptions,
-) {
-  const apiClient = createPublicApiClient(baseUrl, options);
-  return {
-    api: {
-      v1: apiClient,
-    },
-  };
-}
-
-export type ApiClient = ReturnType<typeof createApiClient>;

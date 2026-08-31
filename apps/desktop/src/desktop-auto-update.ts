@@ -55,7 +55,7 @@ export interface DesktopAutoUpdaterAdapter {
   setLogger(logger: DesktopAutoUpdateLogger): void;
 }
 
-export interface CreateDesktopAutoUpdateServiceArgs {
+interface CreateDesktopAutoUpdateServiceArgs {
   currentVersion: string;
   enabled: boolean;
   forceDevUpdateConfig: boolean;
@@ -65,7 +65,7 @@ export interface CreateDesktopAutoUpdateServiceArgs {
   updater: DesktopAutoUpdaterAdapter;
 }
 
-export interface ShouldEnableDesktopAutoUpdateArgs {
+interface ShouldEnableDesktopAutoUpdateArgs {
   env: NodeJS.ProcessEnv;
   isPackaged: boolean;
 }
@@ -306,6 +306,9 @@ export function createDesktopAutoUpdateService(
     if (!args.enabled) {
       return currentInfo;
     }
+    if (currentInfo.updateDownloaded) {
+      return currentInfo;
+    }
     if (inflight !== null) {
       return inflight;
     }
@@ -358,7 +361,6 @@ export function createDesktopAutoUpdateService(
   if (args.enabled) {
     args.updater.setLogger(logger);
     args.updater.setFeedURL(DESKTOP_AUTO_UPDATE_FEED_CONFIG);
-    // The service owns the background download so downloadInFlight can guard it.
     args.updater.setAutoDownload(false);
     args.updater.setAutoInstallOnAppQuit(true);
     args.updater.setForceDevUpdateConfig(args.forceDevUpdateConfig);

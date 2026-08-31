@@ -59,8 +59,8 @@ describe("HeightTransition", () => {
         <span data-testid="restored-child">Restored content</span>
       </HeightTransition>,
     );
-    const wrapper = view.getByTestId("restored-child").parentElement
-      ?.parentElement;
+    const wrapper =
+      view.getByTestId("restored-child").parentElement?.parentElement;
 
     expect(wrapper?.style.height).toBe("40px");
     offsetHeight.mockReturnValue(80);
@@ -74,7 +74,45 @@ describe("HeightTransition", () => {
   });
 });
 
+function makeResizeEntry(
+  target: Element,
+  borderBoxBlockSize: number,
+  contentRectHeight: number,
+): ResizeObserverEntry {
+  return {
+    target,
+    contentRect: new DOMRect(0, 0, 200, contentRectHeight),
+    borderBoxSize: [{ blockSize: borderBoxBlockSize, inlineSize: 200 }],
+    contentBoxSize: [{ blockSize: contentRectHeight, inlineSize: 200 }],
+    devicePixelContentBoxSize: [
+      { blockSize: borderBoxBlockSize, inlineSize: 200 },
+    ],
+  };
+}
+
 describe("AutoHeightContainer", () => {
+  it("sizes the wrapper from the observed border box", () => {
+    vi.stubGlobal("ResizeObserver", ResizeObserverStub);
+
+    const view = render(
+      <AutoHeightContainer>
+        <span>Streaming response</span>
+      </AutoHeightContainer>,
+    );
+    const inner = view.getByText("Streaming response").parentElement;
+    const wrapper = inner?.parentElement;
+    const observer = ResizeObserverStub.instances[0];
+    if (!inner || !wrapper || !observer) {
+      throw new Error("AutoHeightContainer did not render");
+    }
+
+    act(() => {
+      observer.callback([makeResizeEntry(inner, 120, 112)], observer);
+    });
+
+    expect(wrapper.style.height).toBe("120px");
+  });
+
   it("snap-syncs an authoritative layout revision", () => {
     vi.stubGlobal("ResizeObserver", ResizeObserverStub);
 

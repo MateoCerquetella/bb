@@ -31,32 +31,17 @@ import {
 } from "@/hooks/queries/plugin-catalog-queries";
 import { CatalogEntryIcon, FullTrustWarning } from "./plugin-ui";
 
-/**
- * Pre-fill for Browse-tab installs: the dialog shows the catalog entry instead
- * of the free source field.
- */
 export type AddPluginInitial = {
   entryId: string;
-  /** Marketplace that listed the entry; the install routes through it. */
   marketplace: string;
-  /** Who published the entry, as the confirmation names them. */
   publisherLabel: string;
   displayName: string;
   icon: string | null;
   iconUrl: string | null;
   iconTinted: boolean;
-  /** The entry's install source; decides how the dialog describes the install. */
   source: string;
 };
 
-/**
- * The dialog describes each catalog source without claiming that a remote
- * package is bundled or that a mutable Git reference is pinned.
- *
- * It names the publisher rather than calling every catalog entry official: the
- * catalog also lists community and third-party plugins, and "official" is the
- * one claim a confirmation for full-trust code must not overstate.
- */
 function catalogInstallDescription(
   source: string,
   publisherLabel: string,
@@ -70,20 +55,13 @@ function catalogInstallDescription(
   return `Install this ${publisherLabel} plugin from its listed source repository.`;
 }
 
-export interface AddPluginDialogProps {
+interface AddPluginDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onInstalled?: (plugin: InstalledPlugin) => void;
   initial?: AddPluginInitial | null;
 }
 
-/**
- * The one-step Add-plugin dialog: source field (or the Browse tab's catalog
- * entry pre-filled) plus the full-trust confirmation, committing straight to
- * POST /plugins/install. The server resolves and validates during install;
- * an incompatible or unparsable source surfaces as the install error toast
- * with no active state changed.
- */
 export function AddPluginDialog({
   open,
   onOpenChange,
@@ -123,10 +101,9 @@ function buildRequest(
   return trimmed.length === 0 ? null : { kind: "direct", source: trimmed };
 }
 
-/** One labelled fact of the resolved source, rendered as a definition row. */
 function resolvedSourceRows(
   source: PluginCatalogResolvedSource,
-): { label: string; value: string }[] {
+): { label: string; value: string; href?: string }[] {
   if (source.kind === "npm") {
     return [
       {
@@ -139,7 +116,7 @@ function resolvedSourceRows(
     ];
   }
   return [
-    { label: "repository", value: source.url },
+    { label: "repository", value: source.url, href: source.url },
     ...(source.subdir === undefined
       ? []
       : [{ label: "subdirectory", value: source.subdir }]),
@@ -167,12 +144,6 @@ function resolvedSourceRows(
   ];
 }
 
-/**
- * The true resolved source of a third-party entry, shown before anything runs.
- * A listing's own display metadata is not evidence of what the install
- * fetches, so this renders what bb resolved from the marketplace's source
- * fields — including the exact tag and commit a semver range lands on.
- */
 function ThirdPartySourceDisclosure({
   plan,
   pending,
@@ -233,7 +204,18 @@ function ThirdPartySourceDisclosure({
               {row.label}
             </dt>
             <dd className="min-w-0 break-all font-mono text-2xs text-foreground">
-              {row.value}
+              {row.href === undefined ? (
+                row.value
+              ) : (
+                <a
+                  href={row.href}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  {row.value}
+                </a>
+              )}
             </dd>
           </div>
         ))}
@@ -254,11 +236,8 @@ function AddPluginDialogContent({
   const queryClient = useQueryClient();
   const [sourceText, setSourceText] = useState("");
   const request = buildRequest(initial, sourceText);
-  // Only a third-party listing needs its source resolved before confirming:
-  // the official catalog is BB's own and installs without a round trip.
   const thirdParty =
-    initial !== null &&
-    initial.marketplace !== CURATED_PLUGIN_MARKETPLACE_NAME;
+    initial !== null && initial.marketplace !== CURATED_PLUGIN_MARKETPLACE_NAME;
   const planQuery = useCatalogInstallPlan(
     thirdParty && initial !== null
       ? { entryId: initial.entryId, marketplace: initial.marketplace }
@@ -280,7 +259,6 @@ function AddPluginDialogContent({
     onSuccess: (plugin) => {
       applyInstalledPlugin({ queryClient, plugin });
       invalidatePluginList({ queryClient });
-      // Search rows carry installed flags; a fresh install flips them.
       invalidatePluginCatalogSearch({ queryClient });
       appToast.success(`${initial?.displayName ?? "Plugin"} installed`);
       onOpenChange(false);
@@ -322,11 +300,7 @@ function AddPluginDialogContent({
                 {initial.entryId}
               </span>
             </div>
-            {/* The exact source, including a pinned npm registry: a listing
-                must not send BB somewhere the confirmation never named. It
-                scrolls on one line rather than wrapping: a long git ref broken
-                across three lines pushes the buttons around and reads as
-                damage rather than as an address. */}
+            {}
             <p className="overflow-x-auto whitespace-nowrap font-mono text-2xs text-subtle-foreground">
               {initial.source}
             </p>
@@ -380,8 +354,6 @@ function AddPluginDialogContent({
           disabled={
             request === null ||
             install.isPending ||
-            // A third-party install is confirmed against its resolved source,
-            // so the button waits for that resolution to arrive.
             (thirdParty && planQuery.isPending) ||
             (thirdParty && plan === undefined)
           }

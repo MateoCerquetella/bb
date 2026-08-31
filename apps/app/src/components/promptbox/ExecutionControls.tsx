@@ -11,21 +11,19 @@ import {
 } from "@/components/pickers/ModelReasoningPicker";
 import { type PickerOption } from "@/components/pickers/OptionPicker";
 import type { ModelPickerOption } from "@/components/pickers/model-picker-option";
+import type { ProviderPickerOption } from "@/components/pickers/model-brand-prefix";
 
-export interface ExecutionProviderConfig {
-  options?: readonly PickerOption<string>[];
+interface ExecutionProviderConfig {
+  options?: readonly ProviderPickerOption[];
   selectedId?: string;
-  /** Omit to render the provider as locked (used by FollowUp where the thread is committed). */
   onChange?: (value: string) => void;
   hasMultiple?: boolean;
-  displayName?: string;
 }
 
-export interface ExecutionModelConfig {
+interface ExecutionModelConfig {
   active?: { model: string } | null;
   selected: string;
   options: readonly ModelPickerOption[];
-  /** Models behind the picker's collapsed "More models" section. */
   moreOptions: readonly ModelPickerOption[];
   isLoading: boolean;
   loadFailed: boolean;
@@ -33,14 +31,15 @@ export interface ExecutionModelConfig {
   onChange: (value: string) => void;
 }
 
-export interface ExecutionServiceTierConfig {
+interface ExecutionServiceTierConfig {
   value?: ServiceTier;
   onChange: (value: ServiceTier | undefined) => void;
   supported: boolean;
   supportByProvider?: Record<string, boolean>;
+  fastLabel?: string;
 }
 
-export interface ExecutionReasoningConfig {
+interface ExecutionReasoningConfig {
   value: ReasoningLevel;
   options: readonly PickerOption<ReasoningLevel>[];
   onChange: (value: ReasoningLevel) => void;
@@ -54,17 +53,12 @@ export interface ExecutionPermissionConfig {
 }
 
 export interface ExecutionControlsProps {
-  /** Host route reused by provider-tab model previews. */
   providerRouting?: SystemProvidersQuery;
   provider: ExecutionProviderConfig;
   model: ExecutionModelConfig;
   serviceTier?: ExecutionServiceTierConfig;
   reasoning: ExecutionReasoningConfig;
   footerAction?: ModelReasoningPickerFooterAction;
-  /**
-   * Render the model/reasoning picker as a non-interactive, dimmed label
-   * for fully read-only surfaces. The same picker renders, just disabled.
-   */
   disabled?: boolean;
 }
 
@@ -80,9 +74,6 @@ export const ExecutionControls = memo(function ExecutionControls({
   const handleServiceTierChange = serviceTier?.onChange ?? (() => {});
   const selectedProviderId = provider.selectedId ?? "";
 
-  // A disabled picker still renders (showing the inherited model) even though
-  // its provider can't be switched — the side chat lists a single model option
-  // for the inherited model so the picker has something to display.
   const canSwitchProviders = Boolean(
     provider.hasMultiple &&
     provider.onChange &&
@@ -123,6 +114,7 @@ export const ExecutionControls = memo(function ExecutionControls({
           }
           showFastModeToggle={serviceTier?.supported ?? false}
           serviceTierSupportByProvider={serviceTier?.supportByProvider}
+          fastModeLabel={serviceTier?.fastLabel}
           muted
           disabled={disabled}
           footerAction={footerAction}

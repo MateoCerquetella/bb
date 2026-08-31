@@ -1,5 +1,4 @@
 import type { JsonValue } from "@bb/domain";
-import { vi } from "vitest";
 import { z } from "zod";
 
 export type BridgeJsonRpcId = string | number;
@@ -24,11 +23,13 @@ export interface BridgeJsonRpcOutputMessage {
 
 export interface CapturedBridgeJsonRpcOutput {
   messages: BridgeJsonRpcOutputMessage[];
+  takeMessages(): BridgeJsonRpcOutputMessage[];
   restore(): void;
 }
 
 export interface BridgeJsonRpcTestHarness {
   messages: BridgeJsonRpcOutputMessage[];
+  takeMessages(): BridgeJsonRpcOutputMessage[];
   flushWork(): Promise<void>;
   hasResponse(id: BridgeJsonRpcId): boolean;
   restore(): void;
@@ -90,8 +91,10 @@ function waitForNextBridgeTick(): Promise<void> {
 
 export function captureBridgeJsonRpcOutput(): CapturedBridgeJsonRpcOutput {
   const messages: BridgeJsonRpcOutputMessage[] = [];
-  const writeSpy = vi.spyOn(process.stdout, "write");
-  writeSpy.mockImplementation((buffer: string | Uint8Array) => {
+  const originalWrite = process.stdout.write;
+  const capturingWrite: typeof process.stdout.write = (
+    buffer: string | Uint8Array,
+  ) => {
     const text =
       typeof buffer === "string"
         ? buffer
@@ -102,11 +105,20 @@ export function captureBridgeJsonRpcOutput(): CapturedBridgeJsonRpcOutput {
       }
     }
     return true;
-  });
+  };
+  process.stdout.write = capturingWrite;
+  let drained = 0;
   return {
     messages,
+    takeMessages() {
+      const fresh = messages.slice(drained);
+      drained = messages.length;
+      return fresh;
+    },
     restore() {
-      writeSpy.mockRestore();
+      if (process.stdout.write === capturingWrite) {
+        process.stdout.write = originalWrite;
+      }
     },
   };
 }
@@ -125,9 +137,6 @@ function sendBridgeJsonRpcRequest(args: SendBridgeJsonRpcRequestArgs): void {
 async function waitForBridgeJsonRpcResponse(
   args: WaitForBridgeJsonRpcResponseArgs,
 ): Promise<BridgeJsonRpcOutputMessage> {
-  // Deadline-based, not tick-count-based: bridges that spawn a real child
-  // process (codex → fake app-server) need cold-start time on CI runners,
-  // while in-process bridges still resolve on the first tick.
   const deadline = Date.now() + 15_000;
   while (Date.now() < deadline) {
     const response = args.output.messages.find(
@@ -139,10 +148,6 @@ async function waitForBridgeJsonRpcResponse(
     await waitForNextBridgeTick();
   }
   throw new Error(`Timed out waiting for JSON-RPC response ${String(args.id)}`);
-}
-
-async function flushBridgeJsonRpcWork(): Promise<void> {
-  await waitForNextBridgeTick();
 }
 
 function bridgeJsonRpcResponseExists(
@@ -157,7 +162,8 @@ export function createBridgeJsonRpcTestHarness(
   const output = captureBridgeJsonRpcOutput();
   return {
     messages: output.messages,
-    flushWork: flushBridgeJsonRpcWork,
+    takeMessages: output.takeMessages,
+    flushWork: waitForNextBridgeTick,
     hasResponse(id: BridgeJsonRpcId): boolean {
       return bridgeJsonRpcResponseExists({ id, output });
     },

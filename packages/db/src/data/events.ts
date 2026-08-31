@@ -61,10 +61,10 @@ import {
 } from "./threads.js";
 
 const STORED_EVENT_SEQUENCE_LOOKUP_CHUNK_SIZE = 250;
+export const STORED_TIMELINE_BYTE_PREFLIGHT_EVENT_LIMIT = 2_000;
 const SQLITE_MAX_VARIABLE_NUMBER = 32_766;
-// This OR query prepares with 995 keys. A 996th key reaches the configured
-// SQLite expression-depth limit of 1,000.
 const CLIENT_TURN_REQUEST_KEY_BATCH_SIZE = 995;
+const RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE = 500;
 
 interface QueryInSqliteVariableBatchesArgs<TValue, TRow> {
   dedupeKey: (value: TValue) => string;
@@ -103,25 +103,16 @@ function queryInSqliteVariableBatches<TValue, TRow>(
   return rows;
 }
 
-const isRootTurnStartedEventData = sql`COALESCE(json_extract(${events.data}, '$.parentToolCallId'), '') = ''`;
+const isRootTurnStartedEventData = isNull(events.parentToolCallId);
 const isNotNestedTurnUsageEvent = sql`NOT EXISTS (
   SELECT 1
   FROM events AS nested_turn_started
   WHERE nested_turn_started.thread_id = ${events.threadId}
     AND nested_turn_started.turn_id = ${events.turnId}
     AND nested_turn_started.type = 'turn/started'
-    AND COALESCE(json_extract(nested_turn_started.data, '$.parentToolCallId'), '') <> ''
+    AND nested_turn_started.parent_tool_call_id IS NOT NULL
 )`;
 
-/**
- * A background-task progress row that a later progress or completed row for
- * the same item supersedes. Each snapshot carries the full task state (a
- * workflow snapshot with hundreds of agents is hundreds of KB), consumers
- * replace rather than merge, and `pruneBackgroundTaskProgressEvents` deletes
- * superseded rows on its own cadence. Timeline reads skip them so a burst of
- * snapshots between prunes cannot spend the page byte budget on rows that
- * project to nothing.
- */
 const isNotSupersededBackgroundTaskProgress = sql`NOT (
   ${events.type} = 'item/backgroundTask/progress'
   AND EXISTS (
@@ -144,6 +135,7 @@ export interface InsertEventInput {
   type: ThreadEventType;
   itemId: string | null;
   itemKind: ThreadEventItemType | null;
+  parentToolCallId: string | null;
   createdAt?: number;
   data: string;
 }
@@ -158,6 +150,7 @@ export interface AppendDaemonEventInput {
   environmentId: string | null;
   itemId: string | null;
   itemKind: ThreadEventItemType | null;
+  parentToolCallId: string | null;
   providerThreadId: string | null;
   scope: ThreadEventScope;
   threadId: string;
@@ -172,11 +165,6 @@ export interface AcceptedDaemonEvent {
 export interface AppendDaemonEventsResult {
   acceptedEvents: AcceptedDaemonEvent[];
   insertedInputIndexes: number[];
-  /**
-   * Indexes of inputs dropped because they were orphan thread-state snapshots
-   * (token/context usage scoped to a turn with no stored turn/started). Surfaced
-   * so callers can log them; they are not inserted and trigger no effects.
-   */
   skippedTurnUnstartedInputIndexes: number[];
 }
 
@@ -320,11 +308,6 @@ export interface DeleteThreadEventSuffixResult {
   deletedEventCount: number;
 }
 
-/**
- * Deletes one conversation suffix and its sequence-scoped projections.
- * Callers append a marker above oldMaxSequence first so sequence numbers are
- * never reused after the rewrite.
- */
 export function deleteThreadEventSuffixInTransaction(
   db: DbTransaction,
   args: DeleteThreadEventSuffixArgs,
@@ -347,9 +330,6 @@ export function deleteThreadEventSuffixInTransaction(
       ),
     )
     .run();
-  // Dynamic-context state is not sequence-addressable. Clearing it is safe:
-  // the next turn may re-send unchanged context, while retaining it could hide
-  // context that only the removed turn had observed.
   db.delete(threadDynamicContextFileStates)
     .where(eq(threadDynamicContextFileStates.threadId, args.threadId))
     .run();
@@ -380,11 +360,6 @@ export interface ThreadTurnInterruptionEventState {
   threadId: string;
 }
 
-/**
- * Insert events with dedup on (threadId, sequence).
- * Uses INSERT OR IGNORE to skip duplicates.
- * Returns the count and input indexes of actually inserted events.
- */
 export function insertEvents(
   db: DbQueryConnection,
   notifier: DbNotifier,
@@ -407,8 +382,8 @@ export function insertEvents(
     const createdAt = input.createdAt ?? Date.now();
     const turnId = getThreadEventScopeTurnId(input.scope) ?? null;
     const result = db.run(
-      sql`INSERT OR IGNORE INTO events (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, data, created_at)
-          VALUES (${id}, ${input.threadId}, ${input.environmentId ?? null}, ${input.scope.kind}, ${turnId}, ${input.providerThreadId ?? null}, ${input.sequence}, ${input.type}, ${input.itemId}, ${input.itemKind}, ${input.data}, ${createdAt})`,
+      sql`INSERT OR IGNORE INTO events (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, parent_tool_call_id, data, created_at)
+          VALUES (${id}, ${input.threadId}, ${input.environmentId ?? null}, ${input.scope.kind}, ${turnId}, ${input.providerThreadId ?? null}, ${input.sequence}, ${input.type}, ${input.itemId}, ${input.itemKind}, ${input.parentToolCallId}, ${input.data}, ${createdAt})`,
     );
     if (result.changes > 0) {
       insertedCount++;
@@ -462,9 +437,6 @@ function collectDaemonTurnStartLookupKeys(
   const keys: ThreadTurnKey[] = [];
 
   for (const input of eventInputs) {
-    if (input.type === "turn/started") {
-      continue;
-    }
     const turnId = getThreadEventScopeTurnId(input.scope);
     if (turnId === undefined) {
       continue;
@@ -486,43 +458,31 @@ function listStoredTurnStartedKeySet(
   );
 }
 
-// Thread-state snapshots (token + context-window usage) are idempotent and are
-// re-emitted by providers when a session resumes. A native fork resumes the
-// parent's session, which reports the parent's last-turn usage scoped to a turn
-// the forked thread never started. Dropping such an orphan snapshot is correct
-// and avoids wedging the whole event batch (which would otherwise roll back the
-// fork's identity + turn events and retry forever).
-//
-// provider/unhandled is here for the same reason: it is a diagnostic
-// passthrough for provider traffic bb has no translation for, and the provider
-// can label that traffic with a turn id of its own making (Codex tags
-// automatic-compaction events "auto-compact-N"). Losing one is a non-event;
-// failing the batch it rode in with is not.
-//
-// Turn-content events still require a stored turn/started, so genuine ordering
-// bugs are still caught.
 const ORPHAN_DROPPABLE_TURN_EVENT_TYPES: ReadonlySet<ThreadEventType> = new Set([
   "thread/tokenUsage/updated",
   "thread/contextWindowUsage/updated",
   "provider/unhandled",
 ]);
 
-type DaemonTurnStartDisposition = "append" | "skip-orphan-snapshot";
+type DaemonTurnStartDisposition =
+  | "append"
+  | "skip-duplicate-turn-start"
+  | "skip-orphan-snapshot";
 
 function resolveDaemonTurnStartDisposition(
   input: AppendDaemonEventInput,
   startedTurnKeys: ReadonlySet<string>,
 ): DaemonTurnStartDisposition {
-  if (input.type === "turn/started") {
-    return "append";
-  }
-
   const turnId = getThreadEventScopeTurnId(input.scope);
   if (turnId === undefined) {
     return "append";
   }
 
   const key = buildThreadTurnKey({ threadId: input.threadId, turnId });
+  if (input.type === "turn/started") {
+    return startedTurnKeys.has(key) ? "skip-duplicate-turn-start" : "append";
+  }
+
   if (startedTurnKeys.has(key)) {
     return "append";
   }
@@ -701,11 +661,15 @@ export function appendDaemonEventsInTransaction(
   );
   const now = Date.now();
   for (const [index, input] of eventInputs.entries()) {
-    if (
-      resolveDaemonTurnStartDisposition(input, startedTurnKeys) ===
-      "skip-orphan-snapshot"
-    ) {
+    const turnStartDisposition = resolveDaemonTurnStartDisposition(
+      input,
+      startedTurnKeys,
+    );
+    if (turnStartDisposition === "skip-orphan-snapshot") {
       skippedTurnUnstartedInputIndexes.push(index);
+      continue;
+    }
+    if (turnStartDisposition === "skip-duplicate-turn-start") {
       continue;
     }
 
@@ -735,7 +699,7 @@ export function appendDaemonEventsInTransaction(
     }
     db.run(
       sql`INSERT INTO events
-        (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, data, created_at)
+        (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, parent_tool_call_id, data, created_at)
         VALUES (
           ${createEventId()},
           ${input.threadId},
@@ -747,6 +711,7 @@ export function appendDaemonEventsInTransaction(
           ${input.type},
           ${input.itemId},
           ${input.itemKind},
+          ${input.parentToolCallId},
           ${input.data},
           ${now}
         )`,
@@ -784,6 +749,70 @@ export function appendDaemonEventsInTransaction(
     insertedInputIndexes,
     skippedTurnUnstartedInputIndexes,
   };
+}
+
+export interface CopyStoredThreadEventsArgs {
+  rows: readonly StoredEventRow[];
+  targetEnvironmentId: string | null;
+  targetThreadId: string;
+}
+
+export function copyStoredThreadEventsInTransaction(
+  db: DbTransaction,
+  args: CopyStoredThreadEventsArgs,
+): number {
+  if (args.rows.length === 0) {
+    return 0;
+  }
+  const highWaterMarks = getHighWaterMarks(db, [args.targetThreadId]);
+  let sequence = (highWaterMarks[args.targetThreadId] ?? 0) + 1;
+  const now = Date.now();
+  for (const row of args.rows) {
+    db.run(
+      sql`INSERT INTO events
+        (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, parent_tool_call_id, data, created_at)
+        VALUES (
+          ${createEventId()},
+          ${args.targetThreadId},
+          ${args.targetEnvironmentId},
+          ${row.scopeKind},
+          ${row.turnId},
+          ${row.providerThreadId},
+          ${sequence},
+          ${row.type},
+          ${row.itemId},
+          ${row.itemKind},
+          ${row.parentToolCallId},
+          ${row.data},
+          ${row.createdAt}
+        )`,
+    );
+    const event = parseDaemonThreadEvent({
+      data: row.data,
+      environmentId: args.targetEnvironmentId,
+      itemId: row.itemId,
+      itemKind: row.itemKind,
+      parentToolCallId: row.parentToolCallId,
+      providerThreadId: row.providerThreadId,
+      scope:
+        row.turnId === null
+          ? { kind: "thread" }
+          : { kind: "turn", turnId: row.turnId },
+      threadId: args.targetThreadId,
+      type: row.type,
+    });
+    if (event !== null) {
+      upsertThreadSearchSegments(db, {
+        updatedAt: now,
+        segments: listThreadSearchSegmentsForThreadEvent({
+          event,
+          sequence,
+        }),
+      });
+    }
+    sequence += 1;
+  }
+  return args.rows.length;
 }
 
 export function appendStoredThreadEventInTransaction<
@@ -829,12 +858,16 @@ export function appendStoredThreadEventsInTransaction(
       type: args.type,
       item: "item" in args.data ? args.data.item : undefined,
       itemId: "itemId" in args.data ? args.data.itemId : undefined,
+      parentToolCallId:
+        "parentToolCallId" in args.data
+          ? args.data.parentToolCallId
+          : undefined,
     });
     const turnId = getThreadEventScopeTurnId(args.scope) ?? null;
 
     db.run(
       sql`INSERT INTO events
-        (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, data, created_at)
+        (id, thread_id, environment_id, scope_kind, turn_id, provider_thread_id, sequence, type, item_id, item_kind, parent_tool_call_id, data, created_at)
         VALUES (
           ${createEventId()},
           ${args.threadId},
@@ -846,6 +879,7 @@ export function appendStoredThreadEventsInTransaction(
           ${args.type},
           ${itemFields.itemId},
           ${itemFields.itemKind},
+          ${itemFields.parentToolCallId},
           ${JSON.stringify(args.data)},
           ${now}
         )`,
@@ -885,10 +919,6 @@ export function appendStoredThreadEvent(
   return sequence;
 }
 
-/**
- * Get high-water marks (max sequence) per thread.
- * Returns Record<threadId, maxSequence>.
- */
 export function getHighWaterMarks(
   db: DbQueryConnection,
   threadIds?: string[],
@@ -941,6 +971,7 @@ const storedEventRowFields = {
   id: events.id,
   itemId: events.itemId,
   itemKind: events.itemKind,
+  parentToolCallId: events.parentToolCallId,
   providerThreadId: events.providerThreadId,
   scopeKind: events.scopeKind,
   sequence: events.sequence,
@@ -954,13 +985,6 @@ export type StoredEventRow = Pick<
   keyof typeof storedEventRowFields
 >;
 
-/**
- * Character cap for the inline outputs a timeline read may return, or `null` to
- * return every payload as stored. See {@link truncatedEventDataColumn}: the cap
- * exists so a window never pays to read output it is going to shorten anyway.
- * The turn-details route uses `null` only when the complete selected slice fits
- * its byte limit.
- */
 export type InlineOutputCharLimit = number | null;
 
 function storedEventRowFieldsWithInlineOutputLimit(
@@ -989,21 +1013,9 @@ export interface FindStoredEventRowArgs {
   type: ThreadEventType;
 }
 
-export interface GetLatestStoredEventRowByTypeArgs {
-  threadId: string;
-  type: ThreadEventType;
-}
-
-export interface ListStoredEventRowsInRangeArgs {
-  seqEnd: number;
-  seqStart: number;
-  threadId: string;
-}
-
 export interface ListStoredEventRowsByParentToolCallIdsArgs {
   beforeSequence?: number;
   excludedTypes?: readonly ThreadEventType[];
-  /** See {@link InlineOutputCharLimit}. */
   maxInlineOutputChars: InlineOutputCharLimit;
   parentToolCallIds: readonly string[];
   sequenceStart?: number;
@@ -1013,13 +1025,9 @@ export interface ListStoredEventRowsByParentToolCallIdsArgs {
 export type GetStoredEventRowsByParentToolCallIdsDataBytesArgs =
   ListStoredEventRowsByParentToolCallIdsArgs;
 
-export interface ListStoredEventRowsByThreadIdsAndTypesArgs {
+export interface ListLatestThreadStateEventRowsByThreadIdsArgs {
   threadIds: readonly string[];
-  types: readonly ThreadEventType[];
-}
-
-export interface ListLatestGoalEventRowsByThreadIdsArgs {
-  threadIds: readonly string[];
+  kind: string;
 }
 
 export interface ListOpenTurnInputAcceptedRowsByThreadIdsArgs {
@@ -1037,7 +1045,6 @@ export interface ListStoredClientTurnRequestRowsByKeysArgs {
 
 export interface ListStoredToolCallRowsByItemIdsArgs {
   itemIds: readonly string[];
-  /** See {@link InlineOutputCharLimit}. */
   maxInlineOutputChars: InlineOutputCharLimit;
   threadId: string;
 }
@@ -1060,18 +1067,24 @@ export interface ListStoredClientTurnRequestIdsInRangeArgs {
   threadId: string;
 }
 
-export interface FindStoredClientTurnRequestSequenceByRequestIdArgs {
-  requestId: ClientTurnRequestId;
-  threadId: string;
-}
-
 export interface GetStoredTurnRequestEventForTurnArgs {
   threadId: string;
   turnId: string;
 }
 
-export interface GetRootStoredTurnStartedSequenceArgs {
+export interface FindLastRootStoredTurnStartedArgs {
+  atOrBeforeSequence?: number;
   threadId: string;
+}
+
+export interface StoredTurnStartedKey {
+  sequence: number;
+  turnId: string;
+}
+
+export interface CompletedRootStoredTurn {
+  completedSequence: number;
+  startedSequence: number;
   turnId: string;
 }
 
@@ -1111,7 +1124,6 @@ export interface ListStoredTurnStartedKeysArgs {
 
 export interface ListRecentStoredEventRowsArgs {
   excludedTypes?: readonly ThreadEventType[];
-  /** See {@link InlineOutputCharLimit}. */
   maxInlineOutputChars: InlineOutputCharLimit;
   threadId: string;
 }
@@ -1120,10 +1132,12 @@ export interface ListStoredConversationOutlineEventRowsArgs {
   threadId: string;
 }
 
+export type GetLatestStoredConversationOutlineSequenceArgs =
+  ListStoredConversationOutlineEventRowsArgs;
+
 export interface ListStoredTimelineWindowEventRowsArgs {
   beforeSequence?: number;
   excludedTypes?: readonly ThreadEventType[];
-  /** See {@link InlineOutputCharLimit}. */
   maxInlineOutputChars: InlineOutputCharLimit;
   sequenceStart: number;
   threadId: string;
@@ -1198,7 +1212,6 @@ export interface ListOpenBackgroundTaskItemRowsForThreadArgs {
 }
 
 export interface OpenBackgroundTaskItemRow {
-  /** Raw data JSON of the latest lifecycle row; carries the item payload. */
   data: string;
   environmentId: string | null;
   itemId: string;
@@ -1267,10 +1280,6 @@ export function listStoredEventRows(
     return listTypePage(undefined);
   }
 
-  // SQLite otherwise prefers (thread_id, sequence) to satisfy the global
-  // ORDER BY and can walk an entire delta-heavy thread to find a few matching
-  // types. One bounded read per type keeps every lookup on
-  // (thread_id, type, sequence); merge the already-sorted heads in memory.
   const rowsByType = [...new Set(args.types)].map((type) => listTypePage(type));
   const offsets = rowsByType.map(() => 0);
   const merged: StoredEventRow[] = [];
@@ -1297,47 +1306,26 @@ export function listStoredEventRows(
   return merged;
 }
 
-export function listStoredEventRowsByThreadIdsAndTypes(
-  db: DbConnection,
-  args: ListStoredEventRowsByThreadIdsAndTypesArgs,
-): StoredEventRow[] {
-  if (args.threadIds.length === 0 || args.types.length === 0) {
-    return [];
-  }
-
-  return db
-    .select(storedEventRowFields)
-    .from(events)
-    .where(
-      and(
-        inArray(events.threadId, [...args.threadIds]),
-        inArray(events.type, [...args.types]),
-      ),
-    )
-    .orderBy(events.threadId, events.sequence)
-    .all();
-}
-
-export function listLatestGoalEventRowsByThreadIds(
+export function listLatestThreadStateEventRowsByThreadIds(
   db: DbQueryConnection,
-  args: ListLatestGoalEventRowsByThreadIdsArgs,
+  args: ListLatestThreadStateEventRowsByThreadIdsArgs,
 ): StoredEventRow[] {
   return queryInSqliteVariableBatches({
     dedupeKey: (threadId) => threadId,
-    fixedVariableCount: 0,
+    fixedVariableCount: 1,
     queryBatch: (threadIds) => {
-      // This runs over every listed thread on each sidebar bootstrap, so it
-      // must stay proportional to goal events, not all events. Literal goal
-      // types imply the partial-index predicate at prepare time; INDEXED BY
-      // prevents a stats-less planner from walking the full thread index; and
-      // no ORDER BY is needed because sequence is unique per thread (#1131).
-      const goalTypes = [
+      const stateTypes = [
         "thread/goal/updated",
         "thread/goal/cleared",
+        "thread/extensionState/updated",
       ] as const satisfies readonly ThreadEventType[];
-      const goalTypesPredicate = sql.raw(
-        `IN (${goalTypes.map((type) => `'${type}'`).join(", ")})`,
+      const stateTypesPredicate = sql.raw(
+        `IN (${stateTypes.map((type) => `'${type}'`).join(", ")})`,
       );
+      const kindPredicate = sql`(
+        candidate.type <> 'thread/extensionState/updated'
+        OR json_extract(candidate.data, '$.kind') = ${args.kind}
+      )`;
       const threadIdList = sql.join(
         threadIds.map((threadId) => sql`${threadId}`),
         sql`, `,
@@ -1346,19 +1334,21 @@ export function listLatestGoalEventRowsByThreadIds(
         .select(storedEventRowFields)
         .from(events)
         .where(sql`${events}.rowid IN (
-        SELECT latest_goal.rowid
-        FROM ${events} AS latest_goal INDEXED BY events_goal_thread_sequence_idx
-        WHERE latest_goal.thread_id IN (${threadIdList})
-          AND latest_goal.type ${goalTypesPredicate}
-          AND latest_goal.sequence = (
+        SELECT latest_state.rowid
+        FROM ${events} AS latest_state INDEXED BY events_thread_state_thread_sequence_idx
+        WHERE latest_state.thread_id IN (${threadIdList})
+          AND latest_state.type ${stateTypesPredicate}
+          AND latest_state.sequence = (
             SELECT MAX(candidate.sequence)
-            FROM ${events} AS candidate INDEXED BY events_goal_thread_sequence_idx
-            WHERE candidate.thread_id = latest_goal.thread_id
-              AND candidate.type ${goalTypesPredicate}
+            FROM ${events} AS candidate INDEXED BY events_thread_state_thread_sequence_idx
+            WHERE candidate.thread_id = latest_state.thread_id
+              AND candidate.type ${stateTypesPredicate}
+              AND ${kindPredicate}
           )
       )`)
         .all();
     },
+
     values: args.threadIds,
     variableCountPerValue: 1,
   });
@@ -1452,7 +1442,7 @@ export function listStoredClientTurnRequestRowsByKeys(
 }
 
 export function findStoredEventRow(
-  db: DbConnection,
+  db: DbQueryConnection,
   args: FindStoredEventRowArgs,
 ): StoredEventRow | null {
   return (
@@ -1472,39 +1462,6 @@ export function findStoredEventRow(
       .limit(1)
       .get() ?? null
   );
-}
-
-export function getLatestStoredEventRowByType(
-  db: DbQueryConnection,
-  args: GetLatestStoredEventRowByTypeArgs,
-): StoredEventRow | null {
-  return (
-    db
-      .select(storedEventRowFields)
-      .from(events)
-      .where(and(eq(events.threadId, args.threadId), eq(events.type, args.type)))
-      .orderBy(desc(events.sequence))
-      .limit(1)
-      .get() ?? null
-  );
-}
-
-export function listStoredEventRowsInRange(
-  db: DbQueryConnection,
-  args: ListStoredEventRowsInRangeArgs,
-): StoredEventRow[] {
-  return db
-    .select(storedEventRowFields)
-    .from(events)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        gte(events.sequence, args.seqStart),
-        lte(events.sequence, args.seqEnd),
-      ),
-    )
-    .orderBy(events.sequence)
-    .all();
 }
 
 export function listStoredEventRowsByParentToolCallIds(
@@ -1534,19 +1491,10 @@ function storedEventRowsByParentToolCallIdsConditions(
     return null;
   }
 
-  const eventParentToolCallId = sql<string>`json_extract(${events.data}, '$.parentToolCallId')`;
-  const itemParentToolCallId = sql<string>`json_extract(${events.data}, '$.item.parentToolCallId')`;
-  // The snapshot check goes before the JSON parent tests: it is a type
-  // comparison for most rows and an indexed probe for progress rows, while
-  // each `json_extract` parses the whole payload — hundreds of KB for a
-  // workflow snapshot. SQLite evaluates these terms in order.
   const conditions: SQL[] = [
     eq(events.threadId, args.threadId),
     isNotSupersededBackgroundTaskProgress,
-    or(
-      inArray(eventParentToolCallId, parentToolCallIds),
-      inArray(itemParentToolCallId, parentToolCallIds),
-    )!,
+    inArray(events.parentToolCallId, parentToolCallIds),
   ];
   if (args.excludedTypes && args.excludedTypes.length > 0) {
     conditions.push(notInArray(events.type, [...args.excludedTypes]));
@@ -1580,7 +1528,7 @@ export function getStoredEventRowsByParentToolCallIdsDataBytes(
   return row?.dataBytes ?? 0;
 }
 
-export function listStoredToolCallRowsByItemIds(
+export function listStoredDelegatingItemRowsByItemIds(
   db: DbConnection,
   args: ListStoredToolCallRowsByItemIdsArgs,
 ): StoredEventRow[] {
@@ -1598,7 +1546,7 @@ export function listStoredToolCallRowsByItemIds(
       and(
         eq(events.threadId, args.threadId),
         inArray(events.itemId, itemIds),
-        eq(events.itemKind, "toolCall"),
+        sql`${events.itemKind} IN ('toolCall', 'delegation')`,
         inArray(events.type, ["item/started", "item/completed"]),
       ),
     )
@@ -1606,7 +1554,6 @@ export function listStoredToolCallRowsByItemIds(
     .all();
 }
 
-/** Whether the thread still has an event at exactly this sequence. */
 export function isTimelineCursorSequencePresent(
   db: DbConnection,
   args: TimelineSegmentAnchorLookupArgs,
@@ -1625,14 +1572,6 @@ export function isTimelineCursorSequencePresent(
   return row !== undefined;
 }
 
-/**
- * One item's identity inside a thread.
- *
- * The item id alone is not that identity. A provider can mint the same item id
- * in two different turns — a resumed ACP session restarts its synthetic id
- * counter — and reading those rows as one item makes an item appear to span
- * every turn between them.
- */
 export interface ScopedItemRef {
   itemId: string;
   scopeKind: ThreadEventScopeKind;
@@ -1656,16 +1595,6 @@ function dedupeScopedItemRefs(
   return [...byKey.values()];
 }
 
-/**
- * Restrict a read to exactly the given item identities.
- *
- * The `item_id` list is kept as its own predicate so the query still narrows
- * through the item-id index. The scope disjunction has one branch per scope,
- * with that scope's item ids in an `IN` predicate, so a large single-turn
- * window does not exceed SQLite's expression-depth limit with one branch per
- * item. The grouping still drops rows that belong to a different turn's reuse
- * of the same id.
- */
 function scopedItemRefsPredicate(
   items: readonly ScopedItemRef[],
 ): SQL | undefined {
@@ -1716,19 +1645,6 @@ export interface ListItemEventSpansByItemsArgs {
   threadId: string;
 }
 
-/**
- * The first and last sequence at which each item produced *any* event.
- *
- * Deciding which page owns an item cannot be done from its `item/started` and
- * `item/completed` alone. An item goes on emitting between them — output
- * deltas, reasoning text, tool progress — and an item that has started but not
- * finished has no completion to find. Reading only lifecycle rows makes a
- * window believe an item ends where it does not, and two pages then render the
- * same row id from different halves of it.
- *
- * Metadata only: no `data` column, so the cost is index reads rather than
- * payload.
- */
 export function listItemEventSpansByItems(
   db: DbConnection,
   args: ListItemEventSpansByItemsArgs,
@@ -1754,21 +1670,10 @@ export function listItemEventSpansByItems(
 
 export interface ListStoredItemLifecycleRowsByItemsArgs {
   items: readonly ScopedItemRef[];
-  /** See {@link InlineOutputCharLimit}. */
   maxInlineOutputChars: InlineOutputCharLimit;
   threadId: string;
 }
 
-/**
- * Every `item/started` and `item/completed` row for the given items, wherever
- * they sit in the thread.
- *
- * A window cut inside a turn can land between an item's start and its
- * completion — an `npm run dev` observed spanning 2,744 sequences is the shape
- * of it. The two halves then project into two different rows carrying the same
- * row id, one of them stuck "pending". This is how a window works out which
- * items it cut, so it can take whole items or none.
- */
 export function listStoredItemLifecycleRowsByItems(
   db: DbConnection,
   args: ListStoredItemLifecycleRowsByItemsArgs,
@@ -1798,14 +1703,6 @@ export interface ListStoredBufferedTextDeltaRowsByItemsArgs {
   threadId: string;
 }
 
-/**
- * Every text delta for the given assistant, plan, or reasoning items.
- *
- * Unlike command output, buffered assistant text has no independent snapshot
- * while its item is still running. A timeline window that starts inside such
- * an item must carry its earlier deltas forward or every refresh would render
- * only the moving suffix that remains inside the event budget.
- */
 export function listStoredBufferedTextDeltaRowsByItems(
   db: DbConnection,
   args: ListStoredBufferedTextDeltaRowsByItemsArgs,
@@ -1856,28 +1753,6 @@ export function listStoredClientTurnRequestIdsInRange(
     .all();
 
   return rows.map((row) => clientTurnRequestIdSchema.parse(row.requestId));
-}
-
-export function findStoredClientTurnRequestSequenceByRequestId(
-  db: DbQueryConnection,
-  args: FindStoredClientTurnRequestSequenceByRequestIdArgs,
-): number | null {
-  const row =
-    db
-      .select({
-        sequence: events.sequence,
-      })
-      .from(events)
-      .where(
-        and(
-          eq(events.threadId, args.threadId),
-          eq(events.type, "client/turn/requested"),
-          sql`json_extract(${events.data}, '$.requestId') = ${args.requestId}`,
-        ),
-      )
-      .limit(1)
-      .get() ?? null;
-  return row?.sequence ?? null;
 }
 
 export function getStoredTurnRequestEventForTurn(
@@ -2084,49 +1959,23 @@ export interface ListTodoSnapshotEventRowsForThreadArgs {
   threadId: string;
 }
 
-/**
- * Tool-call rows that can carry the pending-todo snapshot, oldest first.
- *
- * The snapshot is not a single row: `TodoWrite` carries a complete list, but
- * the Claude task tools carry deltas that only resolve by replaying every task
- * row in order. So this returns all of them rather than just the newest.
- *
- * Needed because the todo banner is extracted from whatever events the timeline
- * window happens to contain. An event-budgeted window can start after the turn
- * that wrote the todos, which silently drops the banner mid-session — the same
- * failure mode `listLatestOpenBackgroundTaskStateRowsForThread` already
- * prevents for background tasks. Bounded in practice (tens of rows per thread,
- * not thousands) and served by the thread/type/item-kind index.
- */
 export function listTodoSnapshotEventRowsForThread(
   db: DbConnection,
   args: ListTodoSnapshotEventRowsForThreadArgs,
 ): StoredEventRow[] {
-  const itemTypes = [
-    "item/started",
-    "item/completed",
-  ] satisfies ThreadEventType[];
-
-  const rows = db
+  const row = db
     .select(storedEventRowFields)
     .from(events)
     .where(
       and(
         eq(events.threadId, args.threadId),
-        inArray(events.type, itemTypes),
-        eq(events.itemKind, "toolCall"),
-        sql`json_extract(${events.data}, '$.item.tool') IN (
-          'TodoWrite', 'TaskCreate', 'TaskUpdate', 'TaskList', 'TaskGet'
-        )`,
+        sql`((${events.itemKind} = 'planSteps' AND ${events.type} = 'item/completed') OR ${events.type} = 'turn/plan/updated')`,
       ),
     )
-    .all();
-
-  // Ordering in SQL makes SQLite prefer the thread/sequence index and read every
-  // event in the thread to satisfy the sort; the type/item-kind index visits
-  // only tool-call rows. Todo snapshots are a small slice of those, so ordering
-  // after selection is cheaper than widening the scan.
-  return rows.sort((left, right) => left.sequence - right.sequence);
+    .orderBy(desc(events.sequence))
+    .limit(1)
+    .get();
+  return row ? [row] : [];
 }
 
 export interface ListActiveBackgroundTaskCountsByThreadIdsArgs {
@@ -2140,12 +1989,6 @@ export interface ActiveBackgroundTaskCountRow {
   threadId: string;
 }
 
-/**
- * Latest thread-scoped lifecycle row per backgroundTask item, regardless of
- * sequence. Timeline windows backfill these for in-window items so a page
- * containing only the spawning turn still renders the task's current/terminal
- * state (which may live many sequences past the window's end).
- */
 export function listLatestBackgroundTaskStateRowsByItemIds(
   db: DbConnection,
   args: ListLatestBackgroundTaskStateRowsByItemIdsArgs,
@@ -2160,9 +2003,6 @@ export function listLatestBackgroundTaskStateRowsByItemIds(
   ] satisfies ThreadEventType[];
   const latest = alias(events, "latest_background_task_state");
 
-  // (threadId, sequence) is unique, so matching the per-item MAX(sequence)
-  // set selects exactly one row per item in SQL instead of loading every
-  // snapshot row and folding in JS.
   return db
     .select(storedEventRowFields)
     .from(events)
@@ -2189,12 +2029,6 @@ export function listLatestBackgroundTaskStateRowsByItemIds(
     .all();
 }
 
-/**
- * Latest non-terminal lifecycle row per open backgroundTask item in a thread.
- * Open tasks can outlive the latest timeline window; these rows let latest-page
- * projections surface active workflow/background-command state even when the
- * spawning turn and progress row are outside the selected event window.
- */
 export function listLatestOpenBackgroundTaskStateRowsForThread(
   db: DbConnection,
   args: ListLatestOpenBackgroundTaskStateRowsForThreadArgs,
@@ -2207,19 +2041,6 @@ export function listLatestOpenBackgroundTaskStateRowsForThread(
   const completed = alias(events, "completed_background_task_state");
   const latest = alias(events, "latest_open_background_task_state");
 
-  // Both "is this the item's newest lifecycle row" and "has this item completed"
-  // are resolved as set membership, not as per-row correlated subqueries. As
-  // correlated subqueries they re-scanned the thread once per candidate row,
-  // which is quadratic in a thread with many background tasks: a real 9,012-event
-  // thread with 2,640 task rows spent 154 ms here on every latest-page build.
-  // (threadId, sequence) is unique, so the per-item MAX(sequence) set selects
-  // exactly one row per item.
-  // The per-item MAX is taken over background-task rows only, where the
-  // correlated form it replaced grouped by item id alone. The two agree while an
-  // item id names one kind of item for the life of a thread, which is what every
-  // provider adapter produces but not something the schema enforces. If an id
-  // were ever reused across kinds, this would report an open task the old form
-  // suppressed — visible as a stale banner, not as lost or corrupted rows.
   const latestSequences = db
     .select({ sequence: max(latest.sequence) })
     .from(latest)
@@ -2239,8 +2060,6 @@ export function listLatestOpenBackgroundTaskStateRowsForThread(
       and(
         eq(completed.threadId, args.threadId),
         eq(completed.type, completedType),
-        // NOT IN over a set containing NULL matches nothing, so the null item
-        // ids that cannot identify a task are excluded from the set itself.
         isNotNull(completed.itemId),
       ),
     );
@@ -2258,24 +2077,13 @@ export function listLatestOpenBackgroundTaskStateRowsForThread(
     )
     .all();
 
-  // Ordering this query in SQL makes SQLite prefer the thread/sequence index,
-  // scanning every event in a long-lived thread even when it has no background
-  // tasks. The type/item-kind index returns only task candidates; the open-task
-  // result is small enough to order after selection without widening the scan.
   return rows.sort((left, right) => left.sequence - right.sequence);
 }
 
-/**
- * Counts open provider background tasks by thread, using each item's latest
- * start/progress row. A task can report a terminal status in a progress row
- * before the final completed event arrives, so active means the latest
- * lifecycle snapshot still has item.status = "pending".
- */
 export function listActiveBackgroundTaskCountsByThreadIds(
   db: DbQueryConnection,
   args: ListActiveBackgroundTaskCountsByThreadIdsArgs,
 ): ActiveBackgroundTaskCountRow[] {
-  // The query binds each thread ID once and also binds 14 fixed values.
   const rows = queryInSqliteVariableBatches({
     dedupeKey: (threadId) => threadId,
     fixedVariableCount: 14,
@@ -2287,7 +2095,6 @@ export function listActiveBackgroundTaskCountsByThreadIds(
         "item/backgroundTask/completed" satisfies ThreadEventType;
       const backgroundTaskItemKind =
         "backgroundTask" satisfies ThreadEventItemType;
-      // SQLite requires a literal predicate to use the matching partial index.
       const backgroundTaskItemKindPredicate = sql.raw(
         `= '${backgroundTaskItemKind}'`,
       );
@@ -2468,26 +2275,69 @@ export function hasRootStoredTurnStarted(
   return row !== undefined;
 }
 
-export function getRootStoredTurnStartedSequence(
+export function findLastCompletedRootStoredTurn(
   db: DbQueryConnection,
-  args: GetRootStoredTurnStartedSequenceArgs,
-): number | null {
+  args: FindLastRootStoredTurnStartedArgs,
+): CompletedRootStoredTurn | null {
+  const completed = alias(events, "completed");
   const row = db
-    .select({ sequence: events.sequence })
+    .select({
+      completedSequence: completed.sequence,
+      startedSequence: events.sequence,
+      turnId: events.turnId,
+    })
+    .from(events)
+    .innerJoin(
+      completed,
+      and(
+        eq(completed.threadId, events.threadId),
+        eq(completed.turnId, events.turnId),
+        eq(completed.type, "turn/completed"),
+      ),
+    )
+    .where(
+      and(
+        eq(events.threadId, args.threadId),
+        eq(events.type, "turn/started"),
+        isRootTurnStartedEventData,
+        args.atOrBeforeSequence === undefined
+          ? undefined
+          : lte(events.sequence, args.atOrBeforeSequence),
+      ),
+    )
+    .orderBy(desc(events.sequence), desc(completed.sequence))
+    .limit(1)
+    .get();
+  return row?.turnId
+    ? {
+        completedSequence: row.completedSequence,
+        startedSequence: row.startedSequence,
+        turnId: row.turnId,
+      }
+    : null;
+}
+
+export function findLastRootStoredTurnStarted(
+  db: DbQueryConnection,
+  args: FindLastRootStoredTurnStartedArgs,
+): StoredTurnStartedKey | null {
+  const row = db
+    .select({ sequence: events.sequence, turnId: events.turnId })
     .from(events)
     .where(
       and(
         eq(events.threadId, args.threadId),
         eq(events.type, "turn/started"),
-        eq(events.turnId, args.turnId),
         isRootTurnStartedEventData,
+        args.atOrBeforeSequence === undefined
+          ? undefined
+          : lte(events.sequence, args.atOrBeforeSequence),
       ),
     )
-    .orderBy(events.sequence)
+    .orderBy(desc(events.sequence))
     .limit(1)
     .get();
-
-  return row?.sequence ?? null;
+  return row?.turnId ? { sequence: row.sequence, turnId: row.turnId } : null;
 }
 
 export function listRecentStoredEventRows(
@@ -2510,77 +2360,100 @@ export function listRecentStoredEventRows(
     .all();
 }
 
-/**
- * Event subset required to project the conversation-only table of contents.
- * Bulk command, reasoning, diff, and usage rows cannot affect the outline and
- * dominate long-lived histories. Keep only conversation-producing rows plus
- * the small set of structural lifecycle/error rows that affect their grouping.
- */
+const conversationOutlineLifecycleTypes = [
+  "client/turn/requested",
+  "turn/input/accepted",
+  "turn/started",
+  "turn/completed",
+  "system/manager/user_message",
+  "system/thread/interrupted",
+  "system/error",
+  "provider/error",
+  "item/agentMessage/delta",
+  "item/plan/delta",
+] satisfies ThreadEventType[];
+const conversationOutlineItemKinds = [
+  "agentMessage",
+  "plan",
+] satisfies ThreadEventItemType[];
+const conversationOutlineStructuralItemKinds = [
+  "backgroundTask",
+  "toolCall",
+] satisfies ThreadEventItemType[];
+const conversationOutlineStructuralLifecycleTypes = [
+  "item/started",
+  "item/completed",
+  "item/backgroundTask/progress",
+  "item/backgroundTask/completed",
+] satisfies ThreadEventType[];
+
+function storedConversationOutlineLifecycleWhere(threadId: string): SQL {
+  return and(
+    eq(events.threadId, threadId),
+    inArray(events.type, conversationOutlineLifecycleTypes),
+  )!;
+}
+
+function storedConversationOutlineCompletedWhere(threadId: string): SQL {
+  return and(
+    eq(events.threadId, threadId),
+    eq(events.type, "item/completed"),
+    inArray(events.itemKind, conversationOutlineItemKinds),
+  )!;
+}
+
+function storedConversationOutlineStructuralWhere(threadId: string): SQL {
+  return and(
+    eq(events.threadId, threadId),
+    inArray(events.type, conversationOutlineStructuralLifecycleTypes),
+    inArray(events.itemKind, conversationOutlineStructuralItemKinds),
+  )!;
+}
+
+export function getLatestStoredConversationOutlineSequence(
+  db: DbConnection,
+  args: GetLatestStoredConversationOutlineSequenceArgs,
+): number {
+  const lifecycle = db
+    .select({ sequence: max(events.sequence) })
+    .from(events)
+    .where(storedConversationOutlineLifecycleWhere(args.threadId));
+  const completedConversation = db
+    .select({ sequence: max(events.sequence) })
+    .from(events)
+    .where(storedConversationOutlineCompletedWhere(args.threadId));
+  const structural = db
+    .select({ sequence: max(events.sequence) })
+    .from(events)
+    .where(storedConversationOutlineStructuralWhere(args.threadId));
+
+  return unionAll(lifecycle, completedConversation, structural)
+    .all()
+    .reduce((latest, row) => Math.max(latest, row.sequence ?? 0), 0);
+}
+
 export function listStoredConversationOutlineEventRows(
   db: DbConnection,
   args: ListStoredConversationOutlineEventRowsArgs,
 ): StoredEventRow[] {
-  const lifecycleTypes = [
-    "client/turn/requested",
-    "turn/input/accepted",
-    "turn/started",
-    "turn/completed",
-    "system/manager/user_message",
-    "system/thread/interrupted",
-    "system/error",
-    "provider/error",
-    "item/agentMessage/delta",
-    "item/plan/delta",
-  ] satisfies ThreadEventType[];
-  const conversationItemKinds = [
-    "agentMessage",
-    "plan",
-  ] satisfies ThreadEventItemType[];
-  const structuralItemKinds = [
-    "backgroundTask",
-    "toolCall",
-  ] satisfies ThreadEventItemType[];
-  const structuralItemLifecycleTypes = [
-    "item/started",
-    "item/completed",
-    "item/backgroundTask/progress",
-    "item/backgroundTask/completed",
-  ] satisfies ThreadEventType[];
-
   const lifecycleRows = db
     .select(storedEventRowFields)
     .from(events)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        inArray(events.type, lifecycleTypes),
-      ),
-    );
+    .where(storedConversationOutlineLifecycleWhere(args.threadId));
   const completedConversationRows = db
     .select(storedEventRowFields)
     .from(events)
-    .where(
-      and(
-        eq(events.threadId, args.threadId),
-        eq(events.type, "item/completed"),
-        inArray(events.itemKind, conversationItemKinds),
-      ),
-    );
+    .where(storedConversationOutlineCompletedWhere(args.threadId));
   const structuralRows = db
     .select(storedEventRowFields)
     .from(events)
     .where(
       and(
-        eq(events.threadId, args.threadId),
-        inArray(events.type, structuralItemLifecycleTypes),
-        inArray(events.itemKind, structuralItemKinds),
+        storedConversationOutlineStructuralWhere(args.threadId),
         isNotSupersededBackgroundTaskProgress,
       ),
     );
 
-  // These disjoint branches let SQLite use the thread/type/item-kind indexes.
-  // A single OR plus SQL ordering makes it scan every event through the
-  // thread/sequence index instead, which dominates cold loads of long threads.
   const rows = unionAll(
     lifecycleRows,
     completedConversationRows,
@@ -2605,12 +2478,6 @@ function timelineSegmentAnchorConditions(threadId: string): SQL | undefined {
   return and(
     eq(events.threadId, threadId),
     eq(events.type, "client/turn/requested"),
-    // Must agree with `resolveTurnRequestKind` in the projection: a request is
-    // a segment anchor exactly when it starts a turn rather than steering one.
-    // `steer` with no expected turn is a request the user sent with nothing
-    // running, so it starts a turn like `auto` does — and when this predicate
-    // disagreed with the projection, the page emitted an older cursor the next
-    // request rejected as stale, stranding everything before it.
     sql`(
       COALESCE(json_extract(${events.data}, '$.target.kind'), 'new-turn')
         IN ('thread-start', 'new-turn')
@@ -2634,31 +2501,17 @@ function timelineSegmentAnchorConditions(threadId: string): SQL | undefined {
 
 export interface ListTimelineSegmentAnchorsDescendingArgs {
   threadId: string;
-  /** Restrict to anchors strictly before this sequence (exclusive). */
   beforeSequence?: number;
   limit: number;
 }
 
 export interface FindTimelineWindowBudgetFloorSequenceArgs {
-  /** Timeline-irrelevant types, excluded so the budget counts real work. */
   excludedTypes: readonly ThreadEventType[];
-  /** Max events the window may span. */
   eventBudget: number;
   threadId: string;
-  /** Count backwards from strictly before this sequence, when paginating. */
   beforeSequence?: number;
 }
 
-/**
- * Sequence of the `eventBudget`-th newest timeline-relevant event, or
- * `undefined` when the thread has fewer than that many events (so no budget
- * constraint applies).
- *
- * Used to bound a timeline window by *work* rather than by user-message count.
- * Costs one indexed descending scan of `eventBudget` entries — deliberately
- * cheaper than counting events per candidate anchor, which would re-scan the
- * same range once per anchor.
- */
 export function findTimelineWindowBudgetFloorSequence(
   db: DbConnection,
   args: FindTimelineWindowBudgetFloorSequenceArgs,
@@ -2686,30 +2539,14 @@ export function findTimelineWindowBudgetFloorSequence(
 }
 
 export interface TimelineTurnBoundaryLookupArgs {
-  /** Look only at events at or after this sequence. */
   sequence: number;
   threadId: string;
 }
 
-/**
- * Whether an event at or above `sequence` belongs under a tool call whose own
- * item began below it.
- *
- * Delegation children project into their parent row rather than independent
- * top-level rows. Splitting that aggregate across two timeline pages is not
- * currently representable: whichever copy of the parent row the client keeps
- * would hide the other page's children. This metadata-only existence check
- * lets the timeline decline such an in-turn cut before parent closure rereads
- * every descendant payload past the window and silently defeats the budget.
- */
 export function hasParentedEventCrossingSequence(
   db: DbConnection,
   args: TimelineTurnBoundaryLookupArgs,
 ): boolean {
-  const parentToolCallId = sql<string | null>`COALESCE(
-    NULLIF(json_extract(${events.data}, '$.item.parentToolCallId'), ''),
-    NULLIF(json_extract(${events.data}, '$.parentToolCallId'), '')
-  )`;
   const row = db
     .select({ sequence: events.sequence })
     .from(events)
@@ -2717,13 +2554,13 @@ export function hasParentedEventCrossingSequence(
       and(
         eq(events.threadId, args.threadId),
         gte(events.sequence, args.sequence),
-        sql`${parentToolCallId} IS NOT NULL`,
+        isNotNull(events.parentToolCallId),
         sql`EXISTS (
           SELECT 1
           FROM events AS parent_event
           WHERE parent_event.thread_id = ${events.threadId}
-            AND parent_event.item_id = ${parentToolCallId}
-            AND parent_event.item_kind = 'toolCall'
+            AND parent_event.item_id = ${events.parentToolCallId}
+            AND parent_event.item_kind IN ('toolCall', 'delegation')
             AND parent_event.sequence < ${args.sequence}
         )`,
       ),
@@ -2733,27 +2570,6 @@ export function hasParentedEventCrossingSequence(
   return row !== undefined;
 }
 
-/**
- * The id of the single unfinished turn that owns every turn-scoped event from
- * `sequence` onward, or null when there is no such turn.
- *
- * A timeline window is normally cut on user messages, so it never lands inside
- * a turn. The one exception is a turn so long it exceeds the whole event budget
- * on its own, where the window has to start mid-turn — and that is only safe
- * while the turn is still running, because a finished turn projects into a
- * single summary row that two pages cannot each own.
- *
- * Both halves of the question matter, and asking only "did any turn finish
- * after here" answers neither. That form says nothing about *which* turn the
- * cut lands in: a turn can finish and be followed by more than a budget's worth
- * of thread-scoped background-task traffic, leaving the floor in a region that
- * belongs to no turn at all, and a nested turn completing elsewhere can veto a
- * cut that was perfectly safe.
- *
- * An interrupted or abandoned turn has no `turn/completed` and is reported as
- * unfinished, which is the intended answer: it never collapses into a summary
- * row either.
- */
 export function findUnfinishedTurnCoveringSequence(
   db: DbConnection,
   args: TimelineTurnBoundaryLookupArgs,
@@ -2790,11 +2606,6 @@ export function findUnfinishedTurnCoveringSequence(
   return completed === undefined ? turnId : null;
 }
 
-/**
- * Newest-first segment anchors, bounded by `limit` (and optionally by
- * `beforeSequence`). Lets the timeline resolve a page's window without
- * enumerating every anchor in the thread.
- */
 export function listTimelineSegmentAnchorsDescending(
   db: DbConnection,
   args: ListTimelineSegmentAnchorsDescendingArgs,
@@ -2818,27 +2629,6 @@ export interface TimelineSegmentAnchorLookupArgs {
   sequence: number;
 }
 
-/** The first segment anchor strictly after `sequence`, if any. */
-export function findTimelineSegmentAnchorSequenceAfter(
-  db: DbConnection,
-  args: TimelineSegmentAnchorLookupArgs,
-): number | undefined {
-  const row = db
-    .select({ sequence: events.sequence })
-    .from(events)
-    .where(
-      and(
-        timelineSegmentAnchorConditions(args.threadId),
-        gt(events.sequence, args.sequence),
-      ),
-    )
-    .orderBy(events.sequence)
-    .limit(1)
-    .get();
-  return row?.sequence;
-}
-
-/** The segment anchor at exactly `sequence`, if that turn qualifies as one. */
 export function getTimelineSegmentAnchorAtSequence(
   db: DbConnection,
   args: TimelineSegmentAnchorLookupArgs,
@@ -2881,11 +2671,6 @@ function storedTimelineWindowDataColumn(
     : truncatedEventDataColumn(maxInlineOutputChars);
 }
 
-/**
- * Exact UTF-8 bytes the matching timeline read will materialize after its SQL
- * output truncation. This query returns one number instead of every payload,
- * so callers can bound a window before better-sqlite3 builds it.
- */
 export function getStoredTimelineWindowEventDataBytes(
   db: DbConnection,
   args: GetStoredTimelineWindowEventDataBytesArgs,
@@ -2901,15 +2686,47 @@ export function getStoredTimelineWindowEventDataBytes(
   return row?.dataBytes ?? 0;
 }
 
-/**
- * Finds the oldest row in the newest suffix that fits the byte budget.
- * Iteration returns only a sequence and a byte count for each row, and stops
- * before SQLite or V8 materializes the excluded event payloads.
- */
+function getStoredTimelineWindowEventDataBytesPreflight(
+  db: DbConnection,
+  args: GetStoredTimelineWindowEventDataBytesArgs,
+): { dataBytes: number; isComplete: boolean } {
+  const data = storedTimelineWindowDataColumn(args.maxInlineOutputChars);
+  const boundedWindow = db
+    .select({ data: sql<string>`${data}`.as("data") })
+    .from(events)
+    .where(and(...storedTimelineWindowConditions(args)))
+    .orderBy(desc(events.sequence))
+    .limit(STORED_TIMELINE_BYTE_PREFLIGHT_EVENT_LIMIT + 1)
+    .as("bounded_timeline_byte_window");
+  const row = db
+    .select({
+      dataBytes: sql<number>`COALESCE(SUM(length(CAST(${boundedWindow.data} AS BLOB))), 0)`,
+      eventCount: sql<number>`COUNT(*)`,
+    })
+    .from(boundedWindow)
+    .get();
+  return {
+    dataBytes: row?.dataBytes ?? 0,
+    isComplete:
+      (row?.eventCount ?? 0) <= STORED_TIMELINE_BYTE_PREFLIGHT_EVENT_LIMIT,
+  };
+}
+
 export function findStoredTimelineWindowByteBudgetFloor(
   db: DbConnection,
   args: FindStoredTimelineWindowByteBudgetFloorArgs,
 ): StoredTimelineWindowByteBudgetFloor {
+  const preflight = getStoredTimelineWindowEventDataBytesPreflight(db, {
+    beforeSequence: args.beforeSequence,
+    excludedTypes: args.excludedTypes,
+    maxInlineOutputChars: args.maxInlineOutputChars,
+    sequenceStart: args.sequenceStart,
+    threadId: args.threadId,
+  });
+  if (preflight.isComplete && preflight.dataBytes <= args.maxDataBytes) {
+    return { eventDataBytes: preflight.dataBytes, kind: "fits" };
+  }
+
   const data = storedTimelineWindowDataColumn(args.maxInlineOutputChars);
   const query = db
     .select({
@@ -3167,32 +2984,7 @@ export function getLastStoredProviderThreadId(
     return null;
   }
 
-  // A directory switch changes the runtime cwd, not the provider thread's
-  // conversation identity. The host daemon releases the old runtime owner
-  // before the next turn is dispatched through `thread/resume` with the new
-  // workspace path, so keep the last provider id available across the switch.
   return latestProviderRow.providerThreadId;
-}
-
-export function getStoredProviderThreadIdAtOrBeforeSequence(
-  db: DbQueryConnection,
-  args: {
-    sequence: number;
-    threadId: string;
-  },
-): string | null {
-  const row = db
-    .select({ providerThreadId: events.providerThreadId })
-    .from(events)
-    .where(
-      sql`${events.threadId} = ${args.threadId}
-        AND ${events.sequence} <= ${args.sequence}
-        AND ${events.providerThreadId} IS NOT NULL`,
-    )
-    .orderBy(sql`${events.sequence} DESC`)
-    .limit(1)
-    .get();
-  return row?.providerThreadId ?? null;
 }
 
 export function listThreadTurnInterruptionEventStates(
@@ -3233,7 +3025,7 @@ export function listThreadTurnInterruptionEventStates(
           WHERE latest.thread_id = ${events.threadId}
             AND latest.type = 'turn/started'
             AND latest.turn_id IS NOT NULL
-            AND COALESCE(json_extract(latest.data, '$.parentToolCallId'), '') = ''
+            AND latest.parent_tool_call_id IS NULL
         )`,
         sql`NOT EXISTS (
           SELECT 1
@@ -3417,9 +3209,6 @@ function pruneLatestRowsForContextWindowUsageBeforeSequence(
     return 0;
   }
 
-  // The timeline needs the latest root-turn totals row plus the latest older
-  // root-turn row that still carries a non-null modelContextWindow. Usage from
-  // nested turns belongs to subagents and must not replace either report.
   const result = db.run(
     sql`WITH root_usage AS (
           SELECT usage.id, usage.sequence, usage.data
@@ -3432,7 +3221,7 @@ function pruneLatestRowsForContextWindowUsageBeforeSequence(
               WHERE nested_turn_started.thread_id = usage.thread_id
                 AND nested_turn_started.turn_id = usage.turn_id
                 AND nested_turn_started.type = 'turn/started'
-                AND COALESCE(json_extract(nested_turn_started.data, '$.parentToolCallId'), '') <> ''
+                AND nested_turn_started.parent_tool_call_id IS NOT NULL
             )
         )
         DELETE FROM events
@@ -3497,10 +3286,6 @@ export function pruneResolvedItemDeltas(
     "agentMessage" | "commandExecution" | "reasoning"
   >;
 
-  // File-change output deltas and plan deltas are intentionally excluded here:
-  // their completed events do not carry a replayable aggregate for the streamed
-  // text. Once a completed command row has aggregatedOutput, all matching
-  // command output deltas are redundant regardless of reset markers.
   const prunableDeltaMatches = {
     "item/agentMessage/delta": "agentMessage",
     "item/commandExecution/outputDelta": "commandExecution",
@@ -3514,61 +3299,58 @@ export function pruneResolvedItemDeltas(
 
   const result = db.run(
     sql`DELETE FROM events
-        WHERE ${events.threadId} = ${args.threadId}
-          AND ${events.type} IN (
+        WHERE rowid IN (
+          SELECT candidate.rowid
+          FROM events candidate
+          WHERE candidate.thread_id = ${args.threadId}
+          AND candidate.type IN (
             ${"item/agentMessage/delta" satisfies PrunableResolvedDeltaEventType},
             ${"item/commandExecution/outputDelta" satisfies PrunableResolvedDeltaEventType},
             ${"item/reasoning/summaryTextDelta" satisfies PrunableResolvedDeltaEventType},
             ${"item/reasoning/textDelta" satisfies PrunableResolvedDeltaEventType}
           )
-          AND ${events.itemId} IS NOT NULL
-          AND ${events.turnId} IS NOT NULL
+          AND candidate.item_id IS NOT NULL
+          AND candidate.turn_id IS NOT NULL
           AND EXISTS (
             SELECT 1
             FROM events completed
-            WHERE completed.thread_id = ${events.threadId}
-              AND completed.turn_id = ${events.turnId}
+            WHERE completed.thread_id = candidate.thread_id
+              AND completed.turn_id = candidate.turn_id
               AND completed.type = ${itemCompletedType}
               AND completed.item_kind = CASE
-                WHEN ${events.type} = ${"item/agentMessage/delta" satisfies PrunableResolvedDeltaEventType}
+                WHEN candidate.type = ${"item/agentMessage/delta" satisfies PrunableResolvedDeltaEventType}
                   THEN ${prunableDeltaMatches["item/agentMessage/delta"]}
-                WHEN ${events.type} = ${"item/commandExecution/outputDelta" satisfies PrunableResolvedDeltaEventType}
+                WHEN candidate.type = ${"item/commandExecution/outputDelta" satisfies PrunableResolvedDeltaEventType}
                   THEN ${prunableDeltaMatches["item/commandExecution/outputDelta"]}
-                WHEN ${events.type} = ${"item/reasoning/summaryTextDelta" satisfies PrunableResolvedDeltaEventType}
+                WHEN candidate.type = ${"item/reasoning/summaryTextDelta" satisfies PrunableResolvedDeltaEventType}
                   THEN ${prunableDeltaMatches["item/reasoning/summaryTextDelta"]}
-                WHEN ${events.type} = ${"item/reasoning/textDelta" satisfies PrunableResolvedDeltaEventType}
+                WHEN candidate.type = ${"item/reasoning/textDelta" satisfies PrunableResolvedDeltaEventType}
                   THEN ${prunableDeltaMatches["item/reasoning/textDelta"]}
               END
-              AND completed.item_id = ${events.itemId}
+              AND completed.item_id = candidate.item_id
               AND (
-                ${events.type} <> ${"item/commandExecution/outputDelta" satisfies PrunableResolvedDeltaEventType}
+                candidate.type <> ${"item/commandExecution/outputDelta" satisfies PrunableResolvedDeltaEventType}
                 OR json_type(completed.data, '$.item.aggregatedOutput') IS NOT NULL
               )
-              AND COALESCE(json_extract(completed.data, '$.item.parentToolCallId'), '') =
-                COALESCE(json_extract(${events.data}, '$.parentToolCallId'), '')
+              AND completed.parent_tool_call_id IS candidate.parent_tool_call_id
           )
           AND EXISTS (
             SELECT 1
             FROM events earlier_delta
-            WHERE earlier_delta.thread_id = ${events.threadId}
-              AND earlier_delta.turn_id = ${events.turnId}
-              AND earlier_delta.type = ${events.type}
-              AND earlier_delta.item_id = ${events.itemId}
-              AND COALESCE(json_extract(earlier_delta.data, '$.parentToolCallId'), '') =
-                COALESCE(json_extract(${events.data}, '$.parentToolCallId'), '')
-              AND earlier_delta.sequence < ${events.sequence}
-          )`,
+            WHERE earlier_delta.thread_id = candidate.thread_id
+              AND earlier_delta.turn_id = candidate.turn_id
+              AND earlier_delta.type = candidate.type
+              AND earlier_delta.item_id = candidate.item_id
+              AND earlier_delta.parent_tool_call_id IS candidate.parent_tool_call_id
+              AND earlier_delta.sequence < candidate.sequence
+          )
+          LIMIT ${RESOLVED_ITEM_DELTA_PRUNE_BATCH_SIZE}
+        )`,
   );
 
   return result.changes;
 }
 
-/**
- * Latest lifecycle row per open backgroundTask item across all threads on a
- * host. "Open" = no item/backgroundTask/completed row exists for the item.
- * Used by the server's daemon-restart backstop: when the daemon's in-memory
- * task state is lost, these are the items nobody will ever settle.
- */
 export function listOpenBackgroundTaskItemRowsForHost(
   db: DbQueryConnection,
   args: ListOpenBackgroundTaskItemRowsForHostArgs,
@@ -3580,9 +3362,6 @@ export function listOpenBackgroundTaskItemRowsForHost(
     "item/backgroundTask/completed" satisfies ThreadEventType;
   const settled = alias(events, "settled_background_task");
 
-  // The NOT EXISTS clause restricts this to open items; the correlated
-  // MAX(sequence) predicate selects each item's latest lifecycle row in SQL
-  // so only one row per open item is materialized.
   const rows = db
     .select({
       data: events.data,
@@ -3629,11 +3408,6 @@ export function listOpenBackgroundTaskItemRowsForHost(
   );
 }
 
-/**
- * Latest lifecycle row per open backgroundTask item in one thread. Successful
- * thread-runtime releases use this to settle work the released provider
- * process could no longer report itself.
- */
 export function listOpenBackgroundTaskItemRowsForThread(
   db: DbQueryConnection,
   args: ListOpenBackgroundTaskItemRowsForThreadArgs,
@@ -3690,14 +3464,6 @@ export function listOpenBackgroundTaskItemRowsForThread(
   );
 }
 
-/**
- * Each item/backgroundTask/progress row carries the full superseding task
- * snapshot, and the turn-scoped item/started anchors the row's sequence range
- * — so while a task runs only the latest progress row per item is
- * load-bearing, and once the dedicated item/backgroundTask/completed row
- * exists (full final payload) none are. No sequence cutoff: deleting a
- * superseded snapshot is always safe.
- */
 export function pruneBackgroundTaskProgressEvents(
   db: DbConnection,
   args: PruneBackgroundTaskProgressEventsArgs,

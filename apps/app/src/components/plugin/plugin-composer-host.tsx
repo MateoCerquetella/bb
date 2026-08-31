@@ -5,25 +5,20 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   useSyncExternalStore,
   type ReactNode,
 } from "react";
 import type { ComposerView, PluginComposerScope } from "@get-bb/plugin-sdk";
 import { isComposerDraftEmpty } from "@get-bb/plugin-sdk/internal/composer-view";
-import type { PromptDraftState } from "@/lib/prompt-draft";
+import type { PromptDraftState } from "@bb/client-core";
 
-/**
- * Binds plugin composer hooks to the exact composer owned by a pane. This is
- * authoritative even when the route points at another split pane and also
- * carries host-only state such as root-project selection or an inline queued
- * message editor.
- */
 export interface PluginComposerHost {
   scope: PluginComposerScope;
-  draft: PromptDraftState;
   textEffectKey: string;
   getCurrent(): PromptDraftState;
+  subscribeDraft(listener: () => void): () => void;
   setDraft(next: PromptDraftState): void;
   focus(): void;
 }
@@ -41,7 +36,44 @@ export function composerScopeIdentity(scope: PluginComposerScope): string {
   }
 }
 
-export interface PluginComposerViewModelInput {
+const subscribeToNoDraft = () => () => {};
+const getNoDraft = () => null;
+
+export function usePluginComposerHostDraft(
+  host: PluginComposerHost | null,
+): PromptDraftState | null {
+  const subscribe = host?.subscribeDraft ?? subscribeToNoDraft;
+  const getSnapshot = host?.getCurrent ?? getNoDraft;
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+}
+
+export function useComposerHostDraftNotifier(
+  draft: PromptDraftState | null,
+): (listener: () => void) => () => void {
+  const [store] = useState(() => {
+    const listeners = new Set<() => void>();
+    return {
+      subscribe: (listener: () => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      notify: () => {
+        for (const listener of [...listeners]) listener();
+      },
+    };
+  });
+  const previousDraftRef = useRef(draft);
+  useLayoutEffect(() => {
+    if (previousDraftRef.current === draft) return;
+    previousDraftRef.current = draft;
+    store.notify();
+  }, [draft, store]);
+  return store.subscribe;
+}
+
+interface PluginComposerViewModelInput {
   scope: PluginComposerScope;
   layout: ComposerView["layout"];
   text: string;
@@ -50,7 +82,6 @@ export interface PluginComposerViewModelInput {
   isSubmitting: boolean;
 }
 
-/** The single model builder shared by concrete composer shells and the editor. */
 export function usePluginComposerViewModel({
   scope,
   layout,
@@ -78,7 +109,6 @@ const PluginComposerHostContext = createContext<
   PluginComposerHost | null | undefined
 >(undefined);
 
-/** Reactive composer state supplied by the concrete prompt-box host. */
 export const PluginComposerViewContext = createContext<
   ComposerView | undefined
 >(undefined);
@@ -152,10 +182,6 @@ export function PluginComposerHostProvider({
   );
 }
 
-/**
- * Shares an active composer host with sibling plugin surfaces in one compose
- * pane without forcing the pane owner to lift the transient draft state.
- */
 export function PluginComposerHostScopeProvider({
   children,
 }: {
@@ -169,7 +195,6 @@ export function PluginComposerHostScopeProvider({
   );
 }
 
-/** Publishes a nested composer's current host to its enclosing pane scope. */
 export function usePublishPluginComposerHost(
   host: PluginComposerHost | null,
 ): void {

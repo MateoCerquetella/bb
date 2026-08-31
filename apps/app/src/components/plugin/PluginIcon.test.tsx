@@ -25,6 +25,7 @@ it("uses branding.icon instead of the image logo or contribution hint", () => {
           compactIconUrl: null,
           logoUrl: "/api/v1/plugins/docs/assets/logo?h=abc",
           logoDarkUrl: "/api/v1/plugins/docs/assets/logo-dark?h=def",
+          icons: new Map(),
         },
       ],
     ]),
@@ -47,6 +48,7 @@ it("uses the contribution hint when branding.icon is omitted", () => {
           compactIconUrl: null,
           logoUrl: "/api/v1/plugins/github/assets/logo?h=abc",
           logoDarkUrl: null,
+          icons: new Map(),
         },
       ],
     ]),
@@ -68,6 +70,7 @@ it("uses Zap compactly when a logo-only plugin has no contribution hint", () => 
           compactIconUrl: null,
           logoUrl: "/api/v1/plugins/github/assets/logo?h=abc",
           logoDarkUrl: null,
+          icons: new Map(),
         },
       ],
     ]),
@@ -90,6 +93,7 @@ it("uses a plugin-owned compact SVG before named icon hints", () => {
           compactIconUrl,
           logoUrl: null,
           logoDarkUrl: null,
+          icons: new Map(),
         },
       ],
     ]),
@@ -122,14 +126,12 @@ it("resolves every named branding.icon the shipped plugins declare", async () =>
       await readFile(join(pluginsDir, entry.name, "package.json"), "utf8"),
     );
     const icon = manifest.bb?.branding?.icon;
-    // Path-shaped icons are plugin-owned SVG assets, not host glyph names.
     if (icon === undefined || icon.startsWith("./")) continue;
     declared.push([entry.name, icon]);
   }
 
   expect(declared.length).toBeGreaterThan(0);
-  // A typo silently falls back to Zap, so a deliberate icon must round-trip.
-  expect(
-    declared.filter(([, icon]) => pluginIconName(icon) !== icon),
-  ).toEqual([]);
+  expect(declared.filter(([, icon]) => pluginIconName(icon) !== icon)).toEqual(
+    [],
+  );
 });

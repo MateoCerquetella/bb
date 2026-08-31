@@ -3,8 +3,9 @@
 import type { PluginComposerThreadRowStatus } from "@get-bb/plugin-sdk";
 import { createElement } from "react";
 import { createRoot } from "react-dom/client";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { act } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, type Mock, vi } from "vitest";
 import {
   installForeignDomMutationGuard,
   uninstallForeignDomMutationGuardForTest,
@@ -19,16 +20,22 @@ import {
   type PluginFrontendCandidate,
   type PluginFrontendReconcileDeps,
 } from "./plugin-frontend";
+import { resetPluginCssForTest, retainPluginCss } from "./plugin-css";
 import {
   getPluginSlotSnapshot,
   removePluginSlotRegistrations,
   resetPluginSlotStoreForTest,
   setPluginSlotRegistrations,
+  usePluginSlots,
 } from "./plugin-slots";
 import {
   getPluginThreadRowStatus,
   resetPluginThreadRowStatusesForTest,
 } from "./plugin-thread-row-status";
+import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
+import { PLUGIN_PANEL_ROUTE_PATH } from "./route-paths";
+import { applyAppThemeCss } from "./themes";
+import { PluginPanelView } from "@/views/PluginPanelView";
 
 function candidate(
   pluginId: string,
@@ -50,7 +57,6 @@ function candidate(
   };
 }
 
-/** A module namespace whose default export registers one homepage section. */
 function pluginModule(sectionTitle: string): Record<string, unknown> {
   return {
     default: definePluginApp((app) => {
@@ -71,18 +77,45 @@ function contentScriptModule(
 
 afterEach(() => {
   resetPluginThreadRowStatusesForTest();
+  resetPluginSlotStoreForTest();
+  resetPluginCssForTest();
   uninstallForeignDomMutationGuardForTest();
 });
 
-function makeDeps(initial: PluginFrontendCandidate[] = []) {
+function MountedHomepageSections() {
+  const { homepageSections } = usePluginSlots();
+  return createElement(
+    "div",
+    null,
+    ...homepageSections.map((section) =>
+      createElement(PluginSlotMount, {
+        key: `${section.pluginId}/${section.id}/${section.generation}`,
+        pluginId: section.pluginId,
+        slotKind: "homepageSection",
+        slotId: section.id,
+        children: createElement(section.component, { projectId: null }),
+      }),
+    ),
+  );
+}
+
+interface TestReconcileDeps extends PluginFrontendReconcileDeps {
+  fetchCandidates: Mock<() => Promise<PluginFrontendCandidate[]>>;
+  importModule: Mock<(url: string) => Promise<unknown>>;
+  removeRegistrations: Mock<typeof removePluginSlotRegistrations>;
+  setRegistrations: Mock<typeof setPluginSlotRegistrations>;
+}
+
+function makeDeps(initial: PluginFrontendCandidate[] = []): TestReconcileDeps {
   return {
     fetchCandidates: vi.fn(
       async (): Promise<PluginFrontendCandidate[]> => initial,
     ),
-    importModule: vi.fn(
-      async (_url: string): Promise<unknown> => pluginModule("hello"),
+    importModule: vi.fn(async (_url: string): Promise<unknown> =>
+      pluginModule("hello"),
     ),
     applyCss: vi.fn(),
+    retainCss: vi.fn(() => vi.fn()),
     resetCrashedSlots: vi.fn(),
     setRegistrations: vi.fn(),
     removeRegistrations: vi.fn(),
@@ -90,7 +123,7 @@ function makeDeps(initial: PluginFrontendCandidate[] = []) {
     warn: vi.fn(),
     routePluginId: () => null,
     mountTimeoutMs: undefined as number | undefined,
-  } satisfies PluginFrontendReconcileDeps;
+  };
 }
 
 describe("reconcilePluginFrontends", () => {
@@ -105,16 +138,12 @@ describe("reconcilePluginFrontends", () => {
     expect(deps.importModule).toHaveBeenCalledTimes(2);
     expect(deps.setRegistrations).toHaveBeenCalledTimes(2);
 
-    // Backend-only broadcast: both hashes unchanged → nothing re-imports,
-    // nothing re-registers (no generation bump, no remount).
     deps.importModule.mockClear();
     deps.setRegistrations.mockClear();
     await reconcilePluginFrontends(state, deps);
     expect(deps.importModule).not.toHaveBeenCalled();
     expect(deps.setRegistrations).not.toHaveBeenCalled();
 
-    // hello's bundle hash changes → exactly one re-import, via the fresh
-    // hash URL, and exactly one wholesale registration replacement.
     deps.fetchCandidates.mockResolvedValue([
       candidate("hello", "bbb"),
       candidate("other", "s1", { cssUrl: null }),
@@ -131,12 +160,37 @@ describe("reconcilePluginFrontends", () => {
         homepageSections: [expect.objectContaining({ id: "section" })],
       }),
     );
-    // Crashed-slot latches reset before the new registrations remount.
     expect(deps.resetCrashedSlots).toHaveBeenCalledWith("hello");
-    // The CSS link is swapped to the fresh-hash URL.
     expect(deps.applyCss).toHaveBeenCalledWith(
       "hello",
       "/api/v1/plugins/hello/assets/app.css?h=bbb",
+    );
+  });
+
+  it("waits for the stylesheet before publishing registrations", async () => {
+    const state = createPluginFrontendReconcileState();
+    const deps = makeDeps([candidate("hello", "aaa")]);
+    const cssGate: { release: (() => void) | null } = { release: null };
+    vi.mocked(deps.applyCss).mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          cssGate.release = resolve;
+        }),
+    );
+
+    const done = reconcilePluginFrontends(state, deps);
+    for (let tick = 0; tick < 20; tick++) await Promise.resolve();
+    expect(deps.applyCss).toHaveBeenCalledWith(
+      "hello",
+      "/api/v1/plugins/hello/assets/app.css?h=aaa",
+    );
+    expect(deps.setRegistrations).not.toHaveBeenCalled();
+
+    cssGate.release?.();
+    await done;
+    expect(deps.setRegistrations).toHaveBeenCalledWith(
+      "hello",
+      expect.anything(),
     );
   });
 
@@ -152,6 +206,7 @@ describe("reconcilePluginFrontends", () => {
       fetchCandidates,
       importModule: async () => pluginModule("hello"),
       applyCss: vi.fn(),
+      retainCss: vi.fn(() => vi.fn()),
       resetCrashedSlots: vi.fn(),
       setRegistrations: setPluginSlotRegistrations,
       removeRegistrations: removePluginSlotRegistrations,
@@ -160,21 +215,185 @@ describe("reconcilePluginFrontends", () => {
       routePluginId: () => null,
     };
 
-    await reconcilePluginFrontends(state, deps); // boot
+    await reconcilePluginFrontends(state, deps);
     fetchCandidates.mockResolvedValue([candidate("hello", "v2")]);
-    await reconcilePluginFrontends(state, deps); // reload 1
+    await reconcilePluginFrontends(state, deps);
     fetchCandidates.mockResolvedValue([candidate("hello", "v3")]);
-    await reconcilePluginFrontends(state, deps); // reload 2
+    await reconcilePluginFrontends(state, deps);
 
     const snapshot = getPluginSlotSnapshot();
     expect(snapshot.homepageSections).toHaveLength(1);
     expect(snapshot.homepageSections[0]).toMatchObject({
       pluginId: "hello",
       id: "section",
-      // Three wholesale replacements → three generation bumps (remounts).
       generation: 3,
     });
     resetPluginSlotStoreForTest();
+  });
+
+  it("publishes CSS before a cold deep-link panel registration can render", async () => {
+    const state = createPluginFrontendReconcileState();
+    const preparedDuringRender = vi.fn();
+    const deps = makeDeps([candidate("hello", "cold")]);
+    deps.applyCss = applyPluginCss;
+    deps.retainCss = retainPluginCss;
+    deps.setRegistrations = vi.fn(setPluginSlotRegistrations);
+    deps.removeRegistrations = vi.fn(removePluginSlotRegistrations);
+    deps.importModule.mockResolvedValue({
+      default: definePluginApp((app) => {
+        app.slots.navPanel({
+          id: "panel",
+          icon: "PanelTop",
+          path: "panel",
+          title: "Cold panel",
+          component: ({ subPath }) => {
+            const prepared = document.head.querySelector(
+              'link[data-bb-plugin-css-preload="hello"], link[data-bb-plugin-css="hello"]',
+            );
+            preparedDuringRender(prepared?.getAttribute("href") ?? null);
+            return createElement("div", null, `cold panel body:${subPath}`);
+          },
+        });
+      }),
+    });
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          MemoryRouter,
+          { initialEntries: ["/plugins/hello/panel/notes/today.md"] },
+          createElement(
+            Routes,
+            null,
+            createElement(Route, {
+              path: PLUGIN_PANEL_ROUTE_PATH,
+              element: createElement(PluginPanelView),
+            }),
+          ),
+        ),
+      );
+    });
+
+    await act(async () => {
+      await reconcilePluginFrontends(state, deps);
+    });
+
+    expect(preparedDuringRender).toHaveBeenCalledWith(
+      "/api/v1/plugins/hello/assets/app.css?h=cold",
+    );
+    expect(container.textContent).toContain("cold panel body:notes/today.md");
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="hello"]'),
+    ).not.toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it("retains CSS for a content script's whole generation, including cleanup", async () => {
+    const state = createPluginFrontendReconcileState();
+    const deps = makeDeps([candidate("shell-owner", "v1")]);
+    const events: string[] = [];
+    const stylesheetIsActive = () =>
+      document.head.querySelector('link[data-bb-plugin-css="shell-owner"]') !==
+      null;
+    deps.applyCss = applyPluginCss;
+    deps.retainCss = retainPluginCss;
+    deps.importModule.mockResolvedValue(
+      contentScriptModule((app) => {
+        app.contentScripts.register({
+          id: "shell-dom",
+          mount() {
+            events.push(`mount:${stylesheetIsActive()}`);
+            return () => {
+              events.push(`dispose:${stylesheetIsActive()}`);
+            };
+          },
+        });
+      }),
+    );
+
+    await reconcilePluginFrontends(state, deps);
+    expect(events).toEqual(["mount:true"]);
+    expect(stylesheetIsActive()).toBe(true);
+
+    deps.fetchCandidates.mockResolvedValue([]);
+    await reconcilePluginFrontends(state, deps);
+    expect(events).toEqual(["mount:true", "dispose:true"]);
+    expect(stylesheetIsActive()).toBe(false);
+  });
+
+  it("keeps the active sheet through a real generation reload and a failed CSS replacement", async () => {
+    const state = createPluginFrontendReconcileState();
+    const deps = makeDeps([candidate("hello", "v1")]);
+    deps.applyCss = applyPluginCss;
+    deps.retainCss = retainPluginCss;
+    deps.setRegistrations = vi.fn(setPluginSlotRegistrations);
+    deps.removeRegistrations = vi.fn(removePluginSlotRegistrations);
+    deps.importModule.mockImplementation(async (url: string) => {
+      const version = /[?&]h=([^&]+)/.exec(url)?.[1] ?? "unknown";
+      return {
+        default: definePluginApp((app) => {
+          app.slots.homepageSection({
+            id: "section",
+            title: version,
+            component: () =>
+              createElement("div", null, `generation ${version}`),
+          });
+        }),
+      };
+    });
+    const links = () => [
+      ...document.head.querySelectorAll<HTMLLinkElement>(
+        'link[data-bb-plugin-css="hello"]',
+      ),
+    ];
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => root.render(createElement(MountedHomepageSections)));
+
+    await act(async () => {
+      await reconcilePluginFrontends(state, deps);
+    });
+    expect(container.textContent).toContain("generation v1");
+    links()[0]?.dispatchEvent(new Event("load"));
+
+    deps.fetchCandidates.mockResolvedValue([candidate("hello", "v2")]);
+    await act(async () => {
+      await reconcilePluginFrontends(state, deps);
+    });
+    expect(container.textContent).toContain("generation v2");
+    expect(links().map((link) => link.getAttribute("href"))).toEqual([
+      "/api/v1/plugins/hello/assets/app.css?h=v1",
+      "/api/v1/plugins/hello/assets/app.css?h=v2",
+    ]);
+
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    links()[1]?.dispatchEvent(new Event("error"));
+    expect(links().map((link) => link.getAttribute("href"))).toEqual([
+      "/api/v1/plugins/hello/assets/app.css?h=v1",
+    ]);
+    expect(container.textContent).toContain("generation v2");
+    warn.mockRestore();
+
+    deps.fetchCandidates.mockResolvedValue([candidate("hello", "v3")]);
+    await act(async () => {
+      await reconcilePluginFrontends(state, deps);
+    });
+    expect(links().map((link) => link.getAttribute("href"))).toEqual([
+      "/api/v1/plugins/hello/assets/app.css?h=v1",
+      "/api/v1/plugins/hello/assets/app.css?h=v3",
+    ]);
+    links()[1]?.dispatchEvent(new Event("load"));
+    expect(links().map((link) => link.getAttribute("href"))).toEqual([
+      "/api/v1/plugins/hello/assets/app.css?h=v3",
+    ]);
+
+    act(() => root.unmount());
+    container.remove();
   });
 
   it("drops registrations, CSS, and record when a plugin disappears from the inventory", async () => {
@@ -183,7 +402,7 @@ describe("reconcilePluginFrontends", () => {
     await reconcilePluginFrontends(state, deps);
     expect(state.records.get("hello")?.status).toBe("loaded");
 
-    deps.fetchCandidates.mockResolvedValue([]); // disabled/removed/stopped
+    deps.fetchCandidates.mockResolvedValue([]);
     await reconcilePluginFrontends(state, deps);
     expect(deps.removeRegistrations).toHaveBeenCalledWith("hello");
     expect(deps.applyCss).toHaveBeenLastCalledWith("hello", null);
@@ -809,11 +1028,8 @@ describe("reconcilePluginFrontends", () => {
 
 describe("applyPluginCss", () => {
   afterEach(() => {
-    for (const link of [
-      ...document.head.querySelectorAll("link[data-bb-plugin-css]"),
-    ]) {
-      link.remove();
-    }
+    resetPluginCssForTest();
+    vi.useRealTimers();
   });
 
   function links(pluginId: string): HTMLLinkElement[] {
@@ -824,12 +1040,21 @@ describe("applyPluginCss", () => {
     ];
   }
 
+  function preloads(pluginId: string): HTMLLinkElement[] {
+    return [
+      ...document.head.querySelectorAll<HTMLLinkElement>(
+        `link[data-bb-plugin-css-preload="${pluginId}"]`,
+      ),
+    ];
+  }
+
   it("keeps the old link until the new one loads, then removes it (no unstyled flash)", () => {
+    retainPluginCss("hello");
     applyPluginCss("hello", "/assets/app.css?h=aaa");
     expect(links("hello")).toHaveLength(1);
+    links("hello")[0]?.dispatchEvent(new Event("load"));
 
     applyPluginCss("hello", "/assets/app.css?h=bbb");
-    // Both links coexist while the fresh sheet is still loading.
     const during = links("hello");
     expect(during.map((l) => l.getAttribute("href"))).toEqual([
       "/assets/app.css?h=aaa",
@@ -843,7 +1068,9 @@ describe("applyPluginCss", () => {
   });
 
   it("on load error, drops the new link and keeps the old sheet working", () => {
+    retainPluginCss("hello");
     applyPluginCss("hello", "/assets/app.css?h=aaa");
+    links("hello")[0]?.dispatchEvent(new Event("load"));
     applyPluginCss("hello", "/assets/app.css?h=bbb");
     const fresh = links("hello")[1];
 
@@ -857,6 +1084,7 @@ describe("applyPluginCss", () => {
   });
 
   it("keeps the same element for an unchanged URL and removes it on null", () => {
+    retainPluginCss("hello");
     applyPluginCss("hello", "/assets/app.css?h=aaa");
     const first = links("hello")[0];
     applyPluginCss("hello", "/assets/app.css?h=aaa");
@@ -864,6 +1092,207 @@ describe("applyPluginCss", () => {
 
     applyPluginCss("hello", null);
     expect(links("hello")).toHaveLength(0);
+  });
+
+  it("preloads inactive CSS and removes the sheet only after its final consumer releases", async () => {
+    vi.useFakeTimers();
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    expect(preloads("hello")).toHaveLength(1);
+    expect(preloads("hello")[0]?.fetchPriority).toBe("low");
+    expect(links("hello")).toHaveLength(0);
+
+    preloads("hello")[0]?.dispatchEvent(new Event("load"));
+    expect(preloads("hello")).toHaveLength(0);
+    const releaseFirst = retainPluginCss("hello");
+    const releaseSecond = retainPluginCss("hello");
+    expect(links("hello")).toHaveLength(1);
+
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(1);
+    releaseSecond();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(links("hello")).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(0);
+    expect(preloads("hello")).toHaveLength(0);
+  });
+
+  it("keeps the same sheet when a consumer retains within the grace window", async () => {
+    vi.useFakeTimers();
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    preloads("hello")[0]?.dispatchEvent(new Event("load"));
+    const releaseFirst = retainPluginCss("hello");
+    const first = links("hello")[0];
+    expect(first).toBeDefined();
+    first?.dispatchEvent(new Event("load"));
+
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(links("hello")[0]).toBe(first);
+    const releaseSecond = retainPluginCss("hello");
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(links("hello")).toHaveLength(1);
+    expect(links("hello")[0]).toBe(first);
+    expect(preloads("hello")).toHaveLength(0);
+
+    releaseSecond();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(0);
+  });
+
+  it("reattaches the sheet when its load completes during the grace and a consumer retains", async () => {
+    vi.useFakeTimers();
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    preloads("hello")[0]?.dispatchEvent(new Event("load"));
+    const releaseFirst = retainPluginCss("hello");
+    const first = links("hello")[0];
+    expect(first).toBeDefined();
+
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(200);
+    first?.dispatchEvent(new Event("load"));
+    expect(links("hello")[0]).toBe(first);
+    await vi.advanceTimersByTimeAsync(300);
+    const releaseSecond = retainPluginCss("hello");
+    expect(links("hello")).toHaveLength(1);
+    expect(links("hello")[0]).toBe(first);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(links("hello")).toHaveLength(1);
+    expect(preloads("hello")).toHaveLength(0);
+
+    releaseSecond();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(0);
+  });
+
+  it("adopts a changed URL that finishes loading during the grace and reuses it on retain", async () => {
+    vi.useFakeTimers();
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    preloads("hello")[0]?.dispatchEvent(new Event("load"));
+    const releaseFirst = retainPluginCss("hello");
+    links("hello")[0]?.dispatchEvent(new Event("load"));
+
+    applyPluginCss("hello", "/assets/app.css?h=bbb");
+    const fresh = links("hello")[1];
+    expect(fresh?.getAttribute("href")).toBe("/assets/app.css?h=bbb");
+    releaseFirst();
+    await vi.advanceTimersByTimeAsync(200);
+    fresh?.dispatchEvent(new Event("load"));
+    expect(links("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=bbb",
+    ]);
+    await vi.advanceTimersByTimeAsync(300);
+    const releaseSecond = retainPluginCss("hello");
+    expect(links("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=bbb",
+    ]);
+    expect(links("hello")[0]).toBe(fresh);
+    expect(preloads("hello")).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    releaseSecond();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(0);
+  });
+
+  it("applies a URL that is republished after a flip-flop discarded its in-flight sheet", async () => {
+    vi.useFakeTimers();
+    retainPluginCss("hello");
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    links("hello")[0]?.dispatchEvent(new Event("load"));
+
+    applyPluginCss("hello", "/assets/app.css?h=bbb");
+    const inflight = links("hello")[1];
+    expect(inflight?.getAttribute("href")).toBe("/assets/app.css?h=bbb");
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    inflight?.dispatchEvent(new Event("load"));
+    expect(links("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=aaa",
+    ]);
+
+    applyPluginCss("hello", "/assets/app.css?h=bbb");
+    expect(links("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=aaa",
+      "/assets/app.css?h=bbb",
+    ]);
+    retainPluginCss("hello");
+    expect(links("hello")).toHaveLength(2);
+    links("hello")
+      .find((l) => l.getAttribute("href") === "/assets/app.css?h=bbb")
+      ?.dispatchEvent(new Event("load"));
+    expect(links("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=bbb",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("removes the sheet at once and cancels the timer when the URL is cleared during the grace", async () => {
+    vi.useFakeTimers();
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    preloads("hello")[0]?.dispatchEvent(new Event("load"));
+    const release = retainPluginCss("hello");
+    expect(links("hello")).toHaveLength(1);
+
+    release();
+    expect(vi.getTimerCount()).toBe(1);
+    applyPluginCss("hello", null);
+    expect(links("hello")).toHaveLength(0);
+    expect(preloads("hello")).toHaveLength(0);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(0);
+    expect(preloads("hello")).toHaveLength(0);
+  });
+
+  it("swaps to one preload of the new URL when it changes during the grace", async () => {
+    vi.useFakeTimers();
+    applyPluginCss("hello", "/assets/app.css?h=aaa");
+    preloads("hello")[0]?.dispatchEvent(new Event("load"));
+    const release = retainPluginCss("hello");
+    links("hello")[0]?.dispatchEvent(new Event("load"));
+    expect(links("hello")).toHaveLength(1);
+
+    release();
+    applyPluginCss("hello", "/assets/app.css?h=bbb");
+    expect(links("hello")).toHaveLength(0);
+    expect(preloads("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=bbb",
+    ]);
+    expect(vi.getTimerCount()).toBe(0);
+
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("hello")).toHaveLength(0);
+    expect(preloads("hello").map((l) => l.getAttribute("href"))).toEqual([
+      "/assets/app.css?h=bbb",
+    ]);
+  });
+
+  it("never ties app-wide bb.themes palette CSS to plugin UI mounts", async () => {
+    vi.useFakeTimers();
+    const paletteCss = ":root { --canvas: rebeccapurple; }";
+    applyAppThemeCss(paletteCss);
+    const palette = document.getElementById("bb-app-theme");
+    expect(palette?.textContent).toBe(paletteCss);
+
+    applyPluginCss("palette-owner", "/assets/app.css?h=palette-owner");
+    preloads("palette-owner")[0]?.dispatchEvent(new Event("load"));
+    expect(links("palette-owner")).toHaveLength(0);
+    expect(document.getElementById("bb-app-theme")).toBe(palette);
+    expect(palette?.textContent).toBe(paletteCss);
+
+    const release = retainPluginCss("palette-owner");
+    release();
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(links("palette-owner")).toHaveLength(0);
+    expect(document.getElementById("bb-app-theme")).toBe(palette);
+    expect(palette?.textContent).toBe(paletteCss);
+
+    applyAppThemeCss("");
+    palette?.remove();
   });
 });
 
@@ -911,16 +1340,15 @@ describe("createPluginFrontendReconcileScheduler", () => {
     await vi.advanceTimersByTimeAsync(250);
     expect(run).toHaveBeenCalledTimes(1);
 
-    // Two more broadcasts while the first run is still in flight.
     scheduler.schedule();
     await vi.advanceTimersByTimeAsync(250);
     scheduler.schedule();
     await vi.advanceTimersByTimeAsync(250);
-    expect(run).toHaveBeenCalledTimes(1); // queued, not overlapped
+    expect(run).toHaveBeenCalledTimes(1);
 
     release();
     await vi.advanceTimersByTimeAsync(0);
-    expect(run).toHaveBeenCalledTimes(2); // exactly one follow-up
+    expect(run).toHaveBeenCalledTimes(2);
     expect(maxActive).toBe(1);
 
     release();

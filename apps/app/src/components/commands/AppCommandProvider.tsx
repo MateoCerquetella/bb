@@ -17,6 +17,7 @@ import {
   type AppCommandContext,
   type AppCommandContextKey,
   type AppCommandId,
+  type AppDefaultKeybindings,
   type AppKeybindings,
   type AppShortcut,
 } from "@bb/domain";
@@ -30,11 +31,11 @@ import {
   type AppShortcutPresentation,
 } from "@/lib/app-keybindings";
 
-export interface AppCommandInvocation {
+interface AppCommandInvocation {
   target: EventTarget | null;
 }
 
-export type AppCommandHandler = (invocation: AppCommandInvocation) => boolean;
+type AppCommandHandler = (invocation: AppCommandInvocation) => boolean;
 
 interface AppCommandHandlerRegistration {
   handler: AppCommandHandler;
@@ -46,6 +47,10 @@ interface AppCommandProviderValue {
   dispatch: (command: AppCommandId, target: EventTarget | null) => boolean;
   getShortcut: (command: AppCommandId) => AppShortcut | null;
   handleKeyboardEvent: (event: KeyboardEvent) => boolean;
+  isCommandAvailable: (
+    command: AppCommandId,
+    target: EventTarget | null,
+  ) => boolean;
   registerContext: (
     key: AppCommandContextKey,
     source: symbol,
@@ -63,6 +68,7 @@ const AppCommandContextValue = createContext<AppCommandProviderValue | null>(
 const AppCommandModifierHeldContext = createContext(false);
 
 const EMPTY_KEYBINDINGS: AppKeybindings = [];
+const EMPTY_DEFAULT_KEYBINDINGS: AppDefaultKeybindings = [];
 const SHORTCUT_HINT_HOLD_DELAY_MS = 700;
 
 const EMPTY_CONTEXT: AppCommandContext = {
@@ -83,13 +89,6 @@ function browserPlatform(): string {
   return typeof navigator === "undefined" ? "" : navigator.platform;
 }
 
-// A dialog that is mounted but not showing must not suppress app commands. The
-// compact sidebar drawer keeps its `aria-modal` panel in the DOM across
-// open/close and only marks it `inert` while closed (see `SidebarMobilePanel`),
-// so matching `aria-modal` alone left `modalOpen` stuck on for the whole
-// session on narrow windows — every `mainSurface` chord (thread.new,
-// panel.toggle, terminal.open, …) then silently declined. The `inert`
-// exclusions cover the node itself and any inert ancestor.
 const OPEN_MODAL_SELECTOR = [
   '[aria-modal="true"]:not([inert]):not([inert] *):not([data-state="closed"])',
   '[role="dialog"][data-state="open"]:not([inert]):not([inert] *)',
@@ -102,6 +101,8 @@ function hasOpenModal(): boolean {
 export function AppCommandProvider({ children }: { children: ReactNode }) {
   const systemConfig = useSystemConfig();
   const keybindings = systemConfig.data?.keybindings ?? EMPTY_KEYBINDINGS;
+  const defaultKeybindings =
+    systemConfig.data?.defaultKeybindings ?? EMPTY_DEFAULT_KEYBINDINGS;
   const showKeyboardHints =
     systemConfig.data?.generalSettings?.showKeyboardHints ??
     defaultAppSettings.showKeyboardHints;
@@ -120,8 +121,6 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     new Map<AppCommandContextKey, Set<symbol>>(),
   );
   const sequenceRef = useRef(0);
-  // Key events already offered to the handlers, so a second delivery of the
-  // same event is a no-op. Weak so entries drop with the event.
   const attemptedEventsRef = useRef(new WeakSet<KeyboardEvent>());
   const clearShortcutHintHoldRef = useRef<() => void>(() => {});
 
@@ -138,8 +137,6 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
       shortcutHintModifierHeldRef.current = false;
       setIsShortcutHintModifierHeld(false);
     };
-    // A widget that dispatches a chord itself stops the event before this
-    // listener sees it, so the dispatcher clears the hint through this ref.
     clearShortcutHintHoldRef.current = clearModifierHold;
     const handleKeyDown = (event: KeyboardEvent) => {
       if (!isShortcutHintModifier(event.key)) {
@@ -264,6 +261,25 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     [isDesktop],
   );
 
+  const isCommandAvailable = useCallback(
+    (command: AppCommandId, target: EventTarget | null): boolean => {
+      const registrations = handlersRef.current.get(command);
+      if (registrations === undefined || registrations.size === 0) return false;
+      const isMac = isMacKeyboardPlatform(browserPlatform());
+      const applicable = defaultKeybindings.filter(
+        (binding) =>
+          binding.command === command &&
+          isAppKeybindingAvailableForClient(binding, { isDesktop, isMac }),
+      );
+      if (applicable.length === 0) return false;
+      const context = currentContext(target);
+      return applicable.some((binding) =>
+        binding.when.all.every((key) => context[key]),
+      );
+    },
+    [currentContext, defaultKeybindings, isDesktop],
+  );
+
   const getShortcut = useCallback(
     (command: AppCommandId): AppShortcut | null => {
       const isMac = isMacKeyboardPlatform(browserPlatform());
@@ -283,26 +299,16 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     [isDesktop, keybindings],
   );
 
-  // Shared by the window listener below and by focused widgets that own their
-  // own key handling. A widget that consumes keys before they reach the window
-  // — the prompt editor's rich-text keymap is the one in the app — calls this
-  // first so an app chord still runs the app command instead of the widget's
-  // own binding for the same chord.
   const handleKeyboardEvent = useCallback(
     (event: KeyboardEvent): boolean => {
       if (event.defaultPrevented || event.isComposing || event.repeat) {
         return false;
       }
-      // A widget that dispatched first leaves the event alone when every
-      // handler declines, so the same event still reaches the window listener.
-      // Without this, those handlers would run a second time.
       if (attemptedEventsRef.current.has(event)) return false;
       attemptedEventsRef.current.add(event);
       const bindings = keybindingsRef.current;
       let context: AppCommandContext | null = null;
       const isMac = isMacKeyboardPlatform(browserPlatform());
-      // Later bindings have precedence so scoped bindings can shadow global
-      // bindings that use the same chord.
       for (let index = bindings.length - 1; index >= 0; index -= 1) {
         const binding = bindings[index];
         if (!binding) continue;
@@ -335,9 +341,6 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
     const desktop = getBbDesktopInfo();
     if (!desktop?.onAppCommand) return;
     return desktop.onAppCommand((command) => {
-      // Native menu actions intentionally execute as explicit commands. Their
-      // accelerators are not renderer key events, so context matching happens
-      // only for shortcuts dispatched by the renderer.
       dispatch(command, null);
     });
   }, [dispatch]);
@@ -347,6 +350,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
       dispatch,
       getShortcut,
       handleKeyboardEvent,
+      isCommandAvailable,
       registerContext,
       registerHandler,
     }),
@@ -354,6 +358,7 @@ export function AppCommandProvider({ children }: { children: ReactNode }) {
       dispatch,
       getShortcut,
       handleKeyboardEvent,
+      isCommandAvailable,
       registerContext,
       registerHandler,
     ],
@@ -374,6 +379,7 @@ export function useAppCommandHandler(
   command: AppCommandId,
   handler: AppCommandHandler,
   priority = 0,
+  enabled = true,
 ): void {
   const registerHandler = useContext(AppCommandContextValue)?.registerHandler;
   const handlerRef = useRef(handler);
@@ -381,18 +387,19 @@ export function useAppCommandHandler(
     handlerRef.current = handler;
   }, [handler]);
   useEffect(() => {
-    if (!registerHandler) return;
+    if (!registerHandler || !enabled) return;
     return registerHandler(command, {
       handler: (invocation) => handlerRef.current(invocation),
       priority,
     });
-  }, [command, priority, registerHandler]);
+  }, [command, enabled, priority, registerHandler]);
 }
 
 export function useIndexedAppCommandHandlers(
   commands: readonly AppCommandId[],
   handler: (index: number, invocation: AppCommandInvocation) => boolean,
   priority = 0,
+  enabled = true,
 ): void {
   const registerHandler = useContext(AppCommandContextValue)?.registerHandler;
   const handlerRef = useRef(handler);
@@ -400,7 +407,7 @@ export function useIndexedAppCommandHandlers(
     handlerRef.current = handler;
   }, [handler]);
   useEffect(() => {
-    if (!registerHandler) return;
+    if (!registerHandler || !enabled) return;
     const unregister = commands.map((command, index) =>
       registerHandler(command, {
         handler: (invocation) => handlerRef.current(index, invocation),
@@ -410,15 +417,9 @@ export function useIndexedAppCommandHandlers(
     return () => {
       unregister.forEach((dispose) => dispose());
     };
-  }, [commands, priority, registerHandler]);
+  }, [commands, enabled, priority, registerHandler]);
 }
 
-/**
- * Run app keybindings for a key event a focused widget received before the
- * event reaches the window listener. Returns true when an app command ran, so
- * the caller can stop its own handling. The event is then marked handled, and
- * the window listener skips it.
- */
 export function useAppCommandKeyDispatch(): (event: KeyboardEvent) => boolean {
   const handleKeyboardEvent = useContext(
     AppCommandContextValue,
@@ -426,6 +427,26 @@ export function useAppCommandKeyDispatch(): (event: KeyboardEvent) => boolean {
   return useCallback(
     (event: KeyboardEvent) => handleKeyboardEvent?.(event) ?? false,
     [handleKeyboardEvent],
+  );
+}
+
+export interface AppCommandRunner {
+  dispatch: (command: AppCommandId, target: EventTarget | null) => boolean;
+  isCommandAvailable: (
+    command: AppCommandId,
+    target: EventTarget | null,
+  ) => boolean;
+}
+
+export function useAppCommandRunner(): AppCommandRunner {
+  const value = useContext(AppCommandContextValue);
+  return useMemo(
+    () => ({
+      dispatch: (command, target) => value?.dispatch(command, target) ?? false,
+      isCommandAvailable: (command, target) =>
+        value?.isCommandAvailable(command, target) ?? false,
+    }),
+    [value],
   );
 }
 

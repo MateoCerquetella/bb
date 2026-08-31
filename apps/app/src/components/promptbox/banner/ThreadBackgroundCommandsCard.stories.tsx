@@ -20,9 +20,7 @@ function Stage({
   return (
     <div
       data-promptbox-shell=""
-      className={
-        size === "desktop" ? "min-w-0 flex-1" : "w-[20rem] shrink-0"
-      }
+      className={size === "desktop" ? "min-w-0 flex-1" : "w-[20rem] shrink-0"}
     >
       {children}
     </div>
@@ -66,7 +64,7 @@ const runningCommand = (
 const single: TimelineWorkflowWorkRow[] = [
   runningCommand({
     id: "thr_fixture:bg:tail-dev-log",
-    description: "Tail the dev server log",
+    description: "Poll all CI runs for batching head until completion",
     startedAt: Date.now() - 8_000,
   }),
 ];
@@ -114,7 +112,7 @@ export function Overview() {
     <StoryCard>
       <StoryRow
         label="single"
-        hint="one running command: non-expandable single line with live time"
+        hint="compact: summarized and expandable; wide: detailed single line"
       >
         <ResponsiveStage>
           <ExpandableCard commands={single} />

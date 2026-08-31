@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { useCallback, useRef } from "react";
 import type {
   CommandListResponse,
   ProjectBranchesResponse,
@@ -10,7 +11,8 @@ import {
   buildFilePreview,
   normalizeFilePreviewMimeType,
   type FilePreview,
-} from "@/lib/file-preview";
+} from "@bb/client-core";
+import { decodeBase64Bytes } from "@/lib/base64-bytes";
 import { buildProjectFileContentUrl } from "@/lib/file-content-urls";
 import { sdk } from "@/lib/sdk";
 import { useProjectDetailRealtimeSubscription } from "@/hooks/useRealtimeSubscription";
@@ -25,6 +27,8 @@ import { resolveProjectSourceBranchesPlaceholder } from "./query-placeholders";
 import {
   PROMPT_HISTORY_STALE_TIME_MS,
   requireEnabledQueryArg,
+  requireProjectId,
+  type QueryOptions,
 } from "./query-helpers";
 import {
   EXPENSIVE_MANUAL_QUERY_POLICY,
@@ -32,10 +36,6 @@ import {
   REALTIME_OWNED_NO_FOCUS_QUERY_POLICY,
   TYPEAHEAD_QUERY_POLICY,
 } from "./query-policies";
-
-interface QueryOptions {
-  enabled?: boolean;
-}
 
 interface BranchQueryOptions extends QueryOptions {
   limit?: number;
@@ -53,7 +53,7 @@ interface UseProjectPathSuggestionsArgs {
   includeDirectories: boolean;
 }
 
-export interface UseProjectCommandsArgs {
+interface UseProjectCommandsArgs {
   projectId: string | undefined;
   providerId: string | undefined;
   environmentId: string | null;
@@ -61,33 +61,7 @@ export interface UseProjectCommandsArgs {
 }
 
 const PROJECT_SOURCE_BRANCHES_LIMIT = 50;
-/**
- * The branch list is a daemon git RPC (throttled fetch + several git
- * commands). Realtime `project-sources-changed` refreshes it and the branch
- * picker refetches on open, so a foreground/focus refetch only re-runs that
- * RPC without new information.
- */
 const PROJECT_SOURCE_BRANCHES_STALE_MS = 30_000;
-
-function decodeBase64Bytes(content: string): Uint8Array {
-  const binaryContent = atob(content);
-  const bytes = new Uint8Array(binaryContent.length);
-  for (let index = 0; index < binaryContent.length; index += 1) {
-    bytes[index] = binaryContent.charCodeAt(index);
-  }
-  return bytes;
-}
-
-function requireProjectId(
-  projectId: string | undefined,
-  hookName: string,
-): string {
-  return requireEnabledQueryArg({
-    value: projectId,
-    hookName,
-    argName: "projectId",
-  });
-}
 
 function requireProviderId(
   providerId: string | undefined,
@@ -120,7 +94,12 @@ export function useProjectSourceBranches(
   const query = options?.query?.trim() ?? "";
   const limit = options?.limit ?? PROJECT_SOURCE_BRANCHES_LIMIT;
   const selectedBranch = options?.selectedBranch?.trim() ?? "";
-  return useQuery<ProjectBranchesResponse>({
+  const remoteRefreshRef = useRef<{
+    blockingSignal: AbortSignal | null;
+    inFlight: Promise<void> | null;
+    requested: boolean;
+  }>({ blockingSignal: null, inFlight: null, requested: false });
+  const result = useQuery<ProjectBranchesResponse>({
     queryKey: projectSourceBranchesQueryKey(
       projectId ?? "",
       hostId ?? "",
@@ -128,15 +107,28 @@ export function useProjectSourceBranches(
       limit,
       selectedBranch,
     ),
-    queryFn: ({ signal }) =>
-      sdk.projects.branches({
+    queryFn: ({ signal }) => {
+      const remoteRefresh = remoteRefreshRef.current;
+      const startsBlockingRefresh =
+        remoteRefresh.requested && remoteRefresh.blockingSignal === null;
+      const refresh =
+        startsBlockingRefresh || remoteRefresh.blockingSignal === signal
+          ? "blocking"
+          : "background";
+      if (startsBlockingRefresh) {
+        remoteRefresh.requested = false;
+        remoteRefresh.blockingSignal = signal;
+      }
+      return sdk.projects.branches({
         projectId: requireProjectId(projectId, "useProjectSourceBranches"),
         hostId: hostId ?? "",
         ...(query ? { query } : {}),
         ...(selectedBranch ? { selectedBranch } : {}),
         limit: String(limit),
+        refresh,
         signal,
-      }),
+      });
+    },
     enabled,
     ...REALTIME_OWNED_NO_FOCUS_QUERY_POLICY,
     staleTime: PROJECT_SOURCE_BRANCHES_STALE_MS,
@@ -152,6 +144,27 @@ export function useProjectSourceBranches(
           })
         : undefined,
   });
+  const refetch = result.refetch;
+  const refreshFromRemote = useCallback((): Promise<void> => {
+    const remoteRefresh = remoteRefreshRef.current;
+    if (remoteRefresh.inFlight) return remoteRefresh.inFlight;
+
+    const run = async (): Promise<void> => {
+      remoteRefresh.requested = true;
+      remoteRefresh.blockingSignal = null;
+      try {
+        await refetch();
+        if (remoteRefresh.requested) await refetch();
+      } finally {
+        remoteRefresh.requested = false;
+        remoteRefresh.blockingSignal = null;
+        remoteRefresh.inFlight = null;
+      }
+    };
+    remoteRefresh.inFlight = run();
+    return remoteRefresh.inFlight;
+  }, [refetch]);
+  return { ...result, refreshFromRemote };
 }
 
 export function useProjectPromptHistory(
@@ -276,14 +289,6 @@ export function useProjectFilePreview(
   });
 }
 
-/**
- * Fetches the discoverable provider skills/commands for a project, scoped by
- * provider + environment. Backs `useCommandSuggestions`, which owns trigger
- * resolution, debounce, and mapping to menu rows, and serves both the
- * existing-thread follow-up composer and the new-thread composer. Unlike
- * mentions, the command list is enabled even with an empty query (commands show
- * the full list on `/`); the caller gates fetching via `options.enabled`.
- */
 export function projectCommandsQueryOptions(args: UseProjectCommandsArgs) {
   return {
     queryKey: projectCommandsQueryKey(
@@ -320,8 +325,6 @@ export function useProjectCommands(
     ...projectCommandsQueryOptions(args),
     enabled,
     ...TYPEAHEAD_QUERY_POLICY,
-    // Reopening the slash menu refreshes provider-native files that may have
-    // changed on disk; typing keeps the same key and still filters locally.
     staleTime: 0,
   });
 }

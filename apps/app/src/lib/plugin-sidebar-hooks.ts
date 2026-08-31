@@ -21,7 +21,6 @@ import {
 import { useHosts } from "@/hooks/queries/host-queries";
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { useUpdateThread } from "@/hooks/mutations/thread-state-mutations";
-import { useThreadSplitsEnabled } from "@/hooks/useThreadSplitsEnabled";
 import { useRouteNavigate } from "@/components/ui/app-route-anchor";
 import { toPluginSidebarThread } from "./plugin-sidebar-threads";
 import { useSetRootComposeProjectId } from "./root-compose-selection";
@@ -37,12 +36,6 @@ const EMPTY_PROJECTS: readonly PluginSidebarProject[] = [];
 const EMPTY_ENTRIES: ReadonlyMap<string, ThreadListEntry> = new Map();
 const EMPTY_HOST_NAMES: ReadonlyMap<string, string> = new Map();
 
-/**
- * Host-name map per hosts payload. Module-level (not `useMemo`) so every
- * `useSidebarThreads` caller derives the same map object from the same React
- * Query result; a per-hook map would give two plugin lists two keys and make
- * them evict each other's entries from {@link pluginSidebarThreadByEntry}.
- */
 const hostNamesByHosts = new WeakMap<
   readonly Host[],
   ReadonlyMap<string, string>
@@ -59,13 +52,6 @@ function hostNamesFor(
   return names;
 }
 
-/**
- * Per-entry DTO memo. React Query structurally shares the sidebar payload, so
- * an unchanged `ThreadListEntry` keeps its identity across refetches; mapping
- * it again produced a fresh DTO per thread per sidebar update, which defeats
- * `memo`/compiler bailouts in every plugin row. The DTO also depends on the
- * host-name map, so a cached DTO is reused only for the same map instance.
- */
 const pluginSidebarThreadByEntry = new WeakMap<
   ThreadListEntry,
   { hostNamesById: ReadonlyMap<string, string>; thread: PluginSidebarThread }
@@ -84,22 +70,9 @@ function toPluginSidebarThreadCached(
   return thread;
 }
 
-/**
- * The sidebar's live thread view for plugin surfaces.
- *
- * Deliberately built on `useSidebarNavigation`, the same query the built-in
- * sidebar uses: it already owns the realtime subscriptions, so a plugin list
- * costs no extra request and updates on exactly the same events.
- *
- * `status` reports "error" only while there is nothing to show. Once data has
- * loaded, a failed background refresh keeps the last good list as "ready" —
- * the sidebar must not blank out because one refetch lost the network.
- */
 export function useSidebarThreads(): PluginSidebarThreadsState {
   const query = useSidebarNavigation();
   const data = query.data;
-  // The sidebar already subscribes to host updates; this reads the same
-  // cached list so a row can print a machine name instead of a host id.
   const { data: hosts } = useHosts();
   const hostNamesById = hostNamesFor(hosts);
 
@@ -111,8 +84,6 @@ export function useSidebarThreads(): PluginSidebarThreadsState {
         projects: EMPTY_PROJECTS,
       };
     }
-    // The personal project is a real project to a plugin list; the host just
-    // stores it beside the others.
     const allProjects = [...data.projects, data.personalProject];
     return {
       status: "ready",
@@ -130,8 +101,7 @@ export function useSidebarThreads(): PluginSidebarThreadsState {
   }, [data, hostNamesById, query.isError]);
 }
 
-/** Thread id -> host entry, for O(1) lookups by id. */
-export function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
+function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
   const { data } = useSidebarNavigation();
   return useMemo(() => {
     if (data === undefined) return EMPTY_ENTRIES;
@@ -143,32 +113,19 @@ export function useThreadEntryMap(): ReadonlyMap<string, ThreadListEntry> {
   }, [data]);
 }
 
-/** One host thread entry by id, or null while it is unknown. */
 export function useSidebarThreadEntry(
   threadId: string,
 ): ThreadListEntry | null {
   return useThreadEntryMap().get(threadId) ?? null;
 }
 
-/**
- * Thread actions for plugin surfaces.
- *
- * Destructive and dialog-bearing actions route through `useThreadActions()` —
- * the host's own flow, with its confirmation dialogs, pane closing, and route
- * repair. A plugin cannot render bb's dialogs, so calling the raw mutations
- * here would delete a subtree with no confirmation and leave panes pointing at
- * dead threads.
- */
 export function useSidebarThreadActions(): PluginSidebarThreadActions {
   const navigate = useRouteNavigate();
   const store = useStore();
   const isCompact = useIsCompactViewport();
-  const threadSplitsEnabled = useThreadSplitsEnabled();
   const setRootComposeProjectId = useSetRootComposeProjectId();
   const hostActions = useThreadActions();
   const entriesById = useThreadEntryMap();
-  // Destructure `.mutateAsync`: the mutation object's identity changes on every
-  // pending flip, which would defeat the memo below.
   const { mutateAsync: updateThreadAsync } = useUpdateThread();
 
   const requireEntry = useCallback(
@@ -195,7 +152,6 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
             projectId,
             threadId,
             isCompact,
-            threadSplitsEnabled,
           });
           return;
         }
@@ -204,10 +160,6 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
       openNewThread(options) {
         const projectId = options?.projectId;
         if (projectId !== undefined) {
-          // The compose screen reads its project from this stored selection,
-          // and the personal project has no route of its own — without this a
-          // personal-project request would create the thread in whichever
-          // project the user last composed in.
           setRootComposeProjectId(projectId);
         }
         const state = options?.focusPrompt ? { focusPrompt: true } : undefined;
@@ -236,8 +188,6 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
         hostActions.archiveThreadAndChildren(requireEntry(threadId));
       },
       requestDelete(threadId) {
-        // Opens bb's delete dialog, which counts child threads and asks. The
-        // plugin requests; the user confirms.
         hostActions.requestDelete(requireEntry(threadId));
       },
     }),
@@ -249,21 +199,11 @@ export function useSidebarThreadActions(): PluginSidebarThreadActions {
       requireEntry,
       setRootComposeProjectId,
       store,
-      threadSplitsEnabled,
       updateThreadAsync,
     ],
   );
 }
 
-/**
- * The pull request for one thread's branch.
- *
- * Deliberately per row rather than a field on `useSidebarThreads`: a PR lookup
- * hits the git host, so it must be opt-in and paid only for rows that want it.
- * The underlying query is keyed by environment, so threads sharing a worktree
- * share one lookup, and the host's own staleness and refetch rules apply (an
- * open PR with pending checks polls; a merged one does not).
- */
 export function useSidebarThreadPullRequest(
   threadId: string,
 ): PluginSidebarThreadPullRequestState {

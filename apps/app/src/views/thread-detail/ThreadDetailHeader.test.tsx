@@ -46,8 +46,10 @@ vi.mock("@/components/layout/AppPageHeader", () => ({
   ),
 }));
 
+const viewportState = vi.hoisted(() => ({ isCompactViewport: false }));
+
 vi.mock("@bb/shared-ui/hooks/use-compact-viewport", () => ({
-  useIsCompactViewport: () => false,
+  useIsCompactViewport: () => viewportState.isCompactViewport,
 }));
 
 const THREAD_ID = "thr_header";
@@ -69,15 +71,13 @@ const PANE_CONTEXT: PaneContextValue = {
 
 afterEach(() => {
   cleanup();
+  viewportState.isCompactViewport = false;
   mocks.renameThread.mockReset();
   vi.restoreAllMocks();
   window.localStorage.clear();
 });
 
 describe("ThreadDetailHeader", () => {
-  // The header seam now belongs to AppPageHeader, so AppPageHeader.test.tsx
-  // guards it for every header instead of this one call site.
-
   it("leaves the open right-panel collapse control to the panel header", () => {
     render(
       <PaneContext.Provider value={PANE_CONTEXT}>
@@ -98,6 +98,38 @@ describe("ThreadDetailHeader", () => {
       screen.queryByRole("button", { name: "Hide right panel" }),
     ).toBeNull();
   });
+
+  it.each([
+    { expectedIcon: "PanelBottom", isCompactViewport: true },
+    { expectedIcon: "PanelRight", isCompactViewport: false },
+  ])(
+    "shows the $expectedIcon glyph on the right-panel trigger",
+    ({ expectedIcon, isCompactViewport }) => {
+      viewportState.isCompactViewport = isCompactViewport;
+
+      render(
+        <PaneContext.Provider value={PANE_CONTEXT}>
+          <ThreadDetailHeader
+            actionsMenu={null}
+            childPillLabel={null}
+            isSecondaryPanelOpen={false}
+            onOpenThreadGitAction={vi.fn()}
+            onToggleSecondaryPanel={vi.fn()}
+            threadHeaderGitActions={[]}
+            threadId={THREAD_ID}
+            threadTitle="Panel state"
+          />
+        </PaneContext.Provider>,
+      );
+
+      const showButton = screen.getByRole("button", {
+        name: "Show right panel",
+      });
+      expect(
+        showButton.querySelector(`[data-icon="${expectedIcon}"]`),
+      ).not.toBeNull();
+    },
+  );
 
   it("keeps thread Full Screen in a split header while its panel is open", () => {
     render(
@@ -122,7 +154,9 @@ describe("ThreadDetailHeader", () => {
       </PaneContext.Provider>,
     );
 
-    expect(screen.getByRole("button", { name: /Full Screen/ })).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: /Maximize pane/ }),
+    ).not.toBeNull();
     expect(
       screen.queryByRole("button", { name: "Hide right panel" }),
     ).toBeNull();

@@ -31,6 +31,7 @@ import type {
 import {
   provisionWorkspace,
   WorkspaceError,
+  type DestroyWorkspaceArgs,
   type HostWorkspace,
   type ProvisionWorkspaceArgs,
 } from "@bb/host-workspace";
@@ -41,12 +42,19 @@ import {
   type InjectedSkillsLogger,
 } from "./injected-skills.js";
 import { reconnectProvisionArgs } from "./workspace-provision-target.js";
+import {
+  createProviderInstallationGate,
+  PROVIDER_INSTALLATION_GATE_TTL_MS,
+  type ProviderInstallationGate,
+} from "./provider-installation-gate.js";
 import type { FetchSkillTree } from "./skill-trees.js";
+import { userExecutableProcessOptions } from "./user-executable-env.js";
 
 type StopWatching = () => void | Promise<void>;
 
 const STOP_WATCHING: StopWatching = () => undefined;
 const PROVIDER_MAINTENANCE_WORKSPACE_DIR = "provider-maintenance-workspace";
+const PROVIDER_MAINTENANCE_IDLE_TIMEOUT_MS = 60_000;
 const PROVIDER_PROCESS_EXIT_DETAIL_MAX_LENGTH = 4000;
 
 interface RuntimeSkillConfig {
@@ -86,15 +94,6 @@ interface SkillCatalogConflictErrorArgs {
   requestedCatalogHash: string;
 }
 
-/**
- * Internal invariant guard: thrown when an environment's runtime must be
- * replaced to pick up a changed injected skill catalog while it has active
- * work (active threads or open terminals) and the requesting command targets
- * no thread. No production caller can reach this — only thread commands
- * (thread.start, turn.submit) resolve with injected skill sources, and they
- * always pass a targetThreadId, which reuses the busy runtime and defers the
- * refresh instead. Reaching this error indicates a daemon bug.
- */
 export class SkillCatalogConflictError extends Error {
   constructor(args: SkillCatalogConflictErrorArgs) {
     super(
@@ -135,13 +134,6 @@ export interface RuntimeEntry {
   environmentId: string;
   runtime: AgentRuntime;
   skillCatalogHash: string | null;
-  /**
-   * Log-throttle state only: the last stale requested catalog hash this entry
-   * warned about, so the deferral warn fires once per requested catalog
-   * instead of on every command while the runtime stays busy. It never drives
-   * the deferred refresh — every thread command re-stages and re-compares the
-   * catalog.
-   */
   lastWarnedStaleSkillCatalogHash: string | null;
   stopWatchingStatus: StopWatching;
   workspace: HostWorkspace;
@@ -149,7 +141,7 @@ export interface RuntimeEntry {
   terminals: Set<string>;
 }
 
-export interface InjectedSkillsChangedNotification {
+interface InjectedSkillsChangedNotification {
   changedPaths: string[];
   sourceType: InjectedSkillsObservedChange["sourceType"];
 }
@@ -158,29 +150,21 @@ export interface EnsureEnvironmentArgs {
   environmentId: string;
   injectedSkillSources?: readonly HostDaemonInjectedSkillSource[];
   personalWorkspaceRoot?: string;
-  /**
-   * The thread the requesting command targets; set by thread commands that
-   * resolve with injected skill sources (thread.start, turn.submit). When
-   * set, a busy runtime is reused even when its injected skill catalog is
-   * stale, instead of failing the command and dropping the thread's message;
-   * the catalog refresh is deferred to the next launch on an idle
-   * environment.
-   */
   targetThreadId?: string;
   workspacePath?: string;
   workspaceProvisionType?: WorkspaceProvisionType;
   provision?: ProvisionWorkspaceArgs;
 }
 
-export interface CancelEnvironmentProvisionArgs {
+interface CancelEnvironmentProvisionArgs {
   environmentId: string;
 }
 
-export interface CancelEnvironmentProvisionResult {
+interface CancelEnvironmentProvisionResult {
   aborted: boolean;
 }
 
-export interface RefreshEnvironmentWorkspaceArgs {
+interface RefreshEnvironmentWorkspaceArgs {
   environmentId: string;
   provision: ProvisionWorkspaceArgs;
   workspacePath: string;
@@ -188,10 +172,6 @@ export interface RefreshEnvironmentWorkspaceArgs {
 
 export interface RuntimeManagerOptions {
   bridgeBundleDir?: AgentRuntimeOptions["bridgeBundleDir"];
-  /**
-   * Reads the daemon's cached provider-bridge policy at runtime creation.
-   * Per-runtime static: a policy flip applies to runtimes created after it.
-   */
   createRuntime?: (options: AgentRuntimeOptions) => AgentRuntime;
   dataDir?: string;
   dataDirSkillsRootPath?: string | null;
@@ -201,6 +181,8 @@ export interface RuntimeManagerOptions {
   provisionWorkspace?: (
     options: ProvisionWorkspaceArgs,
   ) => Promise<HostWorkspace>;
+  providerInstallationGateTtlMs?: number;
+  providerMaintenanceIdleTimeoutMs?: number;
   shellEnv?: AgentRuntimeOptions["shellEnv"];
   onEvent?: (args: { environmentId: string; event: ThreadEvent }) => void;
   threadStorageRootPath?: string | null;
@@ -226,7 +208,7 @@ export interface RuntimeManagerReapIdleProviderSessionsArgs {
   providerSessionReapingEnabled: boolean;
 }
 
-export interface RuntimeManagerReapedIdleProviderSession extends ReapedIdleProviderSession {
+interface RuntimeManagerReapedIdleProviderSession extends ReapedIdleProviderSession {
   environmentId: string;
 }
 
@@ -234,18 +216,11 @@ export interface RuntimeManagerReapIdleProviderSessionsResult {
   reapedSessions: RuntimeManagerReapedIdleProviderSession[];
 }
 
-/**
- * `interrupt` stops an old runtime even while it runs a turn. `keep` leaves
- * that turn alone and reports its environment to the caller.
- */
-export type ReleaseThreadActiveTurnPolicy = "interrupt" | "keep";
+type ReleaseThreadActiveTurnPolicy = "interrupt" | "keep";
 
-export interface ReleaseThreadFromOtherEnvironmentsResult {
-  /** Environments that still run a turn for the thread under `keep`. */
+interface ReleaseThreadFromOtherEnvironmentsResult {
   activeTurnEnvironmentIds: string[];
-  /** Provider checkpoint retained by a stopped runtime, when one reported it. */
   providerCheckpointId: string | null;
-  /** Environments whose runtime released the thread. */
   releasedEnvironmentIds: string[];
 }
 
@@ -288,10 +263,9 @@ function providerProcessEnvFromShellEnv(
   if (shellEnv.PATH) {
     env.PATH = shellEnv.PATH;
   }
-  // The Claude bridge resolves the CLI from its own process env; forward the
-  // documented override past the BB_* spawn sanitization.
-  if (shellEnv.BB_CLAUDE_CODE_EXECUTABLE) {
-    env.BB_CLAUDE_CODE_EXECUTABLE = shellEnv.BB_CLAUDE_CODE_EXECUTABLE;
+  const recordDir = process.env.BB_PROVIDER_BRIDGE_RECORD_DIR;
+  if (recordDir) {
+    env.BB_PROVIDER_BRIDGE_RECORD_DIR = recordDir;
   }
   return Object.keys(env).length > 0 ? env : null;
 }
@@ -303,6 +277,7 @@ export class RuntimeManager {
   private baseShellEnv;
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly pendingEntries = new Map<string, Promise<RuntimeEntry>>();
+  private readonly pendingCatalogHashes = new Map<string, string>();
   private readonly pendingEnvironmentProvisions = new Map<
     string,
     PendingEnvironmentProvision
@@ -324,7 +299,10 @@ export class RuntimeManager {
   private pendingProviderMaintenanceRuntime: PendingProviderMaintenanceRuntime | null =
     null;
   private providerMaintenanceRuntimeGeneration = 0;
-  private managedShellEnv: NonNullable<AgentRuntimeOptions["shellEnv"]> = {};
+  private providerMaintenanceActiveRequests = 0;
+  private providerMaintenanceIdleTimer: ReturnType<typeof setTimeout> | null =
+    null;
+  readonly providerInstallationGate: ProviderInstallationGate;
   private stopWatchingDataDirSkillsRoot: StopWatching = STOP_WATCHING;
 
   constructor(private readonly options: RuntimeManagerOptions = {}) {
@@ -332,6 +310,11 @@ export class RuntimeManager {
     this.hostWatcher = options.hostWatcher;
     this.provisionWorkspace = options.provisionWorkspace ?? provisionWorkspace;
     this.baseShellEnv = { ...(options.shellEnv ?? {}) };
+    this.providerInstallationGate = createProviderInstallationGate({
+      ttlMs:
+        options.providerInstallationGateTtlMs ??
+        PROVIDER_INSTALLATION_GATE_TTL_MS,
+    });
     this.ensureDataDirSkillsWatcher();
   }
 
@@ -340,9 +323,6 @@ export class RuntimeManager {
   ): string[] {
     const roots = [...args.workspaceRoots];
     if (args.threadStorageRootPath) {
-      // Provider runtimes are environment-scoped and may host multiple threads.
-      // BB_THREAD_STORAGE still points agents at their own thread subdirectory;
-      // this root lets workspace-write sandboxes mutate that path.
       roots.push(args.threadStorageRootPath);
     }
     return [...new Set(roots)];
@@ -385,24 +365,11 @@ export class RuntimeManager {
     return next;
   }
 
-  /**
-   * A thread can move between environments while its provider session is
-   * still resident in the old environment runtime. Release that old runtime
-   * before the new environment resumes the persisted provider thread, so two
-   * runtime processes never own the same provider session at once.
-   *
-   * `activeTurn` selects what happens when an old runtime still runs a turn.
-   * Turn dispatch and stop controls own the session, so they interrupt it.
-   * Other controls keep it and report the environment back to their caller.
-   */
   async releaseThreadFromOtherEnvironments(args: {
     activeTurn: ReleaseThreadActiveTurnPolicy;
     environmentId: string;
     threadId: string;
   }): Promise<ReleaseThreadFromOtherEnvironmentsResult> {
-    // Wait outside the control lane. An in-flight thread command takes this
-    // same lane for its own release step, so a wait inside the lane can hold
-    // the lane against the command it waits for and deadlock the thread.
     await this.waitForThreadCommandsInOtherEnvironments(args);
     return this.enqueueThreadControl(args.threadId, () =>
       this.releaseThreadFromOtherEnvironmentsOnce(args),
@@ -413,9 +380,6 @@ export class RuntimeManager {
     environmentId: string;
     threadId: string;
   }): Promise<void> {
-    // A command can register while an earlier one settles, so drain until no
-    // other environment holds a thread command. Each pass awaits real command
-    // completions, so this cannot spin.
     for (;;) {
       const inFlightOldCommands = [
         ...this.inFlightThreadCommandCompletionsByEnvironmentId.entries(),
@@ -475,12 +439,6 @@ export class RuntimeManager {
     };
   }
 
-  /**
-   * Every loaded runtime that still holds the thread, in any environment. A
-   * moved thread can keep its provider session in the environment it left,
-   * so controls that act on the live session must look past the command's
-   * own environment.
-   */
   listThreadOwnerEntries(threadId: string): RuntimeEntry[] {
     return [...this.entries.values()].filter((entry) =>
       entry.runtime.hasThread(threadId),
@@ -495,12 +453,6 @@ export class RuntimeManager {
     this.entries.get(environmentId)?.terminals.delete(terminalId);
   }
 
-  /**
-   * Keeps an environment runtime alive while a thread command is preparing a
-   * start or submit. Runtime turn state becomes active only after the provider
-   * accepts the command, so it cannot by itself protect that short interval
-   * from a concurrent shell-environment refresh.
-   */
   async retainEnvironmentForThreadCommand(
     environmentId: string,
     threadId: string,
@@ -619,10 +571,7 @@ export class RuntimeManager {
   }
 
   getShellEnv(): NonNullable<AgentRuntimeOptions["shellEnv"]> {
-    return {
-      ...this.baseShellEnv,
-      ...this.managedShellEnv,
-    };
+    return { ...this.baseShellEnv };
   }
 
   async replaceBaseShellEnv(
@@ -633,6 +582,7 @@ export class RuntimeManager {
     }
 
     this.baseShellEnv = { ...shellEnv };
+    this.providerInstallationGate.clear();
     await this.shutdownProviderMaintenanceRuntime();
     await this.evictIdleRuntimeEntries();
   }
@@ -666,12 +616,6 @@ export class RuntimeManager {
     });
   }
 
-  /**
-   * Background tasks outlive their turn, so an entry with no active turn can
-   * still be running a workflow or a backgrounded command inside its provider
-   * process. Shutting that runtime down would kill them, so they count as
-   * active work.
-   */
   private entryHasActiveRuntimeWork(entry: RuntimeEntry): boolean {
     return (
       entry.terminals.size > 0 ||
@@ -713,12 +657,6 @@ export class RuntimeManager {
     );
   }
 
-  /**
-   * Removes staged skill catalog directories no loaded entry references.
-   * `pendingCatalogHashes` names catalogs that are about to become active but
-   * are not yet registered in `entries` — e.g. the replacement catalog during
-   * a runtime swap — so the cleanup does not delete a just-staged directory.
-   */
   private async cleanupUnusedInjectedSkillStagingDirs(
     pendingCatalogHashes: readonly string[],
   ): Promise<void> {
@@ -730,6 +668,7 @@ export class RuntimeManager {
         dataDir: this.options.dataDir,
         keepCatalogHashes: [
           ...pendingCatalogHashes,
+          ...this.pendingCatalogHashes.values(),
           ...[...this.entries.values()].flatMap((entry) =>
             entry.skillCatalogHash === null ? [] : [entry.skillCatalogHash],
           ),
@@ -783,13 +722,6 @@ export class RuntimeManager {
       return args.entry;
     }
 
-    // A thread command must not force a catalog swap while the runtime is
-    // busy: replacement would kill in-flight work, and failing the command
-    // would drop the thread's message — an agent can trigger this against its
-    // own thread by installing a skill mid-turn, and an open terminal would
-    // otherwise pin every thread in the environment into the failure. Reuse
-    // the busy runtime with its stale catalog and defer the refresh to the
-    // next launch on an idle environment.
     if (
       args.targetThreadId !== undefined &&
       (this.entryHasActiveRuntimeWork(args.entry) ||
@@ -824,18 +756,8 @@ export class RuntimeManager {
     return null;
   }
 
-  replaceManagedShellEnv(
-    shellEnv: NonNullable<AgentRuntimeOptions["shellEnv"]>,
-  ): void {
-    this.managedShellEnv = { ...shellEnv };
-  }
-
-  /**
-   * Tears down the resident provider-maintenance runtime so the next caller
-   * gets a fresh one. In-flight maintenance RPCs fail with "Runtime shutting
-   * down" and are expected to retry; callers refetch after invalidation.
-   */
   async invalidateProviderMaintenanceRuntime(): Promise<void> {
+    this.providerInstallationGate.clear();
     try {
       await this.shutdownProviderMaintenanceRuntime();
     } catch (error) {
@@ -847,6 +769,7 @@ export class RuntimeManager {
   }
 
   private async shutdownProviderMaintenanceRuntime(): Promise<void> {
+    this.clearProviderMaintenanceIdleTimer();
     const existingRuntime = this.providerMaintenanceRuntime;
     const pendingRuntime = this.pendingProviderMaintenanceRuntime;
     this.providerMaintenanceRuntimeGeneration += 1;
@@ -871,6 +794,38 @@ export class RuntimeManager {
     );
   }
 
+  private clearProviderMaintenanceIdleTimer(): void {
+    if (this.providerMaintenanceIdleTimer === null) return;
+    clearTimeout(this.providerMaintenanceIdleTimer);
+    this.providerMaintenanceIdleTimer = null;
+  }
+
+  private scheduleProviderMaintenanceIdleShutdown(): void {
+    this.clearProviderMaintenanceIdleTimer();
+    if (
+      this.providerMaintenanceActiveRequests > 0 ||
+      (this.providerMaintenanceRuntime === null &&
+        this.pendingProviderMaintenanceRuntime === null)
+    ) {
+      return;
+    }
+
+    const timeoutMs =
+      this.options.providerMaintenanceIdleTimeoutMs ??
+      PROVIDER_MAINTENANCE_IDLE_TIMEOUT_MS;
+    this.providerMaintenanceIdleTimer = setTimeout(() => {
+      this.providerMaintenanceIdleTimer = null;
+      if (this.providerMaintenanceActiveRequests > 0) return;
+      void this.shutdownProviderMaintenanceRuntime().catch((error) => {
+        this.options.logger?.warn(
+          { err: error },
+          "Failed to shut down idle provider maintenance runtime",
+        );
+      });
+    }, timeoutMs);
+    this.providerMaintenanceIdleTimer.unref();
+  }
+
   private async evictIdleRuntimeEntries(): Promise<void> {
     const idleEntries = [...this.entries.values()].filter(
       (entry) => !this.entryHasActiveEnvironmentWork(entry),
@@ -883,13 +838,6 @@ export class RuntimeManager {
 
     await Promise.all(idleEntries.map((entry) => entry.runtime.shutdown()));
     await this.cleanupUnusedInjectedSkillStagingDirs([]);
-  }
-
-  async openWorkspace(path: string): Promise<HostWorkspace> {
-    return this.provisionWorkspace({
-      workspaceProvisionType: "unmanaged",
-      path,
-    });
   }
 
   async ensureProviderMaintenanceRuntime(args: {
@@ -926,6 +874,23 @@ export class RuntimeManager {
     };
     this.pendingProviderMaintenanceRuntime = pendingRuntime;
     return promise;
+  }
+
+  async withProviderMaintenanceRuntime<TResult>(
+    args: { dataDir: string },
+    request: (runtime: AgentRuntime) => Promise<TResult>,
+  ): Promise<TResult> {
+    this.clearProviderMaintenanceIdleTimer();
+    this.providerMaintenanceActiveRequests += 1;
+    try {
+      const runtime = await this.ensureProviderMaintenanceRuntime(args);
+      return await request(runtime);
+    } finally {
+      this.providerMaintenanceActiveRequests -= 1;
+      if (this.providerMaintenanceActiveRequests === 0) {
+        this.scheduleProviderMaintenanceIdleShutdown();
+      }
+    }
   }
 
   async ensureEnvironment(args: EnsureEnvironmentArgs): Promise<RuntimeEntry> {
@@ -985,6 +950,7 @@ export class RuntimeManager {
       })
       .finally(() => {
         this.pendingEntries.delete(args.environmentId);
+        this.pendingCatalogHashes.delete(args.environmentId);
         this.clearPendingEnvironmentProvision(
           args.environmentId,
           pendingProvision,
@@ -992,6 +958,12 @@ export class RuntimeManager {
       });
     pendingProvision.done = creation;
     this.pendingEntries.set(args.environmentId, creation);
+    if (skillConfig !== null) {
+      this.pendingCatalogHashes.set(
+        args.environmentId,
+        skillConfig.catalogHash,
+      );
+    }
 
     return creation;
   }
@@ -1023,7 +995,7 @@ export class RuntimeManager {
       );
     }
 
-    const workspace = await this.provisionWorkspace(args.provision);
+    const workspace = await this.provisionHostWorkspace(args.provision);
     if (workspace.path !== args.workspacePath) {
       throw new Error(
         `Workspace refresh for ${args.environmentId} returned ${workspace.path}, not ${args.workspacePath}`,
@@ -1108,14 +1080,20 @@ export class RuntimeManager {
       );
     }
 
-    await this.provisionWorkspace({ ...args.provision, signal: args.signal });
+    await this.provisionHostWorkspace({
+      ...args.provision,
+      signal: args.signal,
+    });
     this.options.onWorkspaceStatusChanged?.({
       environmentId: args.entry.environmentId,
       changeKinds: ["work-status-changed", "git-refs-changed"],
     });
   }
 
-  async destroyEnvironment(environmentId: string): Promise<void> {
+  async destroyEnvironment(
+    environmentId: string,
+    args: DestroyWorkspaceArgs,
+  ): Promise<void> {
     const existing = this.entries.get(environmentId);
     const pending = this.pendingEntries.get(environmentId);
     const entry = existing ?? (pending ? await pending : undefined);
@@ -1128,24 +1106,10 @@ export class RuntimeManager {
     await this.stopWatchingStatus(entry);
     await entry.runtime.shutdown();
     await this.killManagedWorkspaceProcesses(entry);
-    await entry.workspace.destroy();
+    await entry.workspace.destroy(args);
     await this.cleanupUnusedInjectedSkillStagingDirs([]);
   }
 
-  /**
-   * Reaps every process still rooted in a managed workspace before its
-   * directory is removed. Runtime and terminal shutdown signal their own
-   * process groups, but processes that start a new session (`setsid`,
-   * `nohup`, detached dev servers) survive that and would otherwise keep
-   * running with a cwd in a deleted directory.
-   *
-   * The sweep is ownership-agnostic on purpose: it kills ANY process of this
-   * user whose cwd is inside the workspace, including ones bb never started
-   * (a shell `cd`'d into the worktree, an editor terminal, a debugger). The
-   * directory is about to be deleted, so those processes lose their cwd
-   * anyway. Only managed workspaces are swept; personal workspaces stay
-   * untouched.
-   */
   private async killManagedWorkspaceProcesses(
     entry: RuntimeEntry,
   ): Promise<void> {
@@ -1200,9 +1164,6 @@ export class RuntimeManager {
   }
 
   async evictIdleEnvironments(): Promise<string[]> {
-    // A pending environment creation is still active work. If we evict around
-    // it, the creation can resolve immediately after this sweep and resurrect
-    // an idle runtime entry that missed the eviction pass.
     if (this.pendingEntries.size > 0) {
       return [];
     }
@@ -1240,9 +1201,7 @@ export class RuntimeManager {
     for (const pending of this.pendingEntries.values()) {
       try {
         entries.push(await pending);
-      } catch {
-        // Ignore failed provisions during shutdown
-      }
+      } catch {}
     }
     this.entries.clear();
     this.pendingEntries.clear();
@@ -1250,9 +1209,6 @@ export class RuntimeManager {
     for (const entry of entries) {
       await this.stopWatchingStatus(entry);
       await entry.runtime.shutdown();
-      // Do NOT call workspace.destroy() — the server owns managed workspace
-      // lifecycle via explicit environment.destroy commands. Daemon shutdown
-      // should only release in-memory state and stop provider processes.
     }
     await this.shutdownProviderMaintenanceRuntime();
     await this.stopWatchingDataDirSkillsRoot();
@@ -1260,14 +1216,6 @@ export class RuntimeManager {
     await this.cleanupUnusedInjectedSkillStagingDirs([]);
   }
 
-  /**
-   * Synthesizes failure events for threads that were mid-turn when their
-   * provider process died, from the runtime's final per-thread snapshot.
-   * A process can also die after a turn request is sent but before the
-   * provider emits turn/started. That request has already made the server
-   * thread active, so synthesize a thread-scoped error to settle it instead
-   * of waiting for the live-command timeout.
-   */
   private buildUnexpectedProviderExitEvents(
     info: AgentRuntimeProcessExitInfo,
   ): ThreadEvent[] {
@@ -1382,12 +1330,8 @@ export class RuntimeManager {
       );
     }
 
-    const setupPath = this.getShellEnv().PATH;
-    const workspace = await this.provisionWorkspace({
+    const workspace = await this.provisionHostWorkspace({
       ...provision,
-      ...(provision.workspaceProvisionType === "managed-worktree" && setupPath
-        ? { setupPath }
-        : {}),
       signal: args.provisionSignal,
     });
     const workspaceWriteRoots =
@@ -1421,6 +1365,19 @@ export class RuntimeManager {
         })),
       onInteractiveRequest: this.options.onInteractiveRequest,
       onStderr: this.options.onStderr,
+      onProviderRecovery: (hint) => {
+        this.options.logger?.debug(
+          {
+            environmentId: args.environmentId,
+            providerId: hint.providerId,
+            threadId: hint.threadId,
+            kind: hint.kind,
+            retryable: hint.retryable,
+            message: hint.message,
+          },
+          "Provider bridge raised a recovery hint",
+        );
+      },
       onProcessExit: (info) => {
         if (!info.expected) {
           for (const event of this.buildUnexpectedProviderExitEvents(info)) {
@@ -1452,6 +1409,15 @@ export class RuntimeManager {
       workspace,
       path: workspace.path,
     };
+  }
+
+  private provisionHostWorkspace(
+    provision: ProvisionWorkspaceArgs,
+  ): Promise<HostWorkspace> {
+    return this.provisionWorkspace({
+      ...provision,
+      ...userExecutableProcessOptions(this.getShellEnv()),
+    });
   }
 
   private async stopWatchingStatus(entry: RuntimeEntry): Promise<void> {

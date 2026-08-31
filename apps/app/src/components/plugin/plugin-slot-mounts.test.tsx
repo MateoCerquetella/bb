@@ -30,18 +30,26 @@ import {
   PLUGIN_PANEL_ROUTE_PATH,
   AUTOMATIONS_PLUGIN_PANEL_PATH,
 } from "@/lib/route-paths";
+import {
+  markPluginFrontendsSettled,
+  resetPluginFrontendBootStateForTest,
+} from "@/lib/plugin-frontend-boot-state";
+import { writeLastKnownPluginNavPanelChrome } from "@/lib/plugin-nav-panel-chrome";
 import { PluginPanelView } from "@/views/PluginPanelView";
 import {
   PluginPanelHeaderActions,
   PluginPanelHeaderCenter,
 } from "./PluginPanelHeader";
 import { resetAllCrashedPluginSlotsForTest } from "./PluginSlotMount";
+import { resetDeprecatedAliasWarningsForTests } from "@/lib/plugin-sdk-deprecated-aliases";
+import { applyPluginCss, resetPluginCssForTest } from "@/lib/plugin-css";
 import { ComposerActionsSlot } from "./PluginComposerActions";
 import { PluginContext } from "./plugin-context";
 import {
   PluginComposerHostProvider,
   PluginComposerHostScopeProvider,
   type PluginComposerHost,
+  useComposerHostDraftNotifier,
   usePublishPluginComposerHost,
 } from "./plugin-composer-host";
 import { PluginHomepageSections } from "./PluginHomepageSections";
@@ -63,7 +71,7 @@ import {
 import { NewTabActions } from "@/components/secondary-panel/NewTabFileSearch";
 import { buildFileOpenerPanelTab } from "./file-opener-tabs";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
-import type { PromptDraftState } from "@/lib/prompt-draft";
+import type { PromptDraftState } from "@bb/client-core";
 
 function composerTextEffectValues(storageKey: string | null) {
   return getComposerTextEffects(storageKey).map(({ effect }) => effect);
@@ -88,7 +96,11 @@ function registrationSet(
 afterEach(() => {
   cleanup();
   resetPluginSlotStoreForTest();
+  resetPluginFrontendBootStateForTest();
+  window.localStorage.clear();
   resetAllCrashedPluginSlotsForTest();
+  resetPluginCssForTest();
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -503,6 +515,7 @@ describe("useComposer", () => {
       });
       const draftRef = useRef(draft);
       draftRef.current = draft;
+      const subscribeDraft = useComposerHostDraftNotifier(draft);
       const host = useMemo<PluginComposerHost>(
         () => ({
           scope: {
@@ -510,13 +523,13 @@ describe("useComposer", () => {
             threadId: "thr_queue",
             queuedMessageId,
           },
-          draft,
           textEffectKey: `queued-message:thr_queue:${queuedMessageId}:1`,
           getCurrent: () => draftRef.current,
+          subscribeDraft,
           setDraft,
           focus: () => {},
         }),
-        [draft, queuedMessageId],
+        [queuedMessageId, subscribeDraft],
       );
 
       return (
@@ -607,10 +620,10 @@ describe("useComposer", () => {
                   threadId: "thr_queue",
                   queuedMessageId: "qmsg_1",
                 },
-                draft,
                 textEffectKey:
                   "queued-message:thr_queue:qmsg_1:sibling-surface",
                 getCurrent: () => draft,
+                subscribeDraft: () => () => {},
                 setDraft,
                 focus: () => {},
               }
@@ -674,6 +687,7 @@ describe("useComposer", () => {
       });
       const draftRef = useRef(draft);
       draftRef.current = draft;
+      const subscribeDraft = useComposerHostDraftNotifier(draft);
       const host = useMemo<PluginComposerHost>(
         () => ({
           scope: {
@@ -683,13 +697,13 @@ describe("useComposer", () => {
             tabId: "side-chat:one",
             childThreadId,
           },
-          draft,
           textEffectKey: `side-chat:side-chat:one:${childThreadId ?? ""}`,
           getCurrent: () => draftRef.current,
+          subscribeDraft,
           setDraft,
           focus: () => {},
         }),
-        [childThreadId, draft],
+        [childThreadId, subscribeDraft],
       );
 
       return (
@@ -806,16 +820,17 @@ describe("useComposer", () => {
       });
       const draftRef = useRef(draft);
       draftRef.current = draft;
+      const subscribeDraft = useComposerHostDraftNotifier(draft);
       const host = useMemo<PluginComposerHost>(
         () => ({
           scope: { kind: "new-thread", projectId },
-          draft,
           textEffectKey: `root:${projectId}`,
           getCurrent: () => draftRef.current,
+          subscribeDraft,
           setDraft,
           focus: () => {},
         }),
-        [draft, projectId],
+        [projectId, subscribeDraft],
       );
 
       return (
@@ -892,9 +907,9 @@ describe("useComposer", () => {
         };
         return {
           scope: { kind: "new-thread", projectId },
-          draft,
           textEffectKey: `root-state:${projectId ?? "null"}`,
           getCurrent: () => draft,
+          subscribeDraft: () => () => {},
           setDraft: () => {},
           focus: () => {},
         };
@@ -1041,11 +1056,9 @@ describe("useComposer", () => {
             threadId: "thr_scope_owner",
             queuedMessageId,
           },
-          draft,
-          // A host can retain its editable surface while its logical scope
-          // changes, as root compose does when the selected project changes.
           textEffectKey: "shared-scope-effect",
           getCurrent: () => draft,
+          subscribeDraft: () => () => {},
           setDraft: () => {},
           focus: () => {},
         }),
@@ -1218,7 +1231,6 @@ describe("useComposer", () => {
       },
     ]);
 
-    // A second mention lands after the first with a preserved gap.
     fireEvent.click(screen.getByText("n-mention"));
     expect(screen.getByTestId("draft-text").textContent).toBe(
       "ideas.md ideas.md ",
@@ -1302,6 +1314,65 @@ describe("PluginNavSidebarItems + PluginPanelView", () => {
     );
     fireEvent.click(screen.getByText("Demo board"));
     expect(screen.getByText("board panel body")).toBeDefined();
+  });
+
+  it("releases the plugin stylesheet when navigation unmounts the panel route", async () => {
+    vi.useFakeTimers();
+    setPluginSlotRegistrations(
+      "demo",
+      registrationSet({
+        navPanels: [
+          {
+            id: "board",
+            title: "Demo board",
+            icon: "columns",
+            path: "board",
+            component: Board,
+          },
+        ],
+      }),
+    );
+    applyPluginCss("demo", "/demo.css?h=route");
+    function LeavePanel() {
+      const navigate = useNavigate();
+      return (
+        <button type="button" onClick={() => navigate("/")}>
+          Leave panel
+        </button>
+      );
+    }
+    render(
+      <MemoryRouter initialEntries={["/plugins/demo/board"]}>
+        <Routes>
+          <Route
+            path={PLUGIN_PANEL_ROUTE_PATH}
+            element={
+              <>
+                <LeavePanel />
+                <PluginPanelView />
+              </>
+            }
+          />
+          <Route path="/" element={<div>home</div>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="demo"]'),
+    ).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Leave panel" }));
+    await act(async () => {});
+    expect(screen.getByText("home")).toBeDefined();
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="demo"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="demo"]'),
+    ).toBeNull();
   });
 
   it("shows a plugin panel's position when it is open in a split", () => {
@@ -1397,7 +1468,69 @@ describe("PluginNavSidebarItems + PluginPanelView", () => {
     ).toBe("page");
   });
 
-  it("shows a placeholder for an unknown plugin panel route", () => {
+  it("draws a remembered plugin row before boot and keeps the same node when the plugin registers", () => {
+    resetPluginFrontendBootStateForTest();
+    writeLastKnownPluginNavPanelChrome([
+      {
+        pluginId: "demo",
+        id: "board",
+        path: "board",
+        title: "Demo board",
+        icon: "columns",
+      },
+    ]);
+    render(
+      <MemoryRouter>
+        <PluginNavSidebarItems />
+      </MemoryRouter>,
+    );
+    const rememberedRow = screen.getByRole("button", { name: "Demo board" });
+
+    act(() => {
+      setPluginSlotRegistrations(
+        "demo",
+        registrationSet({
+          navPanels: [
+            {
+              id: "board",
+              title: "Demo board",
+              icon: "columns",
+              path: "board",
+              component: Board,
+            },
+          ],
+        }),
+      );
+      markPluginFrontendsSettled();
+    });
+    expect(screen.getByRole("button", { name: "Demo board" })).toBe(
+      rememberedRow,
+    );
+  });
+
+  it("drops a remembered plugin row that never registers once frontends have settled", () => {
+    resetPluginFrontendBootStateForTest();
+    writeLastKnownPluginNavPanelChrome([
+      {
+        pluginId: "ghost",
+        id: "board",
+        path: "board",
+        title: "Ghost board",
+        icon: "columns",
+      },
+    ]);
+    render(
+      <MemoryRouter>
+        <PluginNavSidebarItems />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("button", { name: "Ghost board" })).toBeDefined();
+    act(() => markPluginFrontendsSettled());
+    expect(screen.queryByRole("button", { name: "Ghost board" })).toBeNull();
+  });
+
+  it("stays quiet for an unknown panel until plugin frontends have booted", () => {
+    resetPluginFrontendBootStateForTest();
     render(
       <MemoryRouter initialEntries={["/plugins/ghost/board"]}>
         <Routes>
@@ -1405,6 +1538,9 @@ describe("PluginNavSidebarItems + PluginPanelView", () => {
         </Routes>
       </MemoryRouter>,
     );
+    expect(screen.queryByText(/This plugin panel is not available/)).toBeNull();
+
+    act(() => markPluginFrontendsSettled());
     expect(
       screen.getByText(/This plugin panel is not available/),
     ).toBeDefined();
@@ -1450,23 +1586,24 @@ describe("plugin panel shared title bar and full-bleed body", () => {
     const panel = panelSlot({ headerContent: ExplodingAccessory });
     render(
       <>
-        <PluginPanelHeaderCenter panel={panel} />
+        <PluginPanelHeaderCenter chrome={panel} />
         <PluginPanelHeaderActions panel={panel} subPath="" />
       </>,
     );
-    // The header center survives; the accessory is hidden, not chip-ified.
     expect(screen.getByText("Demo board")).toBeDefined();
     expect(screen.queryByText(/plugin demo crashed/)).toBeNull();
   });
 
-  it("always renders the shared title and headerContent", () => {
+  it("gives headerContent independent CSS ownership without a mounted panel body", async () => {
+    vi.useFakeTimers();
     function Accessory() {
       return <button type="button">Toggle sidebar</button>;
     }
     const panel = panelSlot({ headerContent: Accessory });
-    render(
+    applyPluginCss("demo", "/demo.css?h=header");
+    const view = render(
       <>
-        <PluginPanelHeaderCenter panel={panel} />
+        <PluginPanelHeaderCenter chrome={panel} />
         <PluginPanelHeaderActions panel={panel} subPath="notes/today.md" />
       </>,
     );
@@ -1474,6 +1611,22 @@ describe("plugin panel shared title bar and full-bleed body", () => {
     expect(
       screen.getByRole("button", { name: "Toggle sidebar" }),
     ).toBeDefined();
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="demo"]'),
+    ).not.toBeNull();
+    expect(screen.queryByTestId("plugin-panel-body")).toBeNull();
+
+    view.unmount();
+    await act(async () => {});
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="demo"]'),
+    ).not.toBeNull();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_500);
+    });
+    expect(
+      document.head.querySelector('link[data-bb-plugin-css="demo"]'),
+    ).toBeNull();
   });
 
   it("keys the right-panel toggle target to its owning pane", () => {
@@ -1599,9 +1752,6 @@ describe("plugin thread panel actions", () => {
 
   it("contains a throwing run and declines non-JSON params without opening", () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    // What each declined openPanel reported back to the plugin: a bad
-    // `params` must surface as false, never as a throw the plugin has to
-    // catch (the host swallows run errors, so a throw would be invisible).
     const declines: boolean[] = [];
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
@@ -1649,10 +1799,6 @@ describe("plugin thread panel actions", () => {
   });
 
   it("reports an accepted open as true from both panel action kinds", () => {
-    // The contract every openPanel entry point shares: an accepted open is
-    // true. Both action kinds are exercised in one test because the value of
-    // the boolean is that a plugin registering more than one kind can branch
-    // on it uniformly.
     const accepted: boolean[] = [];
     setPluginSlotRegistrations(
       "demo",
@@ -1897,9 +2043,7 @@ describe("plugin file opener tabs", () => {
   });
 
   it("lets an opener delegate to the exact native preview node", () => {
-    function DelegatingEditor({
-      experimental_Original: Original,
-    }: PluginFileOpenerProps) {
+    function DelegatingEditor({ Original }: PluginFileOpenerProps) {
       return <Original />;
     }
     setPluginSlotRegistrations(
@@ -2088,5 +2232,104 @@ describe("plugin file opener tabs", () => {
     expect(screen.getByRole("button").textContent).toBe(
       "Native selection and editor actions",
     );
+  });
+});
+
+describe("file opener experimental_Original alias", () => {
+  beforeEach(() => {
+    resetDeprecatedAliasWarningsForTests();
+  });
+
+  function registerOpener(
+    component: (props: PluginFileOpenerProps) => React.ReactNode,
+  ) {
+    setPluginSlotRegistrations(
+      "notes",
+      registrationSet({
+        fileOpeners: [
+          {
+            id: "editor",
+            title: "Notes editor",
+            extensions: ["md"],
+            component,
+          },
+        ],
+      }),
+    );
+  }
+
+  const tab = buildFileOpenerPanelTab(
+    { id: "editor", pluginId: "notes" },
+    {
+      path: "notes/todo.md",
+      source: {
+        kind: "workspace",
+        environmentId: "env_1",
+        projectId: null,
+        threadId: "thr_1",
+      },
+    },
+    {
+      kind: "workspace-file-preview",
+      environmentId: "env_1",
+      projectId: null,
+      tab: {
+        lineRange: { startLineNumber: 7, endLineNumber: 9 },
+        path: "notes/todo.md",
+        source: { kind: "working-tree" },
+        statusLabel: null,
+      },
+      threadId: "thr_1",
+    },
+  );
+
+  function renderOpener(nativePreview: string) {
+    return (
+      <PluginPanelTabContent
+        tab={tab}
+        context={{ kind: "thread", threadId: "thr_1" }}
+        fileOpenerOriginal={<button type="button">{nativePreview}</button>}
+      />
+    );
+  }
+
+  it("delegates to the native preview through the alias and warns once across renders", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let renders = 0;
+    registerOpener(({ experimental_Original: LegacyOriginal }) => {
+      renders += 1;
+      return LegacyOriginal === undefined ? (
+        <div>alias missing</div>
+      ) : (
+        <LegacyOriginal />
+      );
+    });
+
+    const { rerender } = render(renderOpener("Native preview and actions"));
+    expect(screen.getByRole("button").textContent).toBe(
+      "Native preview and actions",
+    );
+
+    rerender(renderOpener("Native preview for line 7"));
+    expect(screen.getByRole("button").textContent).toBe(
+      "Native preview for line 7",
+    );
+    expect(renders).toBe(2);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      "experimental_Original is deprecated; use Original. Removed in bb 0.42",
+    );
+  });
+
+  it("never warns for an opener that reads Original", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    registerOpener(({ Original }) => <Original />);
+
+    render(renderOpener("Native preview and actions"));
+
+    expect(screen.getByRole("button").textContent).toBe(
+      "Native preview and actions",
+    );
+    expect(warn).not.toHaveBeenCalled();
   });
 });

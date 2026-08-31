@@ -6,6 +6,7 @@ import type {
   DiffPatchEntry,
   EnvironmentDiffPatchResponse,
 } from "@bb/server-contract";
+import { createDeferredPromise } from "@bb/test-helpers";
 import { sdk } from "@/lib/sdk";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
@@ -33,19 +34,6 @@ function availableResponse(
   return { outcome: "available", patches: [entry] };
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-}
-
-function deferred<T>(): Deferred<T> {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((res) => {
-    resolve = res;
-  });
-  return { promise, resolve };
-}
-
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
@@ -62,7 +50,7 @@ describe("useEnvironmentDiffPatches", () => {
       type: "branch_committed",
       mergeBaseBranch: "main",
     };
-    const firstFetch = deferred<EnvironmentDiffPatchResponse>();
+    const firstFetch = createDeferredPromise<EnvironmentDiffPatchResponse>();
     vi.mocked(sdk.environments.diffPatch).mockReturnValue(firstFetch.promise);
 
     const { result, rerender } = renderHook(
@@ -99,8 +87,7 @@ describe("useEnvironmentDiffPatches", () => {
       truncated: false,
     };
 
-    // First fetch hangs until we resolve it by hand, so we can evict mid-flight.
-    const firstFetch = deferred<EnvironmentDiffPatchResponse>();
+    const firstFetch = createDeferredPromise<EnvironmentDiffPatchResponse>();
     vi.mocked(sdk.environments.diffPatch)
       .mockReturnValueOnce(firstFetch.promise)
       .mockResolvedValueOnce(availableResponse(freshPatch));
@@ -110,7 +97,6 @@ describe("useEnvironmentDiffPatches", () => {
       { wrapper },
     );
 
-    // Panel reports the path; the debounced dispatch fires the in-flight fetch.
     act(() => {
       result.current.requestPaths({ visible: [PATH], overscan: [] });
     });
@@ -121,8 +107,6 @@ describe("useEnvironmentDiffPatches", () => {
       expect(result.current.getPatchState(PATH).status).toBe("loading");
     });
 
-    // The file is edited: the realtime path evicts the env's patch cache (and
-    // bumps the eviction generation) while the original fetch is still pending.
     act(() => {
       removeEnvironmentDiffPatchQueries({
         environmentId: ENVIRONMENT_ID,
@@ -130,21 +114,16 @@ describe("useEnvironmentDiffPatches", () => {
       });
     });
 
-    // The pre-edit fetch now resolves with STALE content.
     await act(async () => {
       firstFetch.resolve(availableResponse(stalePatch));
       await firstFetch.promise;
     });
 
-    // The stale write was dropped: nothing is cached under the patch key, and
-    // the path is released from `loading` so it is eligible to be re-requested.
     await waitFor(() => {
       expect(result.current.getPatchState(PATH).status).toBe("idle");
     });
     expect(queryClient.getQueryData(patchKey())).toBeUndefined();
 
-    // The panel re-fires `requestPaths` (driven by the TOC refetch); this time
-    // the fetch lands fresh content into the cache.
     act(() => {
       result.current.requestPaths({ visible: [PATH], overscan: [] });
     });
@@ -175,7 +154,7 @@ describe("useEnvironmentDiffPatches", () => {
       truncated: false,
     };
 
-    const firstFetch = deferred<EnvironmentDiffPatchResponse>();
+    const firstFetch = createDeferredPromise<EnvironmentDiffPatchResponse>();
     vi.mocked(sdk.environments.diffPatch)
       .mockReturnValueOnce(firstFetch.promise)
       .mockResolvedValueOnce(availableResponse(freshPatch));
@@ -202,9 +181,6 @@ describe("useEnvironmentDiffPatches", () => {
       });
     });
 
-    // The TOC refetch can report the same visible path before the stale request
-    // resolves. That must start a second fetch instead of being deduped against
-    // the pre-eviction loading entry.
     act(() => {
       result.current.requestPaths({ visible: [PATH], overscan: [] });
     });
@@ -234,10 +210,6 @@ describe("useEnvironmentDiffPatches", () => {
   it("drops a fetch resolving after an all-environment (reconnect) eviction, even for a never-individually-evicted env", async () => {
     const { wrapper, queryClient } = createQueryClientTestHarness();
 
-    // A distinct env that is ONLY ever fetched here — never individually evicted
-    // — so it is absent from the per-env eviction map. Reusing the shared
-    // ENVIRONMENT_ID would let an earlier per-env eviction add it to the map and
-    // mask the all-env (reconnect) gap this test guards.
     const RECONNECT_ENV = "env-reconnect-only";
     const reconnectKey = environmentDiffPatchQueryKey(
       RECONNECT_ENV,
@@ -257,7 +229,7 @@ describe("useEnvironmentDiffPatches", () => {
       truncated: false,
     };
 
-    const firstFetch = deferred<EnvironmentDiffPatchResponse>();
+    const firstFetch = createDeferredPromise<EnvironmentDiffPatchResponse>();
     vi.mocked(sdk.environments.diffPatch)
       .mockReturnValueOnce(firstFetch.promise)
       .mockResolvedValueOnce(availableResponse(freshPatch));
@@ -277,9 +249,6 @@ describe("useEnvironmentDiffPatches", () => {
       expect(result.current.getPatchState(PATH).status).toBe("loading");
     });
 
-    // Server reconnect evicts EVERY environment's patch cache via the shared
-    // generation bump. This env is never individually evicted, so it is absent
-    // from the per-env map — the bump must still reach it.
     act(() => {
       bumpAllDiffPatchEvictionGenerations();
     });
@@ -357,13 +326,11 @@ describe("useEnvironmentDiffPatches cache retention", () => {
       });
       expect(queryClient.getQueryData(patchKey())).toEqual(patch);
 
-      // Observer-less entries must not gc out from under a mounted reader.
       act(() => {
         vi.advanceTimersByTime(HEAVY_PAYLOAD_GC_TIME_MS * 10);
       });
       expect(queryClient.getQueryData(patchKey())).toEqual(patch);
 
-      // A second reader (split pane) then the first leaving keeps the cache.
       const second = renderHook(
         () => useEnvironmentDiffPatches(ENVIRONMENT_ID, { target: TARGET }),
         { wrapper },
@@ -374,15 +341,12 @@ describe("useEnvironmentDiffPatches cache retention", () => {
       });
       expect(queryClient.getQueryData(patchKey())).toEqual(patch);
 
-      // Last reader leaves: still cached inside the retention window (a quick
-      // thread back-and-forth reuses the loaded diff) ...
       second.unmount();
       act(() => {
         vi.advanceTimersByTime(HEAVY_PAYLOAD_GC_TIME_MS - 1);
       });
       expect(queryClient.getQueryData(patchKey())).toEqual(patch);
 
-      // ... and a remount inside the window cancels the pending eviction.
       const third = renderHook(
         () => useEnvironmentDiffPatches(ENVIRONMENT_ID, { target: TARGET }),
         { wrapper },

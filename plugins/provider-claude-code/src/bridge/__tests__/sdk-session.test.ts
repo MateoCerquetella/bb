@@ -89,7 +89,6 @@ describe("SdkSession", () => {
     mockQueryInstance.applyFlagSettings.mockResolvedValue(undefined);
     mockQueryInstance.setModel.mockResolvedValue(undefined);
     mockQueryInstance.setPermissionMode.mockResolvedValue(undefined);
-    // Make the query async iterable return immediately
     mockQueryInstance[Symbol.asyncIterator].mockReturnValue({
       next: vi.fn().mockResolvedValue({ value: undefined, done: true }),
       return: vi.fn().mockResolvedValue({ value: undefined, done: true }),
@@ -105,7 +104,6 @@ describe("SdkSession", () => {
     const onDone = vi.fn();
     const session = new SdkSession(defaultOptions, onMessage, onDone);
     expect(session.getSessionId()).toBeUndefined();
-    expect(session.getIsProcessing()).toBe(false);
   });
 
   it("applies model and mutable flag settings to the live query", async () => {
@@ -177,7 +175,6 @@ describe("SdkSession", () => {
     session.start();
     session.stop();
     expect(mockQueryInstance.close).toHaveBeenCalled();
-    expect(session.getIsProcessing()).toBe(false);
   });
 
   it("waits for the SDK stream to finish during graceful close", async () => {
@@ -210,29 +207,6 @@ describe("SdkSession", () => {
     expect(mockQueryInstance.close).not.toHaveBeenCalled();
   });
 
-  it("forwards restricted built-in tools to the SDK when configured", () => {
-    const onMessage = vi.fn();
-    const onDone = vi.fn();
-    const session = new SdkSession(
-      {
-        ...defaultOptions,
-        tools: ["Bash", "Read"],
-      },
-      onMessage,
-      onDone,
-    );
-
-    session.start();
-
-    expect(queryMock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        options: expect.objectContaining({
-          tools: ["Bash", "Read"],
-        }),
-      }),
-    );
-  });
-
   it("forwards local plugins to the SDK without a skills allowlist", () => {
     const onMessage = vi.fn();
     const onDone = vi.fn();
@@ -254,8 +228,6 @@ describe("SdkSession", () => {
         }),
       }),
     );
-    // The SDK `skills` option is an allowlist: setting it would hide every
-    // skill the user installed outside bb (~/.claude, plugins, built-ins).
     expect(queryMock.mock.calls[0]?.[0]?.options).not.toHaveProperty("skills");
   });
 

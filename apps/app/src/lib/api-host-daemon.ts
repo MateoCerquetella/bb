@@ -17,11 +17,7 @@ const hostDaemonErrorResponseSchema = z.object({
   message: z.string().min(1),
 });
 
-/**
- * Get or create the host daemon client.
- * Recreates the client if the port changes.
- */
-export function getHostDaemonClient(port: number) {
+function getHostDaemonClient(port: number) {
   if (!client || clientPort !== port) {
     client = createHostDaemonLocalClient(
       `http://${DEFAULT_HOST_DAEMON_LOCAL_BIND_HOST}:${port}`,
@@ -31,10 +27,6 @@ export function getHostDaemonClient(port: number) {
   return client;
 }
 
-/**
- * Fetch local daemon status.
- * Returns null if the daemon is unreachable.
- */
 export async function fetchHostStatus(
   port: number,
 ): Promise<HostDaemonStatusSnapshot | null> {

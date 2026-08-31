@@ -1,21 +1,17 @@
 import { afterEach, beforeEach, expect, vi } from "vitest";
 import { Command } from "commander";
 import { createApiClient, type ApiClient } from "@bb/server-contract";
-import type { BbSdkContext } from "@bb/sdk";
 
 const readlineState = vi.hoisted(() => ({
   question: vi.fn(),
   close: vi.fn(),
 }));
 
-// Tests stub the server at the hono-client level while preserving the real
-// SDK transport readers so response parsing and error mapping stay production-like.
 const serverClientState = vi.hoisted(() => ({
   createClient: vi.fn(),
 }));
 
 vi.mock("../../client.js", async () => {
-  // cliFetch stays real — it delegates to global fetch, which tests stub.
   const { cliFetch } =
     await vi.importActual<typeof import("../../client.js")>("../../client.js");
   const { createBbSdk } =
@@ -29,22 +25,19 @@ vi.mock("../../client.js", async () => {
           status: 200,
           headers: { "Content-Type": "application/json" },
         });
-  const createCliBbSdk = vi.fn(
-    (baseUrl: string, options: MockCliBbSdkOptions = {}) => {
-      const realTransport = createHttpTransport({ baseUrl, runtime: "node" });
-      return createBbSdk({
-        context: options.context,
-        transport: {
-          ...realTransport,
-          api: serverClientState.createClient(baseUrl)?.api ?? {},
-          readJson: (responsePromise: MockTransportPromise) =>
-            realTransport.readJson(responsePromise.then(toResponse)),
-          readVoid: (responsePromise: MockTransportPromise) =>
-            realTransport.readVoid(responsePromise.then(toResponse)),
-        },
-      });
-    },
-  );
+  const createCliBbSdk = vi.fn((baseUrl: string) => {
+    const realTransport = createHttpTransport({ baseUrl, runtime: "node" });
+    return createBbSdk({
+      transport: {
+        ...realTransport,
+        api: serverClientState.createClient(baseUrl)?.api ?? {},
+        readJson: (responsePromise: MockTransportPromise) =>
+          realTransport.readJson(responsePromise.then(toResponse)),
+        readVoid: (responsePromise: MockTransportPromise) =>
+          realTransport.readVoid(responsePromise.then(toResponse)),
+      },
+    });
+  });
   return { cliFetch, createCliBbSdk };
 });
 
@@ -76,10 +69,6 @@ export type CommandRegistrar = (program: Command) => void;
 
 interface ServerClientOverride {
   api: object;
-}
-
-interface MockCliBbSdkOptions {
-  context?: BbSdkContext;
 }
 
 export const createClientMock = serverClientState.createClient;
@@ -136,12 +125,6 @@ interface ApiStubNode {
   [segment: string]: ApiStubNode | ApiStubHandler;
 }
 
-/**
- * Stubs the server at the hono-client level from a flat map of dot-separated
- * endpoint paths (e.g. `"v1.threads.:id.interactions.$get"`) to handlers,
- * expanding each path into the nested `api` object `asServerClient` expects.
- * Sibling paths sharing a prefix merge into the same branch.
- */
 export function stubServerApi(handlers: Record<string, ApiStubHandler>): void {
   const api: ApiStubNode = {};
   for (const [path, handler] of Object.entries(handlers)) {

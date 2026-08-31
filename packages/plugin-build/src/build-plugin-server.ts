@@ -9,70 +9,60 @@ import {
 } from "node:fs/promises";
 import { isAbsolute, join, resolve } from "node:path";
 import { createPluginArtifactMeta } from "./plugin-artifact-meta.js";
-import { validatePluginBuildManifest } from "./plugin-manifest.js";
-import { type PluginBuildToolchain } from "./toolchain.js";
+import { isRecord, validatePluginBuildManifest } from "./plugin-manifest.js";
+import {
+  installedPluginSdkDirectory,
+  installedPluginSdkExportTarget,
+  pathExists,
+  PLUGIN_SDK_PACKAGE_NAME,
+} from "./plugin-sdk-install.js";
+import {
+  NODE_ESM_REQUIRE_BANNER,
+  type PluginBuildToolchain,
+} from "./toolchain.js";
 
-/**
- * `bb plugin build` — compile a plugin's `bb.server` entry into a
- * self-contained backend bundle (prebuilt distribution, design §6):
- *
- * - `dist/server.js` (+ `.map`) — single node-platform ESM file with the
- *   plugin's npm deps inlined, so git:/npm: consumers never need npm or
- *   node_modules. `@get-bb/plugin-sdk` stays external — plugin authors only ever
- *   have its `.d.ts` types, so the specifier must survive to load time, where
- *   the server's loader aliases it to the SDK runtime bundle shipped next to
- *   the server (workspace resolution covers source checkouts). better-sqlite3
- *   is also external (plugins get sqlite from the host via `bb.storage`;
- *   native deps are unsupported in plugins regardless).
- * - `dist/server.meta.json` — SDK compatibility plus authoritative plugin,
- *   artifact-format, and build-version metadata.
- */
-
-// Same shim scripts/build-utils.mjs applies to our own node bundles: plugin
-// deps may be CJS and reference require/__dirname/__filename, which do not
-// exist in ESM output.
-const NODE_ESM_REQUIRE_BANNER = [
-  'import { createRequire as __createRequire } from "node:module";',
-  'import { dirname as __pathDirname } from "node:path";',
-  'import { fileURLToPath as __fileURLToPath } from "node:url";',
-  "const require = __createRequire(import.meta.url);",
-  "var __filename = __fileURLToPath(import.meta.url);",
-  "var __dirname = __pathDirname(__filename);",
-].join("\n");
-
-/** The SDK package plugin server sources import. */
 const PLUGIN_SDK_SPECIFIER = "@get-bb/plugin-sdk";
 
-/**
- * Legacy alias for {@link PLUGIN_SDK_SPECIFIER}, kept so pre-rename plugin
- * sources still build. The server loader aliases both specifiers to the same
- * SDK runtime bundle; a later change removes it.
- */
 const LEGACY_PLUGIN_SDK_SPECIFIER = "@bb/plugin-sdk";
 
-/**
- * Specifiers the backend bundle leaves unresolved. Everything else a plugin's
- * server source imports is inlined from its node_modules, so it has to be a
- * real `dependency` — `packages/templates` scaffolds against this list.
- */
 export const PLUGIN_SERVER_EXTERNALS: readonly string[] = [
   PLUGIN_SDK_SPECIFIER,
   LEGACY_PLUGIN_SDK_SPECIFIER,
   "better-sqlite3",
 ];
 
+const PLUGIN_SDK_ROOT_FILTER = /^@get-bb\/plugin-sdk$|^@bb\/plugin-sdk$/;
+const PLUGIN_SDK_SUBPATH_FILTER = /^@get-bb\/plugin-sdk\//;
+const PLUGIN_SDK_SUBPATH_RESOLVE_MARK = "bb-server-sdk-subpath";
+
+async function unresolvedSdkSubpathError(args: {
+  specifier: string;
+  resolveDir: string;
+  esbuildErrors: readonly { text: string }[];
+}): Promise<string> {
+  const need = `a server entry's "${args.specifier}" import is bundled from the plugin's own SDK install (bb serves only the bare "${PLUGIN_SDK_SPECIFIER}" at load time), so the plugin needs`;
+  const packageDir = await installedPluginSdkDirectory(args.resolveDir);
+  if (packageDir === null) {
+    return `"${args.specifier}" is not installed for this plugin (no node_modules/${PLUGIN_SDK_PACKAGE_NAME}); ${need} the SDK as a dependency`;
+  }
+  const subpath = `.${args.specifier.slice(PLUGIN_SDK_PACKAGE_NAME.length)}`;
+  const target = await installedPluginSdkExportTarget(packageDir, subpath);
+  if (target === null) {
+    return `"${args.specifier}" is not exported by the ${PLUGIN_SDK_PACKAGE_NAME} installed at ${packageDir}; ${need} an SDK version that ships it`;
+  }
+  const targetPath = resolve(packageDir, target);
+  if (!(await pathExists(targetPath))) {
+    return `"${args.specifier}" is installed for this plugin but its dist is not built: run the SDK build (${targetPath} is missing); ${need} the built SDK`;
+  }
+  return `"${args.specifier}" could not be resolved from ${packageDir}: ${args.esbuildErrors.map((error) => error.text).join("; ")}`;
+}
+
 interface PluginServerConfig {
-  /** Absolute path of the `bb.server` entry file. */
   serverEntry: string;
   packageName: string;
   pluginVersion: string;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Read `<rootDir>/package.json` and resolve its `bb.server` entry, or throw. */
 async function readPluginServerConfig(
   rootDir: string,
 ): Promise<PluginServerConfig> {
@@ -121,16 +111,12 @@ async function readPluginServerConfig(
   };
 }
 
-export interface PluginServerBuildResult {
+interface PluginServerBuildResult {
   jsPath: string;
   mapPath: string;
   metaPath: string;
 }
 
-/**
- * Build `<rootDir>`'s backend bundle into `<rootDir>/dist/`. Throws with a
- * human-readable message on any problem (missing bb.server, compile errors).
- */
 export async function buildPluginServer(
   rootDir: string,
   bbVersion: string,
@@ -144,15 +130,11 @@ export async function buildPluginServer(
   const mapPath = join(distDir, "server.js.map");
   const metaPath = join(distDir, "server.meta.json");
 
-  // Build every artifact into a staging directory and only rename into place
-  // once all steps succeeded — a failed rebuild must not clobber the previous
-  // dist/server.js the loader may still prefer.
   const stageDir = await mkdtemp(join(distDir, ".stage-"));
   try {
     const stagedJsPath = join(stageDir, "server.js");
     const stagedMetaPath = join(stageDir, "server.meta.json");
 
-    // Dynamic specifier: restate the module type (see build-plugin-app.ts).
     const esbuild = (await import(
       toolchain.esbuild
     )) as typeof import("esbuild");
@@ -165,10 +147,48 @@ export async function buildPluginServer(
       target: "node22",
       sourcemap: true,
       banner: { js: NODE_ESM_REQUIRE_BANNER },
-      // The server's loader aliases the SDK to its shipped runtime bundle at
-      // load time; better-sqlite3 comes from the host (bb.storage). Node
-      // builtins are auto-external via platform: "node".
-      external: [...PLUGIN_SERVER_EXTERNALS],
+      external: PLUGIN_SERVER_EXTERNALS.filter(
+        (specifier) => !PLUGIN_SDK_ROOT_FILTER.test(specifier),
+      ),
+      plugins: [
+        {
+          name: "bb-plugin-sdk-resolution",
+          setup(build) {
+            build.onResolve({ filter: PLUGIN_SDK_ROOT_FILTER }, (args) => ({
+              path: args.path,
+              external: true,
+            }));
+            build.onResolve(
+              { filter: PLUGIN_SDK_SUBPATH_FILTER },
+              async (args) => {
+                if (args.pluginData === PLUGIN_SDK_SUBPATH_RESOLVE_MARK) {
+                  return undefined;
+                }
+                const installed = await build.resolve(args.path, {
+                  resolveDir: args.resolveDir,
+                  kind: args.kind,
+                  importer: args.importer,
+                  pluginData: PLUGIN_SDK_SUBPATH_RESOLVE_MARK,
+                });
+                if (installed.errors.length === 0 && installed.path !== "") {
+                  return { path: installed.path };
+                }
+                return {
+                  errors: [
+                    {
+                      text: await unresolvedSdkSubpathError({
+                        specifier: args.path,
+                        resolveDir: args.resolveDir,
+                        esbuildErrors: installed.errors,
+                      }),
+                    },
+                  ],
+                };
+              },
+            );
+          },
+        },
+      ],
       logLevel: "error",
     });
     await writeFile(
@@ -180,7 +200,6 @@ export async function buildPluginServer(
       ) + "\n",
     );
 
-    // Same filesystem as dist/, so each rename is atomic.
     await rename(stagedJsPath, jsPath);
     await rename(join(stageDir, "server.js.map"), mapPath);
     await rename(stagedMetaPath, metaPath);

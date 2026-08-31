@@ -18,8 +18,14 @@ import type {
   PluginRealtimeConnectionState,
   PluginRpcContract,
   PluginRpcClient,
+  PluginProvidersState,
   PluginSettingsState,
+  ExperimentalAppPanel,
+  ExperimentalFixedTabTargetState,
+  ExperimentalPluginFixedTabReference,
+  JsonValue,
 } from "@get-bb/plugin-sdk";
+import { jsonValueSchema } from "@bb/domain";
 import {
   PluginSlotOwnershipContext,
   usePluginId,
@@ -28,8 +34,10 @@ import { usePluginThreadPanelOpenHandler } from "@/components/plugin/plugin-thre
 import {
   PluginComposerViewContext,
   usePluginComposerHost,
+  usePluginComposerHostDraft,
 } from "@/components/plugin/plugin-composer-host";
 import { sdk } from "@/lib/sdk";
+import { useSystemProviders } from "@/hooks/queries/system-queries";
 import { requestComposerFocus } from "@/lib/composer-focus-requests";
 import { setComposerTextEffect } from "@/lib/composer-text-effects";
 import {
@@ -39,7 +47,7 @@ import {
 import {
   appendQuoteAndAttachmentsToDraft,
   isPromptDraftEmpty,
-} from "@/lib/prompt-draft";
+} from "@bb/client-core";
 import {
   AUTOMATIONS_PLUGIN_ID,
   getPluginPanelRoutePath,
@@ -52,25 +60,19 @@ import { useRouteState } from "@/hooks/useRouteState";
 import { useServerConnectionState } from "@/hooks/useServerConnectionState";
 import { wsManager } from "@/lib/ws";
 import { pluginSdkSettingsQueryKey } from "@/hooks/queries/query-keys";
-
-/**
- * Host implementations of the `@get-bb/plugin-sdk/app` hooks (plugin design
- * §5.2). Every hook requires the PluginContext provider that PluginSlotMount
- * wraps around mounted slot components; the fetch-backed parts are split
- * into pure functions taking an injected `fetch` so tests can exercise the
- * response mapping without a server.
- */
+import { useAppNavigationHost } from "@/lib/app-navigation-host";
+import { normalizeExperimentalFileOpenOptions } from "@/lib/live-file-navigation";
+import { deprecatedAlias } from "@/lib/plugin-sdk-deprecated-aliases";
+import {
+  getPluginFixedTabOwnerId,
+  useAppFixedTabTarget,
+} from "@/lib/app-fixed-tab-navigation";
 
 type FetchLike = (
   input: string,
   init?: RequestInit,
 ) => Promise<Pick<Response, "ok" | "status" | "json">>;
 
-/**
- * Runtime-only compatibility for bundles built against SDK 0.4.1 before the
- * composer-scoped status API was withdrawn. Keep this unadvertised no-op until
- * those bundles are outside the supported upgrade window.
- */
 const legacySetThreadRowStatus = (_status: unknown): void => {};
 export function isAutomationEditRoutePath(pathname: string): boolean {
   return (
@@ -127,11 +129,6 @@ function serializePluginRpcInput(value: unknown): string {
   return JSON.stringify(value);
 }
 
-/**
- * POST /api/v1/plugins/:id/rpc/:method. Resolves with the handler's result;
- * throws an Error carrying the server's message on `{ ok: false }` or
- * non-JSON/HTTP failures.
- */
 export async function callPluginRpc(
   fetchImpl: FetchLike,
   pluginId: string,
@@ -176,12 +173,6 @@ export async function callPluginRpc(
   return body.result;
 }
 
-/**
- * GET /api/v1/plugins/:id/settings, reduced to the plugin-visible values:
- * secrets arrive as `{ set: boolean }` markers and are excluded by shape, so
- * a secret value can never reach plugin frontend code. Returns null when
- * settings are unavailable (plugin not running, experiment off).
- */
 export async function fetchPluginSdkSettings(
   fetchImpl: FetchLike,
   pluginId: string,
@@ -221,8 +212,6 @@ export function useRpc<
     }),
     [pluginId],
   );
-  // The runtime transport is contract-agnostic; the plugin supplies Contract
-  // from its type-only backend import and the server enforces its schemas.
   return client as PluginRpcClient<Contract>;
 }
 
@@ -231,7 +220,6 @@ export function useRealtime(
   handler: (payload: unknown) => void,
 ): void {
   const pluginId = usePluginId();
-  // Keep the latest handler without resubscribing per render.
   const handlerRef = useRef(handler);
   useEffect(() => {
     handlerRef.current = handler;
@@ -246,7 +234,6 @@ export function useRealtime(
   );
 }
 
-/** Exposes the lifecycle of the same socket that backs `useRealtime`. */
 export function useRealtimeConnectionState(): PluginRealtimeConnectionState {
   return useServerConnectionState();
 }
@@ -264,6 +251,23 @@ export function useSettings(): PluginSettingsState {
   };
 }
 
+const EMPTY_PROVIDERS: readonly never[] = [];
+
+export function useProviders(): PluginProvidersState {
+  const query = useSystemProviders();
+  const providers = query.data;
+  return useMemo<PluginProvidersState>(
+    () =>
+      providers === undefined
+        ? {
+            status: query.isError ? "error" : "loading",
+            providers: EMPTY_PROVIDERS,
+          }
+        : { status: "ready", providers },
+    [providers, query.isError],
+  );
+}
+
 export function useBbContext(): BbContext {
   const { projectId, threadId } = useRouteState();
   return useMemo(
@@ -272,16 +276,18 @@ export function useBbContext(): BbContext {
   );
 }
 
+interface BbNavigateWithDeprecatedAliases extends BbNavigate {
+  experimental_openUrl: BbNavigate["openUrl"];
+}
+
 export function useBbNavigate(): BbNavigate {
   const pluginId = usePluginId();
   const location = useLocation();
   const openThreadPanelHandler = usePluginThreadPanelOpenHandler();
   const navigate = useNavigate();
+  const appNavigation = useAppNavigationHost();
   const toThread = useCallback(
     (threadId: string) => {
-      // The canonical thread path carries the owning project, which the
-      // plugin does not know — resolve it, falling back to the projectless
-      // path when the lookup fails.
       void sdk.threads
         .get({ threadId })
         .then((thread) =>
@@ -315,8 +321,6 @@ export function useBbNavigate(): BbNavigate {
       const replacesAutomationEditRoute =
         pluginId === AUTOMATIONS_PLUGIN_ID &&
         isAutomationEditRoutePath(location.pathname);
-      // RootComposeView reads `focusPrompt`/`initialPrompt` off the location
-      // state to seed and focus the composer (single-use, cleared after read).
       void navigate(getRootComposeRoutePath(), {
         ...(replacesAutomationEditRoute ? { replace: true } : {}),
         state: {
@@ -334,17 +338,110 @@ export function useBbNavigate(): BbNavigate {
     (options) => openThreadPanelHandler?.({ ...options, pluginId }) ?? false,
     [openThreadPanelHandler, pluginId],
   );
-  return useMemo(
+  const openUrl = useCallback<BbNavigate["openUrl"]>(
+    (url) => appNavigation.openUrl({ url }),
+    [appNavigation],
+  );
+  const experimental_openFilePreview = useCallback<
+    BbNavigate["experimental_openFilePreview"]
+  >(
+    (options) => {
+      const normalized = normalizeExperimentalFileOpenOptions(options);
+      return normalized !== null && appNavigation.openFilePreview(normalized);
+    },
+    [appNavigation],
+  );
+  const experimental_openFileExternally = useCallback<
+    BbNavigate["experimental_openFileExternally"]
+  >(
+    (options) => {
+      const normalized = normalizeExperimentalFileOpenOptions(options);
+      return (
+        normalized !== null && appNavigation.openFileExternally(normalized)
+      );
+    },
+    [appNavigation],
+  );
+  return useMemo<BbNavigateWithDeprecatedAliases>(
     () => ({
       toThread,
       toProject,
       toPluginPanel,
       toCompose,
       openThreadPanel,
+      experimental_openFileExternally,
+      experimental_openFilePreview,
+      openUrl,
+      experimental_openUrl: deprecatedAlias(
+        "experimental_openUrl",
+        "openUrl",
+        openUrl,
+      ),
     }),
-    [toThread, toProject, toPluginPanel, toCompose, openThreadPanel],
+    [
+      toThread,
+      toProject,
+      toPluginPanel,
+      toCompose,
+      openThreadPanel,
+      experimental_openFileExternally,
+      experimental_openFilePreview,
+      openUrl,
+    ],
   );
 }
+
+function useExperimentalAppPanel(): ExperimentalAppPanel {
+  const pluginId = usePluginId();
+  const appNavigation = useAppNavigationHost();
+  const openFixedTab = useCallback<ExperimentalAppPanel["openFixedTab"]>(
+    (options) => {
+      const targetResult =
+        options.target === undefined
+          ? null
+          : jsonValueSchema.safeParse(options.target);
+      if (targetResult !== null && !targetResult.success) return false;
+      return appNavigation.openFixedTab({
+        surface: options.surface,
+        tab: {
+          ownerId: getPluginFixedTabOwnerId(pluginId, options.tab.panelId),
+          tabId: options.tab.id,
+        },
+        ...(targetResult?.success === true
+          ? { target: targetResult.data }
+          : {}),
+      });
+    },
+    [appNavigation, pluginId],
+  );
+  return useMemo(() => ({ openFixedTab }), [openFixedTab]);
+}
+
+function useExperimentalFixedTabTarget<Target extends JsonValue>(
+  tab: ExperimentalPluginFixedTabReference<Target>,
+): ExperimentalFixedTabTargetState<Target> | null {
+  const pluginId = usePluginId();
+  const state = useAppFixedTabTarget(
+    getPluginFixedTabOwnerId(pluginId, tab.panelId),
+    tab.id,
+  );
+  if (state === null || tab.experimental_target === undefined) return null;
+  try {
+    if (!tab.experimental_target.validate(state.target)) return null;
+  } catch {
+    return null;
+  }
+  return {
+    clear: state.clear,
+    sequence: state.sequence,
+    target: state.target,
+  };
+}
+
+export {
+  useExperimentalAppPanel as experimental_useAppPanel,
+  useExperimentalFixedTabTarget as experimental_useFixedTabTarget,
+};
 
 function reconcileComposerMentions(
   currentText: string,
@@ -425,7 +522,6 @@ function notifyComposerInputLock(storageKey: string): void {
   for (const listener of [...listeners]) listener();
 }
 
-/** Read whether any plugin currently owns an input lock for this composer. */
 export function getComposerInputLock(storageKey: string | null): boolean {
   if (storageKey === null) return false;
   return (inputLocksByStorageKey.get(storageKey)?.size ?? 0) > 0;
@@ -455,7 +551,7 @@ function setComposerInputLock(
   }
 }
 
-export function subscribeComposerInputLock(
+function subscribeComposerInputLock(
   storageKey: string | null,
   listener: ComposerInputLockListener,
 ): () => void {
@@ -472,7 +568,6 @@ export function subscribeComposerInputLock(
   };
 }
 
-/** Subscribe a prompt-box host to plugin-owned input locks for its draft key. */
 export function useComposerInputLock(storageKey: string | null): boolean {
   const subscribe = useCallback(
     (listener: ComposerInputLockListener) =>
@@ -486,7 +581,6 @@ export function useComposerInputLock(storageKey: string | null): boolean {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
 
-/** Reactive read-side of the active composer, with a route-backed fallback. */
 export function useComposerView(): ComposerView {
   const providedView = useContext(PluginComposerViewContext);
   const composerHost = usePluginComposerHost();
@@ -499,7 +593,8 @@ export function useComposerView(): ComposerView {
     [projectId, threadId],
   );
   const routeDraft = usePromptDraftStorage(routeScope);
-  const draft = composerHost?.draft ?? routeDraft;
+  const hostDraft = usePluginComposerHostDraft(composerHost);
+  const draft = hostDraft ?? routeDraft;
   const fallback = useMemo<ComposerView>(
     () => ({
       scope:
@@ -520,19 +615,11 @@ export function useComposerView(): ComposerView {
   return providedView ?? fallback;
 }
 
-/**
- * Programmatic composer-draft access (plugin design §5.2): the same shared
- * localStorage-backed draft store the built-in "Add to chat" affordances
- * write to. A transient host takes precedence while a queued message is being
- * edited; otherwise thread context targets that thread's draft and every
- * other surface targets the new-thread draft. Focus requests ride the
- * composer-focus bus when the active composer does not provide its own focus
- * primitive.
- */
 export function useComposer(): PluginComposerApi {
   const pluginId = usePluginId();
   const slotOwnershipRegistry = useContext(PluginSlotOwnershipContext);
   const composerHost = usePluginComposerHost();
+  const composerHostDraft = usePluginComposerHostDraft(composerHost);
   const { projectId, threadId } = useRouteState();
   const routeScope: PromptDraftScope = useMemo(
     () =>
@@ -691,16 +778,12 @@ export function useComposer(): PluginComposerApi {
       const provider = mention.provider.trim();
       const label = mention.label.trim() || mention.id;
       if (provider.length === 0 || provider.includes(":")) {
-        // Provider ids exclude ":" (enforced at registration) — a bad id
-        // would corrupt the composite itemId the server splits at send.
         console.warn(
           `[plugin:${pluginId}] useComposer().insertMention: invalid provider id "${mention.provider}"`,
         );
         return;
       }
       const current = getCurrent();
-      // Append at the END so existing mention offsets stay valid (the same
-      // invariant addQuote relies on).
       const separator =
         current.text.length === 0 || /\s$/u.test(current.text) ? "" : " ";
       const start = current.text.length + separator.length;
@@ -729,7 +812,7 @@ export function useComposer(): PluginComposerApi {
   );
 
   const focus = focusActiveComposer;
-  const composerText = composerHost?.draft.text ?? routeDraft.text;
+  const composerText = composerHostDraft?.text ?? routeDraft.text;
 
   return useMemo(
     () => ({

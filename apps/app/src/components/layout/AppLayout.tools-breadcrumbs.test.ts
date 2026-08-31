@@ -31,7 +31,9 @@ describe("resolveToolsBreadcrumbs", () => {
       { label: "Skills", to: "/extensions/skills" },
       { label: "Browse" },
     ]);
-    expect(resolveToolsBreadcrumbs("/extensions/skills", "?view=library")).toEqual([
+    expect(
+      resolveToolsBreadcrumbs("/extensions/skills", "?view=library"),
+    ).toEqual([
       { label: "Skills", to: "/extensions/skills" },
       { label: "My skills" },
     ]);
@@ -54,9 +56,6 @@ describe("resolveToolsBreadcrumbs", () => {
   });
 
   it("resolves literal browse paths as Browse, not as a resource named browse", () => {
-    // /extensions/plugins/:pluginId also matches /extensions/plugins/browse, so if the
-    // detail patterns are tested first this reads "Plugins / Installed /
-    // browse" and the document title becomes "browse · Plugins".
     expect(resolveToolsBreadcrumbs("/extensions/plugins/browse")).toEqual([
       { label: "Plugins", to: "/extensions/plugins" },
       { label: "Browse" },
@@ -191,11 +190,13 @@ describe("resolveAutomationBreadcrumbs", () => {
 });
 
 describe("resolveToolsAreaHeaderMeta", () => {
-  it("shows the static Extensions title on tools routes when the hub is on", () => {
+  it("shows the static Extensions title on tools routes", () => {
     expect(
-      resolveToolsAreaHeaderMeta("/extensions/plugins?view=installed".split("?")[0]!, true),
+      resolveToolsAreaHeaderMeta(
+        "/extensions/plugins?view=installed".split("?")[0]!,
+      ),
     ).toEqual({ kind: "extensions-title", title: "Extensions" });
-    expect(resolveToolsAreaHeaderMeta("/extensions/skills/registry", true)).toEqual({
+    expect(resolveToolsAreaHeaderMeta("/extensions/skills/registry")).toEqual({
       kind: "extensions-title",
       title: "Extensions",
     });
@@ -203,12 +204,7 @@ describe("resolveToolsAreaHeaderMeta", () => {
 
   it("shows established ancestor/current breadcrumbs during plugin creation", () => {
     expect(
-      resolveToolsAreaHeaderMeta(
-        "/extensions/plugins",
-        true,
-        null,
-        "?view=create",
-      ),
+      resolveToolsAreaHeaderMeta("/extensions/plugins", null, "?view=create"),
     ).toEqual({
       kind: "breadcrumbs",
       breadcrumbs: [
@@ -219,15 +215,11 @@ describe("resolveToolsAreaHeaderMeta", () => {
   });
 
   it("keeps automation breadcrumbs, including the legacy /tools alias", () => {
-    const meta = resolveToolsAreaHeaderMeta(
-      "/plugins/automations/automations",
-      true,
-    );
+    const meta = resolveToolsAreaHeaderMeta("/plugins/automations/automations");
     expect(meta?.kind).toBe("breadcrumbs");
   });
 
-  it("claims nothing when the hub is off or the route is unrelated", () => {
-    expect(resolveToolsAreaHeaderMeta("/extensions/plugins", false)).toBeNull();
-    expect(resolveToolsAreaHeaderMeta("/", true)).toBeNull();
+  it("claims nothing when the route is unrelated", () => {
+    expect(resolveToolsAreaHeaderMeta("/")).toBeNull();
   });
 });

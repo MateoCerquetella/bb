@@ -1,4 +1,5 @@
 import { mkdtemp } from "node:fs/promises";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -20,6 +21,7 @@ async function createRuntime() {
         notifySystem: () => {},
       },
       logger: testLogger as unknown as Logger,
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       dataDir: await mkdtemp(join(tmpdir(), "bb-dev-build-problems-")),
       appVersion: "0.9.0",
@@ -44,13 +46,11 @@ describe("plugin dev build problems", () => {
       "frontend bundle build failed: boom in app entry; host bundle build failed: boom in host entry",
     );
 
-    // A successful frontend build must not clear the host failure.
     runtime.setDevBuildProblem("demo", "frontend", null);
     expect(runtime.statuses.get("demo")?.detail).toBe(
       "host bundle build failed: boom in host entry",
     );
 
-    // A successful host build clears the last problem entirely.
     runtime.setDevBuildProblem("demo", "host", null);
     expect(runtime.statuses.get("demo")?.detail).toBeNull();
     expect(runtime.statuses.get("demo")?.status).toBe("running");

@@ -13,19 +13,19 @@ import type {
 } from "./thread-create-request.js";
 import { resolveCreateThreadExecutionDefaults } from "./thread-default-policy.js";
 
-export interface RememberProjectExecutionDefaultsForCreateArgs {
+interface RememberProjectExecutionDefaultsForCreateArgs {
   execution: ResolvedThreadExecutionOptions;
   request: ThreadCreateServiceRequest;
 }
 
-export interface ResolveProjectExecutionDefaultsForCreateArgs {
+interface ResolveProjectExecutionDefaultsForCreateArgs {
   executionInputSources?: ThreadCreateServiceRequestInput["executionInputSources"];
   model?: ThreadCreateServiceRequestInput["model"];
   projectId: string;
   providerId?: ThreadCreateServiceRequestInput["providerId"];
 }
 
-export interface ResolvedProjectExecutionDefaultsForCreate {
+interface ResolvedProjectExecutionDefaultsForCreate {
   executionDefaults: ProjectExecutionDefaults | null;
   providerId: string;
   requestedModel: string | null;
@@ -46,13 +46,7 @@ function shouldRememberProjectExecutionDefaults(args: {
   origin: ThreadCreateServiceRequest["origin"];
   originKind?: ThreadCreateServiceRequest["originKind"];
 }): boolean {
-  // Reusing an existing worktree is a one-off in a specific environment, not
-  // a fresh default-shaping event. Don't overwrite the project's stored
-  // execution defaults with the picker selections made for that single thread.
   if (args.environment.type === "reuse") return false;
-  // Fork/side-chat spawns inherit execution from their source thread and carry
-  // forced/inherited values the user never picked in the composer (e.g. a side
-  // chat's readonly mode). They must not reshape the project's stored defaults.
   if (args.originKind !== null) return false;
   return args.origin === "app";
 }

@@ -88,7 +88,7 @@ interface ActiveCallAdmission {
   inputByteLength: number;
 }
 
-export interface PluginHostManagerOptions {
+interface PluginHostManagerOptions {
   dataDir: string;
   logger: Pick<HostDaemonLogger, "debug" | "info" | "warn">;
   fetchArtifact: (args: {
@@ -103,18 +103,11 @@ export interface PluginHostManagerOptions {
     signal: string;
     payload: JsonValue;
   }) => void;
-  workerEntryPath?: string;
-  /** User shell additions used for executable discovery by host plugins. */
   shellEnv?: () => NodeJS.ProcessEnv;
-  /** Native path observation shared by core and host plugins. */
   hostWatcher?: Pick<HostWatcher, "watchPathRoot">;
-  /** Test override for the daemon-owned worker idle timeout. */
   workerIdleTimeoutMs?: number;
-  /** Test override for the grace period before force-killing a worker. */
   workerStopGraceMs?: number;
-  /** Test override for the per-plugin active-call admission count. */
   maxActiveCallsPerPlugin?: number;
-  /** Test override for the per-plugin active-call input-byte budget. */
   maxActiveCallInputBytesPerPlugin?: number;
 }
 
@@ -154,11 +147,6 @@ function workerLogContext(worker: WorkerState): Record<string, unknown> {
   };
 }
 
-// Resolve the worker entry relative to this module's runtime location. In the
-// packaged app this file is bundled into daemon-bundle.mjs, so the emitted
-// worker bundle (bb-plugin-host-worker.mjs, see scripts/bundle-manifest.mjs)
-// sits beside it in dist/. Built-but-unbundled output has the `.js` sibling,
-// and dev runs from the `.ts` source (forked children inherit `--import tsx`).
 function defaultWorkerEntryPath(): string {
   const candidates = [
     "./bb-plugin-host-worker.mjs",
@@ -227,7 +215,6 @@ function observeBoundedStderr(
   source.on("end", emit);
 }
 
-/** Keep an expected teardown race from becoming an unhandled IPC error. */
 function sendToWorker(child: ChildProcess, message: object): boolean {
   if (!child.connected) return false;
   try {
@@ -378,7 +365,6 @@ export class PluginHostManager {
     );
   }
 
-  /** Retire workers missing from the server's authoritative reconnect snapshot. */
   async reconcileGenerations(
     activeGenerations: readonly {
       pluginId: string;
@@ -463,11 +449,9 @@ export class PluginHostManager {
     let child: ChildProcess;
     try {
       child = fork(
-        this.options.workerEntryPath ?? defaultWorkerEntryPath(),
+        defaultWorkerEntryPath(),
         [artifactPath, command.pluginId, command.generation, dataDir, tempDir],
         {
-          // Same answer every daemon-spawned child gets, plus the user's
-          // login-shell PATH so a host plugin can find their executables.
           env: sanitizeInheritedChildProcessEnv({
             env: process.env,
             ...(shellPath !== undefined ? { shellPath } : {}),

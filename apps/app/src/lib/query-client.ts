@@ -14,12 +14,13 @@ import {
   TRANSIENT_READ_RETRY_DELAY_MS,
 } from "@/hooks/queries/query-helpers";
 
-export interface CreateAppQueryClientOptions {
+interface CreateAppQueryClientOptions {
   defaultOptions?: QueryClientConfig["defaultOptions"];
   showMutationErrorToasts?: boolean;
+  shouldRefetchOnWindowFocus?: () => boolean;
 }
 
-export interface AppQueryClientBrowserEventCleanup {
+interface AppQueryClientBrowserEventCleanup {
   cleanup: () => void;
 }
 
@@ -47,16 +48,6 @@ function installAppFocusEvents(): void {
   });
 }
 
-/**
- * Suspend cancels in-flight fetches; resume restarts only those. Catch-up
- * after a resume is otherwise owned by the realtime layer: `WebSocketManager`
- * probes or reconnects the socket when the document becomes visible or the
- * network returns, the reconnect wave refetches every realtime query whose
- * data predates the disconnect watermark, and change events merged while
- * hidden flush as one wave on visible. A separate resume invalidation of the
- * active thread bundle used to run here as well; it duplicated that wave on
- * every phone app switch and is gone.
- */
 export function installAppQueryClientBrowserEvents(
   queryClient: QueryClient,
 ): AppQueryClientBrowserEventCleanup {
@@ -108,6 +99,7 @@ export function createAppQueryClient(
 
   const defaultOptions = options.defaultOptions;
   const showMutationErrorToasts = options.showMutationErrorToasts ?? true;
+  const shouldRefetchOnWindowFocus = options.shouldRefetchOnWindowFocus;
 
   return new QueryClient({
     mutationCache: new MutationCache({
@@ -116,7 +108,6 @@ export function createAppQueryClient(
           return;
         }
 
-        // Set `showErrorToast: false` when the call site handles mutation errors itself.
         const meta = getMutationErrorMeta(mutation.meta);
         if (meta.showErrorToast === false) {
           return;
@@ -133,7 +124,14 @@ export function createAppQueryClient(
       ...defaultOptions,
       queries: {
         staleTime: 2000,
-        refetchOnWindowFocus: true,
+        refetchOnWindowFocus:
+          shouldRefetchOnWindowFocus === undefined
+            ? true
+            : () => shouldRefetchOnWindowFocus(),
+        refetchOnReconnect:
+          shouldRefetchOnWindowFocus === undefined
+            ? true
+            : () => shouldRefetchOnWindowFocus(),
         retry: shouldRetryTransientReadQuery,
         retryDelay: TRANSIENT_READ_RETRY_DELAY_MS,
         ...defaultOptions?.queries,

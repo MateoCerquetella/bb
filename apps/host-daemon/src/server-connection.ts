@@ -24,6 +24,7 @@ import {
   type ReconnectingWebSocketLike,
   type ServerConnectionOptions,
 } from "./server-connection-support.js";
+import { isLikelySystemSuspensionDelay } from "./system-suspension.js";
 import { normalizeCaughtError, runtimeErrorLogFields } from "./error-utils.js";
 import { ServerResponseError } from "./server-client.js";
 
@@ -66,10 +67,12 @@ export interface HandleServerSessionInvalidatedArgs {
   source: ServerSessionInvalidationSource;
 }
 
+type SessionCloseHandler = (
+  reason: HostDaemonSessionCloseReason,
+) => void | Promise<void>;
+
 const SERVER_MESSAGE_PAYLOAD_PREVIEW_CHARS = 512;
 const TERMINAL_SOCKET_HIGH_WATER_BYTES = 1024 * 1024;
-// A 16 MiB raw burst expands to about 21.4 MiB as base64 + JSON. Keep
-// enough bounded headroom for that workload while preventing unbounded growth.
 const TERMINAL_SOCKET_MAX_QUEUE_BYTES = 32 * 1024 * 1024;
 const TERMINAL_SOCKET_DRAIN_POLL_MS = 10;
 
@@ -78,14 +81,6 @@ interface PendingTerminalSocketPayload {
   payload: string;
 }
 
-/**
- * Returns the dedup key for messages that survive a disconnect, or null for
- * message kinds that are dropped when the websocket is down. Buffered
- * messages coalesce per key to the latest value and replay in insertion
- * order after reconnect. To make a new message kind recoverable, add a case
- * here — buffering, success-clearing, shutdown clearing, and flushing all
- * key off this function.
- */
 function recoverableMessageKey(
   message: HostDaemonDaemonWsMessage,
 ): string | null {
@@ -124,8 +119,6 @@ function isTerminalDaemonLifecycleMessage(
 function summarizeServerMessagePayload(
   data: unknown,
 ): ServerMessagePayloadSummary {
-  // Authenticated server-protocol payloads are useful diagnostics; keep the
-  // preview bounded so malformed messages cannot flood logs.
   const text = decodeWebSocketMessageData(data);
   return {
     payloadLength: text.length,
@@ -136,22 +129,15 @@ function summarizeServerMessagePayload(
 
 export class ServerConnection {
   private readonly createWebSocket: CreateReconnectingWebSocket;
-  private readonly minReconnectionDelay: number;
-  private readonly maxReconnectionDelay: number;
-  private readonly reconnectionDelayGrowFactor: number;
-  private readonly connectionTimeout: number;
   private readonly startupTimeoutMs: number;
-  private readonly setTimeoutFn: typeof setTimeout;
-  private readonly clearTimeoutFn: typeof clearTimeout;
-  private readonly setIntervalFn: typeof setInterval;
-  private readonly clearIntervalFn: typeof clearInterval;
 
   private session: HostDaemonSessionOpenResponse | null = null;
   private websocket: ReconnectingWebSocketLike | null = null;
   private heartbeatInterval: ReturnType<typeof setInterval> | null = null;
+  private lastHeartbeatAcknowledgedAt: number | null = null;
   private lastHeartbeatTickAt: number | null = null;
   private stopped = false;
-  private sessionCloseHandler: ServerConnectionOptions["onSessionClose"];
+  private sessionCloseHandler: SessionCloseHandler | undefined;
   private fatalConnectError: ServerResponseError | null = null;
   private protocolMismatchObserved = false;
   private sessionInvalidationInProgress = false;
@@ -166,24 +152,10 @@ export class ServerConnection {
   >();
 
   constructor(private readonly options: ServerConnectionOptions) {
-    this.sessionCloseHandler = options.onSessionClose;
     this.createWebSocket =
       options.createWebSocket ?? createDefaultReconnectingWebSocket;
-    this.minReconnectionDelay =
-      options.minReconnectionDelay ?? DEFAULT_MIN_RECONNECTION_DELAY;
-    this.maxReconnectionDelay =
-      options.maxReconnectionDelay ?? DEFAULT_MAX_RECONNECTION_DELAY;
-    this.reconnectionDelayGrowFactor =
-      options.reconnectionDelayGrowFactor ??
-      DEFAULT_RECONNECTION_DELAY_GROW_FACTOR;
-    this.connectionTimeout =
-      options.connectionTimeout ?? DEFAULT_CONNECTION_TIMEOUT_MS;
     this.startupTimeoutMs =
       options.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS;
-    this.setTimeoutFn = options.setTimeoutFn ?? setTimeout;
-    this.clearTimeoutFn = options.clearTimeoutFn ?? clearTimeout;
-    this.setIntervalFn = options.setIntervalFn ?? setInterval;
-    this.clearIntervalFn = options.clearIntervalFn ?? clearInterval;
   }
 
   get sessionId(): string | null {
@@ -205,7 +177,6 @@ export class ServerConnection {
     if (this.websocket) {
       const websocket = this.websocket;
       this.websocket = null;
-      // Suppress handlers so an intentional close cannot start reconnect work.
       websocket.onmessage = null;
       websocket.onclose = null;
       websocket.close();
@@ -235,10 +206,6 @@ export class ServerConnection {
       isTerminalDaemonLifecycleMessage(parsed) &&
       this.pendingTerminalSocketPayloads.length > 0
     ) {
-      // Lifecycle replies cannot survive a daemon-session replacement. Push
-      // bounded output into the WebSocket's own ordered buffer before sending
-      // opened/replay/exited, rather than acknowledging an in-memory queue
-      // that would be discarded on reconnect.
       this.flushTerminalSocketPayloads(true);
       if (
         this.pendingTerminalSocketPayloads.length > 0 ||
@@ -290,7 +257,7 @@ export class ServerConnection {
     if (this.terminalSocketDrainTimeout !== null) {
       return;
     }
-    this.terminalSocketDrainTimeout = this.setTimeoutFn(() => {
+    this.terminalSocketDrainTimeout = setTimeout(() => {
       this.terminalSocketDrainTimeout = null;
       this.flushTerminalSocketPayloads(false);
     }, TERMINAL_SOCKET_DRAIN_POLL_MS);
@@ -334,16 +301,14 @@ export class ServerConnection {
 
   private clearTerminalSocketPayloads(): void {
     if (this.terminalSocketDrainTimeout !== null) {
-      this.clearTimeoutFn(this.terminalSocketDrainTimeout);
+      clearTimeout(this.terminalSocketDrainTimeout);
       this.terminalSocketDrainTimeout = null;
     }
     this.pendingTerminalSocketPayloads.length = 0;
     this.pendingTerminalSocketBytes = 0;
   }
 
-  setSessionCloseHandler(
-    handler: ServerConnectionOptions["onSessionClose"],
-  ): void {
+  setSessionCloseHandler(handler: SessionCloseHandler | undefined): void {
     this.sessionCloseHandler = handler;
   }
 
@@ -380,6 +345,7 @@ export class ServerConnection {
         hostType: this.options.hostType,
         connectMachineId: this.options.connectMachineId,
         dataDir: this.options.dataDir,
+        localApiPort: this.options.localApiPort,
         activeThreads: this.options.getActiveThreads?.() ?? [],
         loadedEnvironments: this.options.getLoadedEnvironments?.() ?? [],
       });
@@ -446,10 +412,10 @@ export class ServerConnection {
         return this.buildWebSocketUrl(sessionId);
       },
       {
-        minReconnectionDelay: this.minReconnectionDelay,
-        maxReconnectionDelay: this.maxReconnectionDelay,
-        reconnectionDelayGrowFactor: this.reconnectionDelayGrowFactor,
-        connectionTimeout: this.connectionTimeout,
+        minReconnectionDelay: DEFAULT_MIN_RECONNECTION_DELAY,
+        maxReconnectionDelay: DEFAULT_MAX_RECONNECTION_DELAY,
+        reconnectionDelayGrowFactor: DEFAULT_RECONNECTION_DELAY_GROW_FACTOR,
+        connectionTimeout: DEFAULT_CONNECTION_TIMEOUT_MS,
         headers: {
           authorization: buildHostDaemonWebSocketAuthorizationHeader(
             this.options.hostKey,
@@ -470,7 +436,7 @@ export class ServerConnection {
       let settled = false;
       let hasOpened = false;
 
-      const startupTimer = this.setTimeoutFn(() => {
+      const startupTimer = setTimeout(() => {
         if (this.protocolMismatchObserved) {
           return;
         }
@@ -486,7 +452,7 @@ export class ServerConnection {
           return;
         }
         settled = true;
-        this.clearTimeoutFn(startupTimer);
+        clearTimeout(startupTimer);
         void this.shutdown();
         reject(normalizeCaughtError(error));
       };
@@ -502,7 +468,7 @@ export class ServerConnection {
         const handleOpen = async () => {
           hasOpened = true;
           this.sessionInvalidationInProgress = false;
-          this.clearTimeoutFn(startupTimer);
+          clearTimeout(startupTimer);
           this.resetHeartbeat();
           this.options.setSession?.(session);
           this.options.logger.info(
@@ -570,8 +536,6 @@ export class ServerConnection {
   }
 
   private flushPendingRecoverableMessages(): void {
-    // Snapshot before sending: each send mutates the map (delete on
-    // success, re-set on failure), so don't iterate it live.
     for (const message of Array.from(
       this.pendingRecoverableMessages.values(),
     )) {
@@ -623,6 +587,13 @@ export class ServerConnection {
 
     if (message.data.type === "session-close") {
       this.handleSessionCloseMessage(message.data.reason);
+      return;
+    }
+
+    if (message.data.type === "heartbeat-ack") {
+      if (this.session !== null) {
+        this.lastHeartbeatAcknowledgedAt = Date.now();
+      }
       return;
     }
 
@@ -744,8 +715,10 @@ export class ServerConnection {
       return;
     }
 
-    this.lastHeartbeatTickAt = Date.now();
-    this.heartbeatInterval = this.setIntervalFn(() => {
+    const startedAt = Date.now();
+    this.lastHeartbeatAcknowledgedAt = startedAt;
+    this.lastHeartbeatTickAt = startedAt;
+    this.heartbeatInterval = setInterval(() => {
       const session = this.session;
       if (!session) {
         return;
@@ -755,7 +728,25 @@ export class ServerConnection {
       if (lastTickAt !== null) {
         const gapMs = now - lastTickAt;
         const thresholdMs = session.leaseTimeoutMs / 2;
-        if (gapMs > thresholdMs) {
+        if (gapMs > session.leaseTimeoutMs) {
+          this.lastHeartbeatAcknowledgedAt = now;
+        }
+        const resumedAfterSuspension = isLikelySystemSuspensionDelay({
+          gapMs,
+          intervalMs: session.heartbeatIntervalMs,
+        });
+        if (resumedAfterSuspension) {
+          this.options.logger.info(
+            {
+              gapMs,
+              heartbeatIntervalMs: session.heartbeatIntervalMs,
+              leaseTimeoutMs: session.leaseTimeoutMs,
+              sessionId: session.sessionId,
+              websocketReadyState: this.websocket?.readyState ?? null,
+            },
+            "Host daemon resumed after likely system suspension",
+          );
+        } else if (gapMs > thresholdMs) {
           this.options.logger.warn(
             {
               gapMs,
@@ -774,16 +765,34 @@ export class ServerConnection {
         return;
       }
 
+      const lastAcknowledgedAt = this.lastHeartbeatAcknowledgedAt;
+      if (
+        lastAcknowledgedAt !== null &&
+        now - lastAcknowledgedAt > session.leaseTimeoutMs
+      ) {
+        this.options.logger.warn(
+          {
+            lastAcknowledgedAt,
+            leaseTimeoutMs: session.leaseTimeoutMs,
+            sessionId: session.sessionId,
+          },
+          "Server heartbeat acknowledgements stopped; reconnecting",
+        );
+        this.clearHeartbeat();
+        this.websocket.reconnect(1013, "heartbeat-ack-timeout");
+        return;
+      }
+
       this.sendMessage({ type: "heartbeat" });
     }, this.session.heartbeatIntervalMs);
   }
 
   private clearHeartbeat(): void {
-    if (!this.heartbeatInterval) {
-      return;
+    if (this.heartbeatInterval) {
+      clearInterval(this.heartbeatInterval);
+      this.heartbeatInterval = null;
     }
-    this.clearIntervalFn(this.heartbeatInterval);
-    this.heartbeatInterval = null;
+    this.lastHeartbeatAcknowledgedAt = null;
     this.lastHeartbeatTickAt = null;
   }
 

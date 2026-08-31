@@ -22,7 +22,7 @@ import {
 
 type FetchLike = typeof fetch;
 
-export interface PluginSourceDetail {
+interface PluginSourceDetail {
   requested: string;
   resolved: string;
   integrity: string | null;
@@ -52,8 +52,7 @@ function toPluginSourceDetail(
   };
 }
 
-/** Null when the plugin is unknown or the server predates the route. */
-export async function fetchPluginSource(
+async function fetchPluginSource(
   fetchImpl: FetchLike,
   pluginId: string,
 ): Promise<PluginSourceDetail | null> {
@@ -96,19 +95,13 @@ export async function installCatalogPlugin(
   return createPluginsClient(fetchImpl).catalog.install(args);
 }
 
-/** The true resolved source an install would use, fetched before confirming. */
-export async function fetchCatalogInstallPlan(
+async function fetchCatalogInstallPlan(
   fetchImpl: FetchLike,
   args: { entryId: string; marketplace?: string },
 ): Promise<PluginCatalogInstallPlan> {
   return createPluginsClient(fetchImpl).catalog.installPlan(args);
 }
 
-/**
- * Resolve an install before the user confirms it. Third-party entries pay a
- * network round trip for the resolved tag and commit, so this never runs until
- * the confirmation is actually open.
- */
 export function useCatalogInstallPlan(
   args: { entryId: string; marketplace?: string } | null,
 ) {
@@ -117,17 +110,13 @@ export function useCatalogInstallPlan(
     queryKey: pluginCatalogInstallPlanQueryKey(request),
     queryFn: () => fetchCatalogInstallPlan(fetch, request),
     enabled: args !== null,
-    // The plan describes one confirmation, and a git range resolves to a
-    // different commit over time: never serve it from cache.
     staleTime: 0,
     gcTime: 0,
     retry: false,
   });
 }
 
-export type PluginMarketplaceEntry = PluginMarketplace;
-
-export async function listPluginMarketplaces(
+async function listPluginMarketplaces(
   fetchImpl: FetchLike,
 ): Promise<PluginMarketplace[]> {
   return createPluginsClient(fetchImpl).marketplaces.list();
@@ -165,12 +154,12 @@ export function usePluginMarketplaces(options: { enabled: boolean }) {
   });
 }
 
-export interface PluginResolvedVersion {
+interface PluginResolvedVersion {
   version: string;
   display: string;
 }
 
-export type PluginUpdatesOutcome = PluginUpdateCheckEntry["outcome"];
+type PluginUpdatesOutcome = PluginUpdateCheckEntry["outcome"];
 
 export interface PluginUpdatesEntry {
   id: string;
@@ -233,20 +222,18 @@ export interface PluginCatalogSearchEntry {
   description: string;
   icon: string | null;
   iconUrl: string | null;
-  /** Mask `iconUrl` with the text color instead of showing its own colors. */
   iconTinted: boolean;
   category: string;
   source: string;
+  repositoryUrl: string | null;
   marketplace: string;
   marketplaceDisplayName: string;
-  /** Stable publisher identity, for grouping; never the label, which a
-   * marketplace chooses for itself. */
   publisherKey: string;
-  /** Publisher badge: the marketplace's name, or `BB Official` when bundled. */
   publisherLabel: string;
   official: boolean;
   author: PluginCatalogAuthor | null;
   installed: boolean;
+  installs: number | null;
   compatible: boolean;
   incompatibleReason: string | null;
 }
@@ -264,6 +251,7 @@ function toPluginCatalogSearchEntry(
     iconTinted: data.iconTinted,
     category: data.category,
     source: data.source,
+    repositoryUrl: data.repositoryUrl,
     marketplace: data.marketplace,
     marketplaceDisplayName: data.marketplaceDisplayName,
     publisherKey: data.publisherKey,
@@ -271,6 +259,7 @@ function toPluginCatalogSearchEntry(
     official: data.official,
     author: data.author,
     installed: data.installed,
+    installs: data.installs,
     compatible: data.compatible,
     incompatibleReason: data.incompatibleReason ?? null,
   };

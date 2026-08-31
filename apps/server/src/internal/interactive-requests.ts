@@ -6,7 +6,12 @@ import {
 } from "@bb/host-daemon-contract";
 import { formatPendingInteractionSubjectDetailLines } from "@bb/core-ui";
 import type { PendingInteraction } from "@bb/domain";
-import { isApprovalPendingInteractionPayload } from "@bb/domain";
+import {
+  isApprovalPendingInteractionPayload,
+  isPluginExtensionInteractionRequestPayload,
+  isUserQuestionPendingInteractionPayload,
+  parseExtensionKind,
+} from "@bb/domain";
 import { getThread, hasStoredTurnStarted } from "@bb/db";
 import { isParentNotifiableChildThread } from "../services/threads/thread-parent.js";
 import type { Hono } from "hono";
@@ -30,8 +35,14 @@ const CHILD_THREAD_BLOCKER_SUMMARY_TRUNCATION_MARKER =
 function pendingInteractionBlockerLabel(
   interaction: PendingInteraction,
 ): string {
-  if (!isApprovalPendingInteractionPayload(interaction.payload)) {
+  if (isUserQuestionPendingInteractionPayload(interaction.payload)) {
     return "user question";
+  }
+  if (isPluginExtensionInteractionRequestPayload(interaction.payload)) {
+    return `${parseExtensionKind(interaction.payload.kind).pluginId} request`;
+  }
+  if (!isApprovalPendingInteractionPayload(interaction.payload)) {
+    return "plugin request";
   }
   switch (interaction.payload.subject.kind) {
     case "command":
@@ -42,6 +53,8 @@ function pendingInteractionBlockerLabel(
       return "permission grant";
     case "plan":
       return "plan review";
+    case "tool_use":
+      return "tool-use approval";
     default: {
       const exhaustiveCheck: never = interaction.payload.subject;
       return exhaustiveCheck;
@@ -61,10 +74,21 @@ function truncateChildThreadBlockerSummary(summary: string): string {
   return `${summary.slice(0, retainedLength).trimEnd()}${CHILD_THREAD_BLOCKER_SUMMARY_TRUNCATION_MARKER}`;
 }
 
-function buildChildThreadBlockerSummary(
+function pluginFormTitleLines(interaction: PendingInteraction): string[] {
+  const { payload } = interaction;
+  return isApprovalPendingInteractionPayload(payload) ||
+    isUserQuestionPendingInteractionPayload(payload)
+    ? []
+    : [payload.title];
+}
+
+export function buildChildThreadBlockerSummary(
   interaction: PendingInteraction,
 ): string | null {
-  const details = formatPendingInteractionSubjectDetailLines(interaction)
+  const detailLines = formatPendingInteractionSubjectDetailLines(interaction);
+  const details = (
+    detailLines.length > 0 ? detailLines : pluginFormTitleLines(interaction)
+  )
     .map((line) => line.trim())
     .filter((line) => line.length > 0)
     .slice(0, CHILD_THREAD_BLOCKER_SUMMARY_MAX_LINES);
@@ -84,8 +108,6 @@ function requestChildThreadNeedsAttentionNotification(
   args: RequestChildThreadNeedsAttentionNotificationArgs,
 ): void {
   const childThread = getThread(deps.db, args.childThreadId);
-  // Forks / side chats are user-initiated branches the user interacts with
-  // directly, so a needs-attention prompt must not notify their parent.
   if (!childThread || !isParentNotifiableChildThread(childThread)) {
     return;
   }
@@ -138,9 +160,6 @@ export function registerInternalInteractiveRequestRoutes(
         );
       }
 
-      // Daemons must flush provider turn events before every interactive
-      // registration attempt. This precondition keeps the server from
-      // accepting turn-scoped interaction state before turn/started exists.
       const turnStarted = hasStoredTurnStarted(deps.db, {
         threadId: payload.interaction.threadId,
         turnId: payload.interaction.turnId,

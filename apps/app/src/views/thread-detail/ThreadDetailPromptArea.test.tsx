@@ -19,10 +19,11 @@ import {
   within,
 } from "@testing-library/react";
 import type { TimelineWorkflowWorkRow } from "@bb/server-contract";
+import { createDeferredPromise } from "@bb/test-helpers";
 import type { ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { workflowRow } from "@/test/fixtures/thread-timeline-rows";
-import { THREAD_HANDOFF_CREATE_SEED_LOCATION_STATE_KEY } from "@/lib/thread-handoff-request";
+import { THREAD_HANDOFF_CREATE_SEED_LOCATION_STATE_KEY } from "@bb/client-core";
 import { BbHttpError } from "@/lib/sdk";
 import type { PluginComposerHost } from "@/components/plugin/plugin-composer-host";
 import { setComposerTextEffect } from "@/lib/composer-text-effects";
@@ -55,6 +56,7 @@ const mocks = vi.hoisted(() => ({
     setDraft: vi.fn(),
     setTextAndMentions: vi.fn(),
     storageKey: "bb.promptbox.contents-proj_1-thr_1-3",
+    subscribe: vi.fn(() => () => {}),
     text: "",
   },
   queuedMessages: [] as ThreadQueuedMessage[],
@@ -106,6 +108,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       composer: {
         message: string;
         onChangeMessage: (message: string, mentions: []) => void;
+        onEscape?: () => void;
         onSubmit: () => void;
         submitTitle?: string;
         submitMode: { kind: string; reason?: string };
@@ -134,8 +137,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
       }[];
     }) => (
       <div data-testid="follow-up-prompt-box">
-        {/* Mirrors the real stack: plugin banners for the composer scope, then
-          the caller's stack, then the pending interaction (if any). */}
+        {}
         <div data-testid="prompt-stack">
           {pluginComposerHost ? (
             <ComposerBannersSlot
@@ -204,7 +206,7 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
               type="button"
               onClick={() =>
                 pluginComposerHost.setDraft({
-                  ...pluginComposerHost.draft,
+                  ...pluginComposerHost.getCurrent(),
                   text: "Plugin-enhanced queued message",
                 })
               }
@@ -249,6 +251,11 @@ vi.mock("@/components/promptbox/FollowUpPromptBox", async () => {
             <button type="button" onClick={composer.onSubmit}>
               Submit composer
             </button>
+            {composer.onEscape ? (
+              <button type="button" onClick={composer.onEscape}>
+                Escape composer
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={() =>
@@ -422,10 +429,6 @@ vi.mock("@/hooks/useCommandSuggestions", () => ({
     suggestions: [],
     trigger: null,
   }),
-}));
-
-vi.mock("@/hooks/useEscapeToHide", () => ({
-  useEscapeToHide: () => undefined,
 }));
 
 vi.mock("@/hooks/usePromptDraftStorage", () => ({
@@ -699,7 +702,6 @@ function buildPromptAreaElement({
       modelFallback={modelFallback}
       isEnvironmentActionPending={false}
       onChangedFileClick={vi.fn()}
-      openThreadDiffPanel={vi.fn()}
       parentThreadSection={null}
       pendingInteractions={pendingInteractions}
       pendingInteractionsInitialLoading={pendingInteractionsInitialLoading}
@@ -723,16 +725,6 @@ function buildPromptAreaElement({
 
 function renderPromptArea(options: RenderPromptAreaOptions = {}) {
   return render(buildPromptAreaElement(options));
-}
-
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  let reject!: (reason?: unknown) => void;
-  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
-    resolve = resolvePromise;
-    reject = rejectPromise;
-  });
-  return { promise, reject, resolve };
 }
 
 beforeEach(() => {
@@ -856,6 +848,16 @@ describe("ThreadDetailPromptArea", () => {
       }),
     );
     expect(onCancel).toHaveBeenCalledTimes(1);
+
+    expect(
+      within(bottomComposer!).queryByRole("button", {
+        name: "Escape composer",
+      }),
+    ).toBeNull();
+    fireEvent.click(
+      inlineEditor.getByRole("button", { name: "Escape composer" }),
+    );
+    expect(onCancel).toHaveBeenCalledTimes(2);
   });
 
   it("blocks a staged sent-message edit when the thread becomes ineligible", () => {
@@ -1322,7 +1324,7 @@ describe("ThreadDetailPromptArea", () => {
   });
 
   it("does not attach a delayed queued upload to a later edit or the bottom draft", async () => {
-    const upload = deferred<{
+    const upload = createDeferredPromise<{
       mimeType: string;
       name: string;
       path: string;
@@ -1361,7 +1363,7 @@ describe("ThreadDetailPromptArea", () => {
   });
 
   it("keeps a delayed bottom upload owned by the bottom draft", async () => {
-    const upload = deferred<{
+    const upload = createDeferredPromise<{
       mimeType: string;
       name: string;
       path: string;
@@ -1485,7 +1487,6 @@ describe("ThreadDetailPromptArea", () => {
       "rfn-pass-a-balance",
     ]);
 
-    // Expanding one workflow must not expand its concurrent sibling.
     fireEvent.click(cards[1]!);
     expect(
       screen
@@ -1565,13 +1566,10 @@ describe("ThreadDetailPromptArea", () => {
     expect(screen.queryByRole("button", { name: "Editor action" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Prompt actions" })).toBeNull();
     expect(document.querySelector(".pending-rule")).toBeNull();
-    // The composer is retained (blocked, hidden) rather than swapped out, so
-    // approving does not rebuild the editor.
     expect(screen.getByTestId("composer-hidden").textContent).toBe("true");
     expect(screen.getByTestId("submit-mode").textContent).toBe(
       "blocked:pending-interaction",
     );
-    // The reduced pending stack keeps the queued drawer and todo card out.
     expect(screen.queryByTestId("queued-message-list")).toBeNull();
   });
 
@@ -1624,7 +1622,7 @@ describe("ThreadDetailPromptArea", () => {
       screen
         .getAllByTestId("composer-stack-item")
         .map((item) => item.textContent),
-    ).toEqual(["Plan banner", "Goal banner", "Plugin pending interaction"]);
+    ).toEqual(["Plan banner", "Goal banner", "Pending interaction"]);
   });
 
   it("selects the provider fallback model for the next turn", () => {

@@ -47,38 +47,16 @@ import { Button } from "@bb/shared-ui/button";
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
 import { CheckboxField, DEFAULT_COLOR } from "./shared.js";
-
-export const STATUS_LABELS: Record<TaskStatus, string> = {
-  backlog: "Backlog",
-  todo: "Todo",
-  in_progress: "In Progress",
-  in_review: "In Review",
-  done: "Done",
-  canceled: "Canceled",
-};
-
-export const PRIORITY_LABELS: Record<TaskPriority, string> = {
-  urgent: "Urgent",
-  high: "High",
-  medium: "Medium",
-  low: "Low",
-  none: "No priority",
-};
+import { PRIORITY_LABELS, STATUS_LABELS } from "../list/lib.js";
 
 const CHIP_TRIGGER =
   "h-7 w-auto gap-1.5 rounded-md px-2 text-xs text-muted-foreground";
 
-export interface NewTaskDialogProps {
+interface NewTaskDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  /** Pre-selected project, or null when opened from All tasks / Active. */
   projectId: string | null;
-  /** Status the new task starts in, e.g. the board column that opened the dialog. */
   defaultStatus?: TaskStatus;
-  /**
-   * When set the dialog opens as "Add sub-task" with this parent pre-selected
-   * and the project locked to the parent's (sub-tasks must share it).
-   */
   defaultParentTaskId?: string;
 }
 
@@ -111,13 +89,10 @@ export function NewTaskDialog({
   const [labelQuery, setLabelQuery] = useState("");
   const [creatingLabel, setCreatingLabel] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<StagedAttachment[]>([]);
-  // Set once createTask succeeded but some attachment uploads failed: the
-  // dialog switches to a recovery view so nothing is double-created or lost.
   const [createdTask, setCreatedTask] = useState<Task | null>(null);
   const titleRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Each open starts a fresh draft seeded from the invoking context.
   useEffect(() => {
     if (!open) return;
     setSelectedProjectId(projectId);
@@ -132,7 +107,7 @@ export function NewTaskDialog({
     setPendingFiles([]);
     setCreatedTask(null);
     setError(null);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [open]);
 
   const projectList = projects.data ?? [];
@@ -167,8 +142,6 @@ export function NewTaskDialog({
 
   const changeProject = (id: string) => {
     setSelectedProjectId(id);
-    // Labels and parents are project-scoped; keeping them would trip the
-    // server's project-mismatch checks.
     setLabelIds([]);
     if (!subtaskMode) setParentTaskId(null);
   };
@@ -180,7 +153,6 @@ export function NewTaskDialog({
         : [...current, labelId],
     );
 
-  // Inline label creation from the picker when the query matches nothing.
   const createLabelFromQuery = async () => {
     const name = labelQuery.trim();
     if (!name || effectiveProjectId === null || creatingLabel) return;
@@ -205,8 +177,6 @@ export function NewTaskDialog({
     }
   };
 
-  // The submit flow snapshots pendingFiles, so the tray is frozen while a
-  // create/upload pass runs: nothing may be staged or removed mid-flight.
   const stageMore = (files: File[]) => {
     if (files.length === 0 || submitting || createdTask !== null) return;
     setPendingFiles((current) => [...current, ...stageFiles(files)]);
@@ -217,8 +187,6 @@ export function NewTaskDialog({
     setPendingFiles((files) => files.filter((entry) => entry.id !== id));
   };
 
-  // Synchronous single-flight guard: double-activating Retry before React
-  // re-renders must not upload (and attach) the same file twice.
   const retryingRef = useRef(new Set<number>());
   const retryUpload = async (entry: StagedAttachment) => {
     if (entry.owner === undefined || retryingRef.current.has(entry.id)) return;
@@ -252,22 +220,16 @@ export function NewTaskDialog({
     navigation.go({ kind: "task", taskKey: task.key });
   };
 
-  // While recovery chips are pending, Escape/overlay/close must not discard
-  // them silently — leaving requires the explicit skip action below.
   const requestClose = (next: boolean) => {
     if (!next && createdTask !== null && pendingFiles.length > 0) return;
     onOpenChange(next);
   };
 
-  // Recovery resolves itself: once every failed upload was retried or
-  // explicitly removed, the created task opens like a normal success.
   useEffect(() => {
     if (createdTask && pendingFiles.length === 0) finish(createdTask);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [createdTask, pendingFiles.length]);
 
-  // Oversized chips must be removed first — creating around them would
-  // silently drop files the user staged.
   const hasOversized = pendingFiles.some(
     (entry) => entry.status === "oversized",
   );
@@ -297,8 +259,6 @@ export function NewTaskDialog({
         setError(result.error.message);
         return;
       }
-      // The task now exists; upload the staged files to it. Failures become
-      // retryable chips bound to the created task instead of vanishing.
       const staged = pendingFiles.filter((entry) => entry.status === "staged");
       const failed: StagedAttachment[] = [];
       for (const entry of staged) {
@@ -314,8 +274,6 @@ export function NewTaskDialog({
         }
       }
       if (failed.length > 0) {
-        // Uploaded entries leave the tray; failures come back as retryable
-        // chips. Oversized (never-sendable) chips stay visible for removal.
         setPendingFiles((files) =>
           files.flatMap((entry) => {
             const failure = failed.find(
@@ -370,8 +328,6 @@ export function NewTaskDialog({
           }
         }}
         onPaste={(event) => {
-          // The description editor stages files itself (and prevents the
-          // default); this catches pastes everywhere else in the dialog.
           if (event.defaultPrevented || submitting || createdTask !== null)
             return;
           const files = [...(event.clipboardData?.files ?? [])];
@@ -428,8 +384,6 @@ export function NewTaskDialog({
             value={title}
             onChange={(event) => setTitle(event.target.value)}
             onKeyDown={(event) => {
-              // Plain Enter submits from the title (Cmd/Ctrl+Enter works
-              // anywhere in the dialog via the DialogContent handler).
               if (event.key === "Enter" && !event.nativeEvent.isComposing) {
                 event.preventDefault();
                 void submit();
@@ -682,9 +636,7 @@ export function NewTaskDialog({
                 label="Create more"
               />
               <div className="flex items-center gap-1.5">
-                {/* Same muted icon-only affordance as the detail editor and
-                    comment composer; lives beside the primary action so the
-                    chip row never wraps just for it. */}
+                {}
                 <button
                   type="button"
                   title="Attach files"

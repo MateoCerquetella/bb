@@ -10,7 +10,7 @@ const LABEL = "Alpha";
 function AlphaThreadList({
   activeProjectId,
   activeThreadId,
-  experimental_Original: Original,
+  Original,
   searchQuery,
 }: PluginThreadListProps) {
   const [embedOriginal, setEmbedOriginal] = useState(false);
@@ -51,11 +51,7 @@ function AlphaThreadList({
   );
 }
 
-function AlphaFileOpener({
-  experimental_Original: Original,
-  path,
-  source,
-}: PluginFileOpenerProps) {
+function AlphaFileOpener({ Original, path, source }: PluginFileOpenerProps) {
   const [embedOriginal, setEmbedOriginal] = useState(false);
   const [shouldCrash, setShouldCrash] = useState(false);
   if (shouldCrash) throw new Error("Alpha file-opener test crash");

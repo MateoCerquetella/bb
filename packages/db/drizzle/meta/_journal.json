@@ -715,6 +715,62 @@
       "when": 1787108435805,
       "tag": "0101_thread_search_prefix_fts",
       "breakpoints": true
+    },
+    {
+      "idx": 102,
+      "version": "6",
+      "when": 1787163393338,
+      "tag": "0102_app_settings_key_value",
+      "breakpoints": true
+    },
+    {
+      "idx": 103,
+      "version": "6",
+      "when": 1787181956957,
+      "tag": "0103_wandering_mongoose",
+      "breakpoints": true
+    },
+    {
+      "idx": 104,
+      "version": "6",
+      "when": 1787212680694,
+      "tag": "0104_chunky_redwing",
+      "breakpoints": true
+    },
+    {
+      "idx": 105,
+      "version": "6",
+      "when": 1787288444172,
+      "tag": "0105_provider_settings_to_plugins",
+      "breakpoints": true
+    },
+    {
+      "idx": 106,
+      "version": "6",
+      "when": 1787305850786,
+      "tag": "0106_thread_state_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 107,
+      "version": "6",
+      "when": 1787331095369,
+      "tag": "0107_kind_based_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 108,
+      "version": "6",
+      "when": 1787613751578,
+      "tag": "0108_deferred_thread_messages",
+      "breakpoints": true
+    },
+    {
+      "idx": 109,
+      "version": "6",
+      "when": 1787680413251,
+      "tag": "0109_marketplace_install_stats",
+      "breakpoints": true
     }
   ]
 }

@@ -55,6 +55,19 @@
     overscroll-behavior-y: none;
   }
 
+  /*
+   * App chrome (sidebar, page headers, composer toolbars) opts out of text
+   * selection with `select-none` so drags and Select All only pick up
+   * content. `user-select: auto` resolves from the parent, so WebKit would
+   * carry that opt-out into editable controls inside those regions (the
+   * inline thread-title rename, for example) and refuse to select their text.
+   * Restore native selection on the controls themselves.
+   */
+  .select-none
+    :where(input, textarea, [contenteditable]:not([contenteditable="false"])) {
+    user-select: text;
+  }
+
   .chat-prompt-box {
     padding-bottom: 0.5rem;
   }
@@ -434,16 +447,12 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    ) {
+    [data-promptbox]:not([data-promptbox-voice-active]) {
     overflow: hidden;
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-action-row] {
     position: absolute;
     inset-block: 0;
@@ -453,25 +462,19 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-main] {
     height: 3rem;
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-expanded-only] {
     display: none !important;
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-scroll] {
     height: 3rem !important;
     min-height: 3rem !important;
@@ -483,9 +486,7 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content] {
     display: flex;
     align-items: center;
@@ -493,9 +494,7 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable] {
     width: 100%;
@@ -507,16 +506,12 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     > *,
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     :where(blockquote, h1, h2, h3, h4, h5, h6, li, ol, p, ul) {
@@ -533,26 +528,20 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     > *
     + *::before,
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     :where(blockquote, li)
     > *
     + *::before,
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     :where(ol, ul)
@@ -562,9 +551,7 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     br {
@@ -573,9 +560,7 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror[contenteditable]
     br::after {
@@ -583,9 +568,7 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .prompt-mention-pill
     > span:last-child {
@@ -593,9 +576,7 @@
   }
 
   [data-follow-up-composer]:not([data-follow-up-composer-expanded])
-    [data-promptbox]:not([data-promptbox-zen]):not(
-      [data-promptbox-voice-active]
-    )
+    [data-promptbox]:not([data-promptbox-voice-active])
     [data-promptbox-editor-content]
     .ProseMirror
     p.is-editor-empty:first-child::before {
@@ -744,7 +725,7 @@
   }
 }
 
-/* Briefly highlight a conversation message that a sidebar search result
+/* Briefly highlight a conversation message that a thread-search result
  * deep-links to, then fade back to transparent. */
 @keyframes bb-search-flash {
   from {

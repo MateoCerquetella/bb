@@ -1,3 +1,7 @@
+import type { ThreadEvent } from "@bb/domain";
+import { z } from "zod";
+import type { BridgeDeltaEventCollector } from "../testing/bridge-delta-assembly.js";
+import { THREAD_DELTA_NOTIFICATION_METHOD } from "../thread-delta.js";
 import type { BridgeConformanceTransport } from "./types.js";
 
 export interface JsonRpcWireMessage {
@@ -6,31 +10,48 @@ export interface JsonRpcWireMessage {
   method?: string;
   params?: unknown;
   result?: unknown;
-  error?: { code?: unknown; message?: unknown };
+  error?: { code?: unknown; message?: unknown; data?: unknown };
+}
+
+export interface AssembledConformanceEvent {
+  threadId: string;
+  event: ThreadEvent;
+  logIndex: number;
 }
 
 function isWireMessage(value: unknown): value is JsonRpcWireMessage {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/**
- * A polling JSON-RPC client over a conformance transport. Accumulates every
- * message the bridge emits (responses, notifications, bridge-initiated
- * requests) into one ordered log so grammar checks can assert sequences.
- */
+const threadDeltaAddressSchema = z
+  .object({ threadId: z.string() })
+  .passthrough();
+
 export class ConformanceClient {
   private nextId = 1;
   readonly log: JsonRpcWireMessage[] = [];
+  readonly events: AssembledConformanceEvent[] = [];
 
   constructor(
     private readonly transport: BridgeConformanceTransport,
     private readonly timeoutMs: number,
+    private readonly collector: BridgeDeltaEventCollector,
   ) {}
 
   drainIntoLog(): void {
     for (const raw of this.transport.takeMessages()) {
-      if (isWireMessage(raw)) {
-        this.log.push(raw);
+      if (!isWireMessage(raw)) {
+        continue;
+      }
+      const logIndex = this.log.length;
+      this.log.push(raw);
+      if (raw.method !== THREAD_DELTA_NOTIFICATION_METHOD) {
+        continue;
+      }
+      const events = this.collector.assembleMessage(raw);
+      const address = threadDeltaAddressSchema.parse(raw.params);
+      for (const event of events) {
+        this.events.push({ threadId: address.threadId, event, logIndex });
       }
     }
   }
@@ -63,7 +84,6 @@ export class ConformanceClient {
     return id;
   }
 
-  /** Poll until `resolve` yields a value or the deadline passes (→ null). */
   async waitFor<T>(resolve: () => T | undefined): Promise<T | null> {
     const deadline = Date.now() + this.timeoutMs;
     for (;;) {
@@ -87,7 +107,6 @@ export class ConformanceClient {
     );
   }
 
-  /** A settle window: drain for the given quiet period without expectations. */
   async settle(quietMs: number): Promise<void> {
     const deadline = Date.now() + quietMs;
     while (Date.now() < deadline) {
@@ -115,10 +134,6 @@ export class ConformanceClient {
 
 let clientRequestCounter = 0;
 
-/**
- * Deterministic valid `creq_` ids for kit-driven turns (the id alphabet
- * excludes ambiguous characters; randomness is unnecessary here).
- */
 export function nextConformanceClientRequestId(): string {
   const alphabet = "23456789abcdefghijkmnpqrstuvwxyz";
   clientRequestCounter += 1;

@@ -11,6 +11,7 @@ import {
 } from "@bb/db";
 import { PERSONAL_PROJECT_ID } from "@bb/domain";
 import type { Logger } from "@bb/logger";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginServiceDeps,
@@ -106,6 +107,7 @@ describe("plugin bb.sdk bind gate", () => {
     disposePluginHost.mockClear();
     pluginHostArtifacts = new PluginHostArtifactRegistry();
     service = createPluginService({
+      aiServices: createAiServiceRegistry(),
       telemetry: createNoopTelemetryService(),
       db,
       pluginHostArtifacts,
@@ -246,8 +248,6 @@ describe("plugin bb.sdk bind gate", () => {
     client.experimental_onSignal("changed", signalHandler);
     const artifact = callPluginHost.mock.calls[0]?.[0].artifact;
     if (artifact === undefined) throw new Error("missing host artifact call");
-    // The one live-artifact registry is what the internal route serves from,
-    // so what the RPC call names must be exactly what a daemon can fetch.
     const servedArtifact = pluginHostArtifacts.get("host-client");
     if (servedArtifact === undefined)
       throw new Error("missing served artifact");
@@ -447,7 +447,6 @@ describe("plugin bb.sdk against a running server", () => {
       expect(entry.status).toBe("running");
       const api = requireApi(server.pluginService, "spawner");
 
-      // A plain read proves the loopback SDK reaches this server instance.
       const projects = await api.sdk.projects.list();
       expect(projects.map((p) => p.id)).toContain(project.id);
       expect(projects.map((p) => p.id)).not.toContain(PERSONAL_PROJECT_ID);
@@ -478,8 +477,6 @@ describe("plugin bb.sdk against a running server", () => {
         ]),
       );
 
-      // Spawn with the server-resolved default environment. The plugin api
-      // must fill in origin "plugin" + its own id without being asked.
       const thread = await api.sdk.threads.spawn({
         projectId: project.id,
         prompt: "spawned from a plugin",
@@ -544,7 +541,7 @@ describe("plugin bb.sdk against a running server", () => {
           mode: "auto",
           input: [{ type: "text", text: "Continue", mentions: [] }],
         }),
-      ).resolves.toEqual({ ok: true });
+      ).resolves.toEqual({ ok: true, delivery: "sent" });
       const stopPromise = api.sdk.threads.stop({ threadId: operable.id });
       const stop = await waitForQueuedCommand(
         server,

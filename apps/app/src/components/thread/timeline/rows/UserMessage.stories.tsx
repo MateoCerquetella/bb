@@ -1,4 +1,5 @@
 import type { TimelineConversationAttachments } from "@bb/server-contract";
+import type { ThreadTimelinePluginMessageAction } from "@/components/thread/timeline/types";
 import type { PromptMentionResource, PromptTextMention } from "@bb/domain";
 import type { TimelineTitleLink } from "@bb/thread-view";
 import { renderTemplate } from "@bb/templates";
@@ -16,9 +17,6 @@ export default {
   title: "thread/timeline/rows/User Message",
 };
 
-// Match production: ThreadTimelinePane's PageShell content area caps at
-// 760px. Without it the message bubble stretches the full row width and
-// doesn't reflect what users see.
 interface TimelineStageProps {
   children: ReactNode;
   revealMessageActions?: boolean;
@@ -39,8 +37,6 @@ function TimelineStage({
   );
 }
 
-// Resolves placecats URLs (which are already absolute) and falls through for
-// project-relative paths the same way the production resolver would.
 const resolveImageSrc = (path: string) => path;
 
 function resolveThreadLink(link: TimelineTitleLink): string | null {
@@ -72,6 +68,7 @@ const acceptedSteer = {
   kind: "steer" as const,
   status: "accepted" as const,
 };
+const handleStoryMessageEdit = () => undefined;
 
 interface StoryMentionArgs {
   resource: PromptMentionResource;
@@ -95,8 +92,6 @@ function storyMention({
   };
 }
 
-// CollapsibleMessageText kicks in at > 15 pre-wrapped lines, so this fixture
-// crosses that threshold to exercise the Show more / Show less affordance.
 const longMarkdownText = `Audit \`apps/app/src/components/promptbox/FollowUpPromptBox.tsx\` for the same prop trims we did on the banner.
 
 Specifically I want you to look at:
@@ -539,6 +534,29 @@ export function Overview() {
   return (
     <StoryCard>
       <StoryRow
+        label="short with actions"
+        hint="a short accepted message keeps its bubble width when edit becomes available"
+      >
+        <TimelineStage revealMessageActions>
+          <ConversationMessageContent
+            role="user"
+            originKind={null}
+            initiator="user"
+            senderThreadId={null}
+            senderThreadTitle={null}
+            senderIsPluginSideChat={false}
+            systemMessageKind="unlabeled"
+            systemMessageSubject={null}
+            text="hi"
+            attachments={null}
+            mentions={[]}
+            turnRequest={acceptedMessage}
+            onAddToChat={handleAddToChat}
+            onEdit={handleStoryMessageEdit}
+          />
+        </TimelineStage>
+      </StoryRow>
+      <StoryRow
         label="raw thread ID"
         hint="known IDs become linked pills in prose and exact inline-code spans"
       >
@@ -893,6 +911,131 @@ export function Overview() {
             mentions={longSystemMessage.mentions}
             projectId="proj_demo"
             turnRequest={acceptedMessage}
+          />
+        </TimelineStage>
+      </StoryRow>
+    </StoryCard>
+  );
+}
+
+const overflowStoryActions: ThreadTimelinePluginMessageAction[] = [
+  {
+    key: "story/summarize",
+    pluginId: null,
+    icon: "Sparkles",
+    label: "Summarize",
+    onSelect: handleStoryMessageEdit,
+  },
+  {
+    key: "story/translate",
+    pluginId: null,
+    icon: "Globe",
+    label: "Translate",
+    onSelect: handleStoryMessageEdit,
+  },
+  {
+    key: "story/save",
+    pluginId: null,
+    icon: "Bookmark",
+    label: "Save to notes",
+    onSelect: handleStoryMessageEdit,
+  },
+];
+
+export function ActionOverflow() {
+  const promptDraft = useStoryPromptDraft();
+
+  return (
+    <StoryCard>
+      <StoryRow
+        label="short, one action"
+        hint="copy only — always fits inside the bubble"
+      >
+        <TimelineStage revealMessageActions>
+          <ConversationMessageContent
+            role="user"
+            originKind={null}
+            initiator="user"
+            senderThreadId={null}
+            senderThreadTitle={null}
+            senderIsPluginSideChat={false}
+            systemMessageKind="unlabeled"
+            systemMessageSubject={null}
+            text="Sounds good"
+            attachments={null}
+            mentions={[]}
+            turnRequest={acceptedMessage}
+          />
+        </TimelineStage>
+      </StoryRow>
+      <StoryRow
+        label="short, native actions"
+        hint="copy + edit + add-to-chat under a two-letter bubble"
+      >
+        <TimelineStage revealMessageActions>
+          <ConversationMessageContent
+            role="user"
+            originKind={null}
+            initiator="user"
+            senderThreadId={null}
+            senderThreadTitle={null}
+            senderIsPluginSideChat={false}
+            systemMessageKind="unlabeled"
+            systemMessageSubject={null}
+            text="Ok"
+            attachments={null}
+            mentions={[]}
+            turnRequest={acceptedMessage}
+            onAddToChat={promptDraft.addQuote}
+            onEdit={handleStoryMessageEdit}
+          />
+        </TimelineStage>
+      </StoryRow>
+      <StoryRow
+        label="short, native + plugin actions"
+        hint="six actions under a two-letter bubble"
+      >
+        <TimelineStage revealMessageActions>
+          <ConversationMessageContent
+            role="user"
+            originKind={null}
+            initiator="user"
+            senderThreadId={null}
+            senderThreadTitle={null}
+            senderIsPluginSideChat={false}
+            systemMessageKind="unlabeled"
+            systemMessageSubject={null}
+            text="Ok"
+            attachments={null}
+            mentions={[]}
+            turnRequest={acceptedMessage}
+            onAddToChat={promptDraft.addQuote}
+            onEdit={handleStoryMessageEdit}
+            pluginActions={overflowStoryActions}
+          />
+        </TimelineStage>
+      </StoryRow>
+      <StoryRow
+        label="long, native + plugin actions"
+        hint="a wide bubble fits every action inline"
+      >
+        <TimelineStage revealMessageActions>
+          <ConversationMessageContent
+            role="user"
+            originKind={null}
+            initiator="user"
+            senderThreadId={null}
+            senderThreadTitle={null}
+            senderIsPluginSideChat={false}
+            systemMessageKind="unlabeled"
+            systemMessageSubject={null}
+            text={longMarkdownText}
+            attachments={null}
+            mentions={[]}
+            turnRequest={acceptedMessage}
+            onAddToChat={promptDraft.addQuote}
+            onEdit={handleStoryMessageEdit}
+            pluginActions={overflowStoryActions}
           />
         </TimelineStage>
       </StoryRow>

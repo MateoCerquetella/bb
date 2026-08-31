@@ -30,6 +30,7 @@ import {
   threadSectionSchema,
   threadConversationOutlineResponseSchema,
   threadQueuedMessageListResponseSchema,
+  threadStorageLocationResponseSchema,
   threadTimelineResponseSchema,
   threadWithIncludesResponseSchema,
   timelineTurnSummaryDetailsResponseSchema,
@@ -444,14 +445,67 @@ describe("public thread data routes", () => {
     });
   });
 
+  it("returns a timeline when a stored history holds a duplicate turn/started from a daemon replay", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedThreadFixture(harness);
+      const eventBase = {
+        threadId: thread.id,
+        environmentId: environment.id,
+        providerThreadId: "provider-thread-retried",
+        scope: turnScope("turn-retried"),
+      };
+
+      seedEvent(harness.deps, {
+        ...eventBase,
+        sequence: 1,
+        type: "turn/started",
+        data: {},
+      });
+      seedEvent(harness.deps, {
+        ...eventBase,
+        sequence: 2,
+        type: "turn/started",
+        data: {},
+      });
+      seedEvent(harness.deps, {
+        ...eventBase,
+        sequence: 3,
+        type: "item/completed",
+        data: {
+          item: {
+            type: "toolCall",
+            id: "tool-call-retried",
+            tool: "read",
+            status: "completed",
+            result: "ok",
+          },
+        },
+      });
+      seedEvent(harness.deps, {
+        ...eventBase,
+        sequence: 4,
+        type: "turn/completed",
+        data: { status: "completed" },
+      });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${thread.id}/timeline`,
+      );
+
+      expect(response.status).toBe(200);
+      const timeline = threadTimelineResponseSchema.parse(
+        await readJson(response),
+      );
+      expect(timeline.rows.filter((row) => row.kind === "turn")).toHaveLength(
+        1,
+      );
+    });
+  });
+
   it("returns the full conversation outline beyond the paginated timeline window", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedThreadFixture(harness);
 
-      // Three message turns, each: user request -> turn start -> assistant
-      // message -> turn complete. Segment anchors are the user-message rows, so
-      // a `segmentLimit=1` timeline page exposes only the last turn while the
-      // outline must still cover all three.
       const seedMessageTurn = (args: {
         requestId: number;
         startSequence: number;
@@ -538,7 +592,6 @@ describe("public thread data routes", () => {
         turnId: "turn-3",
       });
 
-      // A single-segment timeline page only holds the last turn.
       const timelineResponse = await harness.app.request(
         `/api/v1/threads/${thread.id}/timeline?segmentLimit=1`,
       );
@@ -559,7 +612,6 @@ describe("public thread data routes", () => {
         await readJson(outlineResponse),
       );
 
-      // The outline covers every message in the thread, not just the page.
       expect(outline.items.filter((item) => item.role === "user")).toHaveLength(
         3,
       );
@@ -579,8 +631,6 @@ describe("public thread data routes", () => {
         "Third question — answered.",
       ]);
 
-      // Ids must match the timeline exactly so the minimap can scroll-spy the
-      // loaded window and jump to any row once it is paginated in.
       const outlineIds = new Set(outline.items.map((item) => item.id));
       for (const id of windowedConversationIds) {
         expect(outlineIds.has(id)).toBe(true);
@@ -603,12 +653,98 @@ describe("public thread data routes", () => {
     });
   });
 
+  it("reuses the conversation outline across timeline-only events", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedThreadFixture(harness);
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        sequence: 1,
+        type: "system/manager/user_message",
+        scope: threadScope(),
+        data: { text: "Visible response" },
+      });
+      const prepareSpy = vi.spyOn(harness.db.$client, "prepare");
+      const countFullOutlineQueries = () =>
+        prepareSpy.mock.calls.filter(([source]) => {
+          return (
+            typeof source === "string" &&
+            source.includes('"created_at"') &&
+            source.includes('"data"') &&
+            source.includes("union all")
+          );
+        }).length;
+
+      const firstResponse = await harness.app.request(
+        `/api/v1/threads/${thread.id}/conversation-outline`,
+      );
+      expect(firstResponse.status).toBe(200);
+      const first = threadConversationOutlineResponseSchema.parse(
+        await readJson(firstResponse),
+      );
+      expect(first.maxSeq).toBe(1);
+      expect(countFullOutlineQueries()).toBe(1);
+
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        providerThreadId: "provider-thread-1",
+        sequence: 2,
+        type: "item/completed",
+        scope: turnScope("turn-1"),
+        data: {
+          item: {
+            id: "command-1",
+            type: "commandExecution",
+            command: "pwd",
+            cwd: "/tmp/test",
+            status: "completed",
+            approvalStatus: null,
+            aggregatedOutput: "/tmp/test",
+            exitCode: 0,
+          },
+        },
+      });
+
+      const cachedResponse = await harness.app.request(
+        `/api/v1/threads/${thread.id}/conversation-outline`,
+      );
+      expect(cachedResponse.status).toBe(200);
+      const cached = threadConversationOutlineResponseSchema.parse(
+        await readJson(cachedResponse),
+      );
+      expect(cached).toEqual({ items: first.items, maxSeq: 2 });
+      expect(countFullOutlineQueries()).toBe(1);
+
+      seedEvent(harness.deps, {
+        threadId: thread.id,
+        environmentId: environment.id,
+        sequence: 3,
+        type: "system/manager/user_message",
+        scope: threadScope(),
+        data: { text: "New visible response" },
+      });
+
+      const changedResponse = await harness.app.request(
+        `/api/v1/threads/${thread.id}/conversation-outline`,
+      );
+      expect(changedResponse.status).toBe(200);
+      const changed = threadConversationOutlineResponseSchema.parse(
+        await readJson(changedResponse),
+      );
+      expect(changed.maxSeq).toBe(3);
+      expect(changed.items.map((item) => item.preview)).toEqual([
+        "Visible response",
+        "New visible response",
+      ]);
+      expect(countFullOutlineQueries()).toBe(2);
+    });
+  });
+
   it("summarizes attachment-only messages in the conversation outline", async () => {
     await withTestHarness(async (harness) => {
       const { environment, thread } = seedThreadFixture(harness);
 
-      // A user message with no text but a file attachment: the outline should
-      // emit an empty preview plus attachment counts (and never leak the path).
       seedEvent(harness.deps, {
         threadId: thread.id,
         environmentId: environment.id,
@@ -656,7 +792,6 @@ describe("public thread data routes", () => {
         imageCount: 0,
         fileCount: 1,
       });
-      // The slim summary must not carry the on-disk path.
       expect(JSON.stringify(outline)).not.toContain("report.pdf");
     });
   });
@@ -1508,146 +1643,148 @@ describe("public thread data routes", () => {
     });
   });
 
-  it(
-    "expands the newest slice when a large delegation parent completes last",
-    async () => {
-      await withTestHarness(async (harness) => {
-        const { environment, thread } = seedThreadFixture(harness);
-        const providerThreadId = "provider-thread-1";
-        const turnId = "parent-turn";
-        const parentToolCallId = "agent-call";
-        type EventInput = Parameters<typeof insertEvents>[2][number];
-        const eventInputs: EventInput[] = [];
-        let sequence = 0;
-        const push = (
-          event: Omit<EventInput, "environmentId" | "sequence" | "threadId">,
-        ): void => {
-          sequence += 1;
-          eventInputs.push({
-            ...event,
-            environmentId: environment.id,
-            sequence,
-            threadId: thread.id,
-          });
-        };
-
-        push({
-          providerThreadId,
-          scope: turnScope(turnId),
-          type: "turn/started",
-          itemId: null,
-          itemKind: null,
-          data: JSON.stringify({}),
+  it("expands the newest slice when a large delegation parent completes last", async () => {
+    await withTestHarness(async (harness) => {
+      const { environment, thread } = seedThreadFixture(harness);
+      const providerThreadId = "provider-thread-1";
+      const turnId = "parent-turn";
+      const parentToolCallId = "agent-call";
+      type EventInput = Parameters<typeof insertEvents>[2][number];
+      const eventInputs: EventInput[] = [];
+      let sequence = 0;
+      const push = (
+        event: Omit<EventInput, "environmentId" | "sequence" | "threadId">,
+      ): void => {
+        sequence += 1;
+        eventInputs.push({
+          ...event,
+          environmentId: environment.id,
+          sequence,
+          threadId: thread.id,
         });
+      };
+
+      push({
+        providerThreadId,
+        scope: turnScope(turnId),
+        type: "turn/started",
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({}),
+      });
+      push({
+        providerThreadId,
+        scope: turnScope(turnId),
+        type: "item/started",
+        itemId: parentToolCallId,
+        itemKind: "toolCall",
+        parentToolCallId: null,
+        data: JSON.stringify({
+          item: {
+            type: "toolCall",
+            id: parentToolCallId,
+            tool: "Agent",
+            arguments: { prompt: "Do the long task." },
+            status: "pending",
+          },
+        }),
+      });
+      for (let item = 0; item < 650; item += 1) {
+        const itemId = `command-${item}`;
+        const command = "x".repeat(25_000);
         push({
           providerThreadId,
           scope: turnScope(turnId),
           type: "item/started",
-          itemId: parentToolCallId,
-          itemKind: "toolCall",
+          itemId,
+          itemKind: "commandExecution",
+          parentToolCallId,
           data: JSON.stringify({
             item: {
-              type: "toolCall",
-              id: parentToolCallId,
-              tool: "Agent",
-              arguments: { prompt: "Do the long task." },
+              type: "commandExecution",
+              id: itemId,
+              command,
+              cwd: "/tmp/test",
+              parentToolCallId,
               status: "pending",
+              approvalStatus: null,
             },
           }),
         });
-        for (let item = 0; item < 650; item += 1) {
-          const itemId = `command-${item}`;
-          const command = "x".repeat(25_000);
-          push({
-            providerThreadId,
-            scope: turnScope(turnId),
-            type: "item/started",
-            itemId,
-            itemKind: "commandExecution",
-            data: JSON.stringify({
-              item: {
-                type: "commandExecution",
-                id: itemId,
-                command,
-                cwd: "/tmp/test",
-                parentToolCallId,
-                status: "pending",
-                approvalStatus: null,
-              },
-            }),
-          });
-          push({
-            providerThreadId,
-            scope: turnScope(turnId),
-            type: "item/completed",
-            itemId,
-            itemKind: "commandExecution",
-            data: JSON.stringify({
-              item: {
-                type: "commandExecution",
-                id: itemId,
-                command,
-                cwd: "/tmp/test",
-                parentToolCallId,
-                status: "completed",
-                approvalStatus: null,
-                exitCode: 0,
-                aggregatedOutput: `output ${item}`,
-              },
-            }),
-          });
-        }
         push({
           providerThreadId,
           scope: turnScope(turnId),
           type: "item/completed",
-          itemId: parentToolCallId,
-          itemKind: "toolCall",
+          itemId,
+          itemKind: "commandExecution",
+          parentToolCallId,
           data: JSON.stringify({
             item: {
-              type: "toolCall",
-              id: parentToolCallId,
-              tool: "Agent",
-              arguments: { prompt: "Do the long task." },
-              result: "",
+              type: "commandExecution",
+              id: itemId,
+              command,
+              cwd: "/tmp/test",
+              parentToolCallId,
               status: "completed",
+              approvalStatus: null,
+              exitCode: 0,
+              aggregatedOutput: `output ${item}`,
             },
           }),
         });
-        push({
-          providerThreadId,
-          scope: turnScope(turnId),
-          type: "turn/completed",
-          itemId: null,
-          itemKind: null,
-          data: JSON.stringify({ status: "completed", providerThreadId }),
-        });
-        insertEvents(harness.deps.db, harness.deps.hub, eventInputs);
-
-        const timelineResponse = await harness.app.request(
-          `/api/v1/threads/${thread.id}/timeline`,
-        );
-        expect(timelineResponse.status).toBe(200);
-        const timeline = threadTimelineResponseSchema.parse(
-          await readJson(timelineResponse),
-        );
-        const turnRow = timeline.rows.find(
-          (row): row is TimelineTurnRow => row.kind === "turn",
-        );
-        expect(turnRow).toBeDefined();
-        if (!turnRow) {
-          throw new Error("Expected a turn row");
-        }
-        expect(turnRow.sourceSeqStart).toBeGreaterThan(2);
-
-        const detailsResponse = await harness.app.request(
-          `/api/v1/threads/${thread.id}/timeline/turn-summary-details?turnId=${turnRow.turnId}&sourceSeqStart=${turnRow.sourceSeqStart}&sourceSeqEnd=${turnRow.sourceSeqEnd}`,
-        );
-        expect(detailsResponse.status).toBe(200);
+      }
+      push({
+        providerThreadId,
+        scope: turnScope(turnId),
+        type: "item/completed",
+        itemId: parentToolCallId,
+        itemKind: "toolCall",
+        parentToolCallId: null,
+        data: JSON.stringify({
+          item: {
+            type: "toolCall",
+            id: parentToolCallId,
+            tool: "Agent",
+            arguments: { prompt: "Do the long task." },
+            result: "",
+            status: "completed",
+          },
+        }),
       });
-    },
-    10_000,
-  );
+      push({
+        providerThreadId,
+        scope: turnScope(turnId),
+        type: "turn/completed",
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ status: "completed", providerThreadId }),
+      });
+      insertEvents(harness.deps.db, harness.deps.hub, eventInputs);
+
+      const timelineResponse = await harness.app.request(
+        `/api/v1/threads/${thread.id}/timeline`,
+      );
+      expect(timelineResponse.status).toBe(200);
+      const timeline = threadTimelineResponseSchema.parse(
+        await readJson(timelineResponse),
+      );
+      const turnRow = timeline.rows.find(
+        (row): row is TimelineTurnRow => row.kind === "turn",
+      );
+      expect(turnRow).toBeDefined();
+      if (!turnRow) {
+        throw new Error("Expected a turn row");
+      }
+      expect(turnRow.sourceSeqStart).toBeGreaterThan(2);
+
+      const detailsResponse = await harness.app.request(
+        `/api/v1/threads/${thread.id}/timeline/turn-summary-details?turnId=${turnRow.turnId}&sourceSeqStart=${turnRow.sourceSeqStart}&sourceSeqEnd=${turnRow.sourceSeqEnd}`,
+      );
+      expect(detailsResponse.status).toBe(200);
+    });
+  }, 10_000);
 
   it("hydrates turn-summary details with future accepted input context", async () => {
     await withTestHarness(async (harness) => {
@@ -2005,8 +2142,6 @@ describe("public thread data routes", () => {
           },
         },
       });
-      // Malformed: missing item.type, so the derived item_kind column is null.
-      // The row is filtered out at the DB level instead of turning into a 500.
       seedStoredEvent(harness.deps, {
         threadId: thread.id,
         environmentId: environment.id,
@@ -2472,7 +2607,10 @@ describe("public thread data routes", () => {
       );
 
       expect(response.status).toBe(200);
-      await expect(readJson(response)).resolves.toEqual({ ok: true });
+      await expect(readJson(response)).resolves.toEqual({
+        ok: true,
+        delivery: "queued",
+      });
       const queuedRows = listQueuedThreadMessages(harness.db, thread.id);
       expect(queuedRows).toMatchObject([
         {
@@ -2530,10 +2668,11 @@ describe("public thread data routes", () => {
         },
       );
 
-      // Sender attribution is allowed across projects, so the message queues
-      // with the cross-project sender preserved for the reply affordance.
       expect(response.status).toBe(200);
-      await expect(readJson(response)).resolves.toEqual({ ok: true });
+      await expect(readJson(response)).resolves.toEqual({
+        ok: true,
+        delivery: "queued",
+      });
       expect(listQueuedThreadMessages(harness.db, thread.id)).toMatchObject([
         {
           senderThreadId: crossProjectSender.id,
@@ -3939,6 +4078,37 @@ describe("public thread data routes", () => {
     });
   });
 
+  it("resolves thread storage location without a host filesystem command", async () => {
+    await withTestHarness(async (harness) => {
+      const { host } = seedHostSession(harness.deps);
+      const { project } = seedProjectWithSource(harness.deps, {
+        hostId: host.id,
+        path: "/tmp/project-source",
+      });
+      const environment = seedEnvironment(harness.deps, {
+        hostId: host.id,
+        projectId: project.id,
+        path: "/tmp/project-source",
+      });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+      });
+
+      const response = await harness.app.request(
+        `/api/v1/threads/${thread.id}/thread-storage/location`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(
+        threadStorageLocationResponseSchema.parse(await readJson(response)),
+      ).toEqual({
+        hostId: host.id,
+        storageRootPath: `/tmp/bb-host-data/${host.id}/thread-storage/${thread.id}`,
+      });
+    });
+  });
+
   it("lists thread storage paths via host.list_paths", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps);
@@ -4239,7 +4409,6 @@ describe("public thread data routes", () => {
       const threadStorageRoot = `/tmp/bb-host-data/${host.id}/thread-storage/${thread.id}`;
       const html = "<!doctype html><h1>Preview</h1>";
 
-      // Percent-encoded segments decode exactly once before hitting the host.
       const filePromise = harness.app.request(
         `/api/v1/threads/${thread.id}/thread-storage/files/reports/preview%20v2.html`,
       );
@@ -4850,7 +5019,6 @@ describe("public thread data routes", () => {
         data: { item: { type: "agentMessage", id: "msg-1", text: "Reply" } },
       });
 
-      // afterSeq=5 means "after sequence 5" — the match at seq 5 should NOT be returned
       const response = await harness.app.request(
         `/api/v1/threads/${thread.id}/events/wait?type=item/completed&afterSeq=5&waitMs=100`,
       );

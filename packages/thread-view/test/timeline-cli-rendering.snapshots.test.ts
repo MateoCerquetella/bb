@@ -165,77 +165,91 @@ describe("timeline CLI rendering snapshots", () => {
     `);
   });
 
-  it("truncates audit output only inside conversation and leaf row bodies", () => {
+  it("shows provider-injected input as a system-initiated steer of its turn", () => {
     const event = createTimelineEventFactory({ threadId: "thread-1" });
-    const longUserLine = `User message ${"body ".repeat(30).trimEnd()}`;
-    const longSearchPattern = "timeline".repeat(18);
-    const commandOutput = [
-      "commit 2bc512e57819f74a07688ac6f49dfc0522c46a1a",
-      "Author: OpenAI Codex <codex@openai.com>",
-      "",
-      "    Remove legacy timeline bundle renderer",
-      "",
-      " apps/server/test/helpers/lifecycle-commands.ts     |   27 +-",
-      " packages/core-ui/src/format-timeline-text.ts       |  779 +-------",
-      " packages/core-ui/src/thread-detail-rows.ts         | 1030 ----------",
-    ].join("\n");
-    const timeline = renderIdleTimeline([
+    const events: TimelineFixtureEvent[] = [
       event.clientTurnRequested({
         target: { kind: "new-turn" },
-        text: [
-          longUserLine,
-          "second user line",
-          "third user line",
-          "fourth user line",
-        ].join("\n"),
+        text: "Reply only with ok.",
       }),
-      event.turnStarted(),
-      event.commandCompleted({
-        itemId: "search-1",
-        command: `/bin/zsh -lc 'rg ${longSearchPattern} packages/core-ui'`,
+      event.turnStarted({ turnId: "turn-1" }),
+      event.assistantCompleted({
+        itemId: "assistant-1",
+        text: "ok",
+        turnId: "turn-1",
       }),
-      event.commandCompleted({
-        itemId: "command-1",
-        command: "git show 2bc512e57 --stat | head -20",
-        aggregatedOutput: commandOutput,
-        exitCode: 0,
+      event.turnCompleted({ turnId: "turn-1" }),
+      event.turnStarted({ turnId: "turn-2" }),
+      event.providerUserMessage({
+        text: '<process_event kind="success">Process completed successfully</process_event>',
+        turnId: "turn-2",
       }),
-      event.turnCompleted(),
+      event.assistantCompleted({
+        itemId: "assistant-2",
+        text: "The sleep process finished.",
+        turnId: "turn-2",
+      }),
+      event.turnCompleted({ turnId: "turn-2" }),
+    ];
+    const timeline = renderIdleTimeline(events);
+
+    expect(
+      timeline.messages.flatMap((message) =>
+        message.kind === "user"
+          ? [
+              {
+                initiator: message.initiator,
+                scope: message.scope,
+                text: message.text,
+              },
+            ]
+          : [],
+      ),
+    ).toEqual([
+      {
+        initiator: "user",
+        scope: { kind: "thread" },
+        text: "Reply only with ok.",
+      },
+      {
+        initiator: "system",
+        scope: { kind: "turn", turnId: "turn-2" },
+        text: '<process_event kind="success">Process completed successfully</process_event>',
+      },
     ]);
-
-    const auditText = formatThreadTimelineText(timeline.rows, {
-      color: false,
-      truncateForAudit: true,
-      verbose: true,
-    });
-
-    expect(auditText).toContain(
-      `${longUserLine.slice(0, 100)}... [truncated ${longUserLine.length - 100} chars]`,
+    expect(timeline.rows).toContainEqual(
+      expect.objectContaining({
+        kind: "turn",
+        turnId: "turn-2",
+        children: [
+          expect.objectContaining({
+            kind: "conversation",
+            role: "user",
+            initiator: "system",
+            turnRequest: {
+              isGrouped: false,
+              kind: "steer",
+              status: "accepted",
+            },
+            text: '<process_event kind="success">Process completed successfully</process_event>',
+          }),
+        ],
+      }),
     );
-    expect(auditText).toContain("... [truncated 1 lines]");
-    expect(auditText).toContain(
-      `── Searched for ${longSearchPattern} in packages/core-ui`,
-    );
-    expect(auditText).toContain("      ... [truncated 6 lines]");
-    expect(auditText).not.toContain("Remove legacy timeline bundle renderer");
-    expect(auditText).not.toContain(
-      "packages/core-ui/src/thread-detail-rows.ts",
-    );
-    expect(auditText).toMatchInlineSnapshot(`
+    expect(timeline.text).toMatchInlineSnapshot(`
       "── User ────────────────────────────────────────────────────
-      User message body body body body body body body body body body body body body body body body body bo... [truncated 62 chars]
-      second user line
-      third user line
-      ... [truncated 1 lines]
+      Reply only with ok.
+
+      ── Assistant ───────────────────────────────────────────────
+      ok
 
       ── Worked for (3ms) ────────────────────────────────────────
-        ── Explored 1 search, ran 1 command
-          ── Searched for timelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimelinetimeline in packages/core-ui
-          ── Ran git show 2bc512e57 --stat | head -20
-            $ git show 2bc512e57 --stat | head -20
-            commit 2bc512e57819f74a07688ac6f49dfc0522c46a1a
-            Author: OpenAI Codex <codex@openai.com>
-             ... [truncated 6 lines]"
+        ── User
+        <process_event kind="success">Process completed successfully</process_event>
+        steer
+
+      ── Assistant ───────────────────────────────────────────────
+      The sleep process finished."
     `);
   });
 
@@ -1161,14 +1175,11 @@ describe("timeline CLI rendering snapshots", () => {
     });
     const timeline = renderIdleTimeline([
       event.turnStarted(),
-      event.toolCallCompleted({
+      event.delegationCompleted({
         itemId: "delegation-1",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Review the branch",
-          receiverThreadIds: ["child-provider"],
-        },
-        result: "Child result",
+        childRef: "child-provider",
+        label: "Review the branch",
+        summary: "Child result",
       }),
       event.commandCompleted({
         providerThreadId: "child-provider",
@@ -1204,9 +1215,6 @@ describe("timeline CLI rendering snapshots", () => {
 
     expect(rootTurn).toBeDefined();
     expect(delegation).toBeDefined();
-    // Delegation children render flat — no synthetic turn wrapper. Each
-    // child row carries the delegation's scoped id prefix so it does not
-    // collide with rows from the root turn.
     expect(delegation?.childRows.some((row) => row.kind === "turn")).toBe(
       false,
     );
@@ -1224,38 +1232,26 @@ describe("timeline CLI rendering snapshots", () => {
     });
     const timeline = renderIdleTimeline([
       event.turnStarted(),
-      event.toolCallStarted({
+      event.delegationStarted({
         itemId: "delegation-1",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Review architecture",
-          receiverThreadIds: [],
-        },
+        childRef: "root-provider",
+        label: "Review architecture",
       }),
-      event.toolCallCompleted({
+      event.delegationCompleted({
         itemId: "delegation-1",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Review architecture",
-          receiverThreadIds: ["receiver-1"],
-        },
+        childRef: "root-provider",
+        label: "Review architecture",
       }),
-      event.toolCallStarted({
+      event.delegationStarted({
         itemId: "delegation-2",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Review UI",
-          receiverThreadIds: [],
-        },
+        childRef: "root-provider",
+        label: "Review UI",
       }),
       event.turnStarted({ turnId: "child-turn-1" }),
-      event.toolCallCompleted({
+      event.delegationCompleted({
         itemId: "delegation-2",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Review UI",
-          receiverThreadIds: ["receiver-2"],
-        },
+        childRef: "root-provider",
+        label: "Review UI",
       }),
       event.turnStarted({ turnId: "child-turn-2" }),
       event.commandCompleted({
@@ -1430,13 +1426,10 @@ describe("timeline CLI rendering snapshots", () => {
     });
     const timeline = renderActiveTimeline([
       event.turnStarted(),
-      event.toolCallStarted({
+      event.delegationStarted({
         itemId: "delegation-1",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Review with a child provider thread",
-          receiverThreadIds: ["child-provider"],
-        },
+        childRef: "child-provider",
+        label: "Review with a child provider thread",
       }),
       event.commandStarted({
         providerThreadId: "child-provider",
@@ -1893,13 +1886,10 @@ describe("timeline CLI rendering snapshots", () => {
     });
     const timeline = renderActiveTimeline([
       event.turnStarted(),
-      event.toolCallStarted({
+      event.delegationStarted({
         itemId: "delegation-1",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Keep reviewing",
-          receiverThreadIds: [],
-        },
+        childRef: "root-provider",
+        label: "Keep reviewing",
       }),
       event.turnStarted({ turnId: "child-turn-1" }),
       event.commandStarted({
@@ -2075,11 +2065,6 @@ describe("timeline CLI rendering snapshots", () => {
   });
 
   it("renders pending delegation children as flat rows even with mixed statuses", () => {
-    // Regression: a pending delegation whose subagent stream contains a mix
-    // of pending, errored, and completed messages must NOT synthesize a
-    // turn wrapper around its children. Previously a synthetic scoped turn
-    // aggregated child statuses (error > pending) and rendered as
-    // "Worked for X" while the subagent was still running.
     const event = createTimelineEventFactory({
       providerThreadId: "root-provider",
       threadId: "thread-1",
@@ -2087,13 +2072,10 @@ describe("timeline CLI rendering snapshots", () => {
     });
     const timeline = renderActiveTimeline([
       event.turnStarted(),
-      event.toolCallStarted({
+      event.delegationStarted({
         itemId: "delegation-1",
-        tool: "spawnAgent",
-        arguments: {
-          prompt: "Investigate the timeline",
-          receiverThreadIds: ["child-provider"],
-        },
+        childRef: "child-provider",
+        label: "Investigate the timeline",
       }),
       event.commandCompleted({
         providerThreadId: "child-provider",
@@ -2131,10 +2113,6 @@ describe("timeline CLI rendering snapshots", () => {
       false,
     );
     expect(delegation?.childRows.length ?? 0).toBeGreaterThanOrEqual(3);
-    // A regression that re-introduces a synthetic turn wrapper would
-    // produce a "Worked for X" or "Working for X" label inside the
-    // delegation block. Pin the rendered text so the contract is checked
-    // end-to-end, not just via row-kind structure.
     expect(timeline.text).not.toContain("Worked for");
     expect(timeline.text).not.toContain("Working for");
   });
@@ -2340,7 +2318,7 @@ describe("timeline CLI rendering snapshots", () => {
     expect(timeline.text).toMatchInlineSnapshot(`""`);
   });
 
-  it("shows web search, file edit, and assistant output without task updates", () => {
+  it("projects a persisted codex plan notification as a plan-steps row beside the work", () => {
     const event = createTimelineEventFactory({ threadId: "thread-1" });
     const timeline = renderActiveTimeline([
       event.turnStarted(),
@@ -2373,21 +2351,35 @@ describe("timeline CLI rendering snapshots", () => {
     ]);
 
     expect(messageKinds(timeline.messages)).toEqual([
+      "plan-steps",
       "web-search",
       "file-edit",
       "assistant-text",
     ]);
-    expect(timeline.text).toMatchInlineSnapshot(`
-      "── Researched 1 search query, edited 1 file ────────────────
-        ── Ran web search: React suspense docs
-        ── Edited /repo/packages/core-ui/src/timeline.ts +1 -1
-          @@ -1 +1 @@
-          -before
-          +after
-
-      ── Assistant ───────────────────────────────────────────────
-      I patched the projection and verified it."
-    `);
+    const planRow = flattenTimelineRows(timeline.rows).find(
+      (row) => row.kind === "work" && row.workKind === "plan-steps",
+    );
+    expect(planRow).toMatchObject({
+      kind: "work",
+      workKind: "plan-steps",
+      status: "completed",
+      steps: [
+        { step: "Read the route", status: "completed" },
+        { step: "Patch the projection", status: "active" },
+        { step: "Run focused tests", status: "pending" },
+      ],
+    });
+    expect(planRow).not.toHaveProperty("presentation");
+    expect(timeline.pendingTodos?.items.map((item) => item.text)).toEqual([
+      "Read the route",
+      "Patch the projection",
+      "Run focused tests",
+    ]);
+    expect(timeline.text).toContain("Updated plan Patch the projection");
+    expect(timeline.text).toContain("Ran web search: React suspense docs");
+    expect(timeline.text).toContain(
+      "Edited /repo/packages/core-ui/src/timeline.ts +1 -1",
+    );
   });
 
   it("summarizes completed web search and fetch rows without expanding result text", () => {

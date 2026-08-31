@@ -3,18 +3,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 export interface BundledPluginDefinition {
-  /**
-   * Directory name under `plugins/` and under the packaged builtin-plugins
-   * dir; also the `builtin:<name>` source name.
-   */
   name: string;
-  /** derivePluginId(packageName); declared statically so ids are reservable without manifest reads. */
   pluginId: string;
-  /** true = reconcile installs when missing; false = store-only, installed on demand. */
   autoInstall: boolean;
-  /** enabled value on first install (auto or store). */
   defaultEnabled: boolean;
-  /** Browse-tab grouping; only meaningful for store entries. */
   category?: string;
 }
 
@@ -29,7 +21,6 @@ interface ResolveBuiltinPluginRootPathArgs {
 
 export const BUILTIN_PLUGINS_DIRECTORY_NAME = "builtin-plugins";
 
-/** Every bundled plugin's source lives under `<repoRoot>/plugins/<name>`. */
 const REPO_PLUGINS_DIRECTORY_NAME = "plugins";
 
 export const PLUGIN_CATALOG_CATEGORIES = [
@@ -67,17 +58,32 @@ export const BUILTIN_PLUGINS = [
     category: "Context & knowledge",
   },
   {
+    name: "plugin-api-tester",
+    pluginId: "plugin-api-tester",
+    defaultEnabled: false,
+    category: "Developer tools",
+  },
+  {
     name: "inline-vis",
     pluginId: "inline-vis",
     defaultEnabled: true,
     category: "Interface",
   },
-  // First-party agent provider plugins: each declares one of the providers
-  // the core catalog used to seed. With the seed deleted these declarations
-  // are the only source, so disabling one removes its provider.
   {
-    name: "provider-acp",
-    pluginId: "provider-acp",
+    name: "monaco-editor",
+    pluginId: "monaco-editor",
+    defaultEnabled: false,
+    category: "Interface",
+  },
+  {
+    name: "pdf-preview",
+    pluginId: "pdf-preview",
+    defaultEnabled: true,
+    category: "Interface",
+  },
+  {
+    name: "provider-codex",
+    pluginId: "provider-codex",
     defaultEnabled: true,
     category: "Agent interaction",
   },
@@ -88,14 +94,14 @@ export const BUILTIN_PLUGINS = [
     category: "Agent interaction",
   },
   {
-    name: "provider-codex",
-    pluginId: "provider-codex",
+    name: "provider-pi",
+    pluginId: "provider-pi",
     defaultEnabled: true,
     category: "Agent interaction",
   },
   {
-    name: "provider-pi",
-    pluginId: "provider-pi",
+    name: "provider-acp",
+    pluginId: "provider-acp",
     defaultEnabled: true,
     category: "Agent interaction",
   },
@@ -106,9 +112,15 @@ export const BUILTIN_PLUGINS = [
     category: "Host access",
   },
   {
+    name: "plugin-api-docs",
+    pluginId: "plugin-api-docs",
+    defaultEnabled: false,
+    category: "Developer tools",
+  },
+  {
     name: "provider-retry",
     pluginId: "provider-retry",
-    defaultEnabled: false,
+    defaultEnabled: true,
     category: "Agent interaction",
   },
   {
@@ -129,17 +141,11 @@ export const BUILTIN_PLUGINS = [
     defaultEnabled: false,
     category: "Workflow management",
   },
-].map(
-  (plugin): BundledPluginDefinition => ({
-    ...plugin,
-    autoInstall: true,
-  }),
-);
+].map((plugin): BundledPluginDefinition => ({
+  ...plugin,
+  autoInstall: true,
+}));
 
-/**
- * Official plugins ship bundled with the app like builtins, but are not
- * auto-installed: they appear in the plugin store and install on demand.
- */
 export const OFFICIAL_PLUGINS = [
   {
     name: "github",
@@ -165,12 +171,10 @@ export const OFFICIAL_PLUGINS = [
     defaultEnabled: true,
     category: "Workflow management",
   },
-].map(
-  (plugin): BundledPluginDefinition => ({
-    ...plugin,
-    autoInstall: false,
-  }),
-);
+].map((plugin): BundledPluginDefinition => ({
+  ...plugin,
+  autoInstall: false,
+}));
 
 export const BUNDLED_PLUGINS: readonly BundledPluginDefinition[] = [
   ...BUILTIN_PLUGINS,
@@ -187,18 +191,6 @@ export function builtinPluginSource(name: string): string {
   return `builtin:${name}`;
 }
 
-export function findBundledPlugin(
-  name: string,
-): BundledPluginDefinition | undefined {
-  return BUNDLED_PLUGINS.find((plugin) => plugin.name === name);
-}
-
-/**
- * Bundled plugin roots live in three layouts:
- * - packaged server: <server dist>/builtin-plugins/<name> (written at packaging)
- * - built-from-source server (bundle at apps/server/dist): <repoRoot>/plugins/<name>
- * - source checkout (module at apps/server/src/services/plugins): <repoRoot>/plugins/<name>
- */
 export function resolveBuiltinPluginRootPathForModuleDir(
   args: ResolveBuiltinPluginRootPathArgs,
 ): string {
@@ -209,7 +201,6 @@ export function resolveBuiltinPluginRootPathForModuleDir(
   );
   if (existsSync(packagedCandidate)) return packagedCandidate;
 
-  // apps/server/dist → repo root is three levels up.
   const builtCheckoutCandidate = path.resolve(
     args.moduleDir,
     "../../..",

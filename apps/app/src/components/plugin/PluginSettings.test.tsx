@@ -67,7 +67,6 @@ describe("PluginSettingsForm", () => {
     )) as HTMLInputElement;
     expect(greeting.value).toBe("hello");
 
-    // Secrets are write-only: no value, only a set/not-set placeholder.
     const apiKey = screen.getByLabelText("API key") as HTMLInputElement;
     expect(apiKey.value).toBe("");
     expect(apiKey.placeholder).toBe("[not set]");
@@ -89,11 +88,78 @@ describe("PluginSettingsForm", () => {
       values: { greeting: "hi" },
     });
 
-    // The refreshed view replaces the drafts; the input shows the saved value.
     await vi.waitFor(() => {
       expect(
         (screen.getByLabelText("Greeting") as HTMLInputElement).value,
       ).toBe("hi");
+    });
+  });
+
+  it("renders an experimental_multiline string as a textarea below its label and saves the edited text", async () => {
+    const view = {
+      ok: true,
+      schema: {
+        greeting: { type: "string", label: "Greeting" },
+        agents: {
+          type: "string",
+          label: "Custom agents",
+          description: "A JSON array of agents.",
+          experimental_multiline: true,
+        },
+      },
+      values: { greeting: "hello", agents: "[]" },
+    };
+    const requests: RecordedRequest[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init?: RequestInit) => {
+        requests.push({ url, init });
+        return jsonOk(view);
+      }),
+    );
+
+    const { wrapper } = createQueryClientTestHarness();
+    render(<PluginSettingsForm pluginId="demo" />, { wrapper });
+
+    const agents = await screen.findByLabelText("Custom agents");
+    expect(agents.tagName).toBe("TEXTAREA");
+    expect((agents as HTMLTextAreaElement).value).toBe("[]");
+    expect(agents.getAttribute("spellcheck")).toBe("false");
+    expect((agents as HTMLTextAreaElement).rows).toBe(6);
+    expect(agents.closest('[data-control-placement="below"]')).not.toBeNull();
+    const greeting = screen.getByLabelText("Greeting");
+    expect(greeting.tagName).toBe("INPUT");
+    expect(
+      greeting.closest('[data-control-placement="inline"]'),
+    ).not.toBeNull();
+
+    const save = screen.getByRole("button", {
+      name: /save settings/i,
+    }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    const edited = [
+      "[",
+      "  {",
+      '    "id": "amp",',
+      '    "displayName": "Amp",',
+      '    "command": "amp",',
+      '    "args": ["acp"]',
+      "  }",
+      "]",
+    ].join("\n");
+    fireEvent.change(agents, { target: { value: edited } });
+    expect(save.disabled).toBe(false);
+    expect((agents as HTMLTextAreaElement).rows).toBe(9);
+
+    fireEvent.click(save);
+    const put = await vi.waitFor(() => {
+      const found = requests.find((request) => request.init?.method === "PUT");
+      expect(found).toBeDefined();
+      return found;
+    });
+    expect(JSON.parse(String(put?.init?.body))).toEqual({
+      values: { agents: edited },
     });
   });
 

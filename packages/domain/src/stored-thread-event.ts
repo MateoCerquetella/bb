@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { convertLegacyStoredThreadEvent } from "./legacy-thread-events.js";
 import { threadEventSchema, threadEventTypeSchema } from "./provider-event.js";
 import {
   systemMessageKindSchema,
@@ -9,6 +10,7 @@ import {
 import {
   threadEventScopeSchema,
   type ThreadEventScope,
+  getThreadEventScopeTurnId,
 } from "./thread-event-scope.js";
 import type { ThreadEvent, ThreadEventType } from "./provider-event.js";
 import type { TurnRequestTarget } from "./thread-events.js";
@@ -38,7 +40,7 @@ interface ThreadEventRowInput extends ThreadEventRowBase {
   data: Record<string, unknown>;
 }
 
-export interface StoredThreadEventParseArgs {
+interface StoredThreadEventParseArgs {
   data: Record<string, unknown>;
   providerThreadId?: string | null;
   scope: ThreadEventScope;
@@ -46,7 +48,7 @@ export interface StoredThreadEventParseArgs {
   type: ThreadEventType;
 }
 
-export type StoredThreadEventDataByType = {
+type StoredThreadEventDataByType = {
   [TType in ThreadEventType]: StoredThreadEventDataFromEvent<
     ThreadEventForType<TType>
   >;
@@ -86,17 +88,9 @@ const LEGACY_TURN_REQUEST_TARGET = {
   kind: "new-turn",
 } satisfies TurnRequestTarget;
 
-// Read path: `senderThreadId` is a new field, so every pre-change persisted
-// `client/turn/requested` row lacks it — defaulting to null here lets old
-// rows load without a backfill migration. `initiator` was already always
-// written by every call site (the prior `.optional()` was schema slack),
-// so it does not need a default.
 const storedTurnRequestEventDataSchema = turnRequestEventDataSchema.extend({
   senderThreadId: z.string().nullable().default(null),
   target: turnRequestTargetSchema.default(LEGACY_TURN_REQUEST_TARGET),
-  // Family-B taxonomy fields are new, so pre-change rows lack them. Default to
-  // the generic `unlabeled` / no-subject shape here so old rows load without a
-  // backfill migration — same pattern as `senderThreadId`.
   systemMessageKind: systemMessageKindSchema.default("unlabeled"),
   systemMessageSubject: systemMessageSubjectSchema.nullable().default(null),
 });
@@ -129,9 +123,13 @@ export function parseStoredThreadEvent(
     throw new Error("Stored thread event is missing valid scope");
   }
   const scope = scopeResult.data;
-  const eventData = storedTurnRequestTypeSet.has(args.type)
-    ? parseStoredTurnRequestEventData(args)
-    : args.data;
+  const stored = convertLegacyStoredThreadEvent(
+    { type: args.type, data: args.data },
+    { turnId: getThreadEventScopeTurnId(scope) ?? null },
+  );
+  const eventData = storedTurnRequestTypeSet.has(stored.type)
+    ? parseStoredTurnRequestEventData({ ...args, data: stored.data })
+    : stored.data;
 
   return threadEventSchema.parse({
     ...omitStoredScopeFields(eventData),
@@ -140,7 +138,7 @@ export function parseStoredThreadEvent(
       : {}),
     scope,
     threadId: args.threadId,
-    type: args.type,
+    type: stored.type,
   });
 }
 

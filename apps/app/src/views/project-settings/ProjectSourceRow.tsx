@@ -13,9 +13,7 @@ import {
   DropdownMenuTrigger,
 } from "@bb/shared-ui/dropdown-menu";
 
-/** The machine a source lives on, for the machine-aware sources list
- * Null keeps the plain path-only row. */
-export interface ProjectSourceRowMachine {
+interface ProjectSourceRowMachine {
   name: string;
   connected: boolean;
 }

@@ -15,20 +15,17 @@ import {
   setPluginEnabled,
   type PluginListItem,
 } from "@/hooks/queries/plugin-settings-queries";
+import { pluginNeedsAttention } from "@/hooks/usePluginAttention";
+import { cn } from "@bb/shared-ui/lib/utils";
 import { getPluginDetailRoutePath } from "@/lib/route-paths";
-import { pluginRowSignal } from "./plugin-status";
+import {
+  pluginRowSignal,
+  pluginRuntimeStatusPresentation,
+} from "./plugin-status";
 import { PluginRowSignalView, PluginSignalLogo } from "./PluginRowSignal";
 import { UpdatePluginDialog } from "./UpdatePluginDialog";
 import { PluginLogo } from "./plugin-ui";
 
-/**
- * Layer 1 (sketch v2 A): rows at rest are logo, name, description, switch —
- * no versions, no source strings, no menus. A row earns at most one signal:
- * the "Update x.y.z" pill IS the action (opens the confirmation directly),
- * while abnormal runtime health is an icon action that opens plugin details.
- * Newer-incompatible and pinned never badge. Hover reveals the chevron; the
- * row navigates to the plugin's detail page where depth lives.
- */
 export function InstalledPluginsTab({
   plugins,
 }: {
@@ -72,7 +69,6 @@ export function InstalledPluginsTab({
   );
 }
 
-/** Exported for tests (pill states + enable/disable round-trip). */
 export function InstalledPluginRow({
   plugin,
   onUpdateClick,
@@ -95,11 +91,19 @@ export function InstalledPluginRow({
     },
     onSettled: () => invalidatePluginList({ queryClient }),
   });
-  // Reflect the in-flight target immediately; the invalidated list settles it.
   const enabled = toggle.isPending ? toggle.variables : plugin.enabled;
   const signal = pluginRowSignal(plugin);
   const statusSignal = signal?.kind === "status" ? signal : null;
   const updateSignal = signal?.kind === "update" ? signal : null;
+  const runtimeStatus = pluginRuntimeStatusPresentation(plugin);
+  const notRunning = pluginNeedsAttention({
+    enabled: enabled === true,
+    status: plugin.status,
+  });
+  const runtimeStatusToneClass =
+    runtimeStatus?.tone === "error"
+      ? "text-destructive-text"
+      : "text-warning-text";
 
   const openDetail = () =>
     navigate(
@@ -119,7 +123,24 @@ export function InstalledPluginRow({
             <ProvenancePill label={plugin.publisherLabel} />
           )
         }
-        description={plugin.description}
+        status={
+          runtimeStatus === null ? undefined : (
+            <span
+              data-testid={`plugin-runtime-status-${plugin.id}`}
+              className={cn(
+                "shrink-0 text-xs font-medium",
+                runtimeStatusToneClass,
+              )}
+            >
+              {runtimeStatus.label}
+            </span>
+          )
+        }
+        description={
+          runtimeStatus === null
+            ? plugin.description
+            : (plugin.statusDetail ?? runtimeStatus.condition)
+        }
         openLabel={`${plugin.name ?? plugin.id} plugin details`}
         onOpen={openDetail}
         trailingMeta={
@@ -134,12 +155,27 @@ export function InstalledPluginRow({
           ) : undefined
         }
         persistentActions={
-          <Switch
-            checked={enabled}
-            disabled={toggle.isPending}
-            onCheckedChange={(next) => toggle.mutate(next)}
-            aria-label={`${enabled ? "Disable" : "Enable"} ${plugin.id}`}
-          />
+          <>
+            {notRunning ? (
+              <span
+                data-testid={`plugin-not-running-${plugin.id}`}
+                className={cn(
+                  "mr-1 text-2xs font-medium",
+                  runtimeStatusToneClass,
+                )}
+              >
+                not running
+              </span>
+            ) : null}
+            <Switch
+              checked={enabled}
+              disabled={toggle.isPending}
+              onCheckedChange={(next) => toggle.mutate(next)}
+              aria-label={`${enabled ? "Disable" : "Enable"} ${plugin.id}${
+                notRunning ? ` (${plugin.status}, not running)` : ""
+              }`}
+            />
+          </>
         }
         trailingVisual={<ResourceRowDetailChevron />}
       />

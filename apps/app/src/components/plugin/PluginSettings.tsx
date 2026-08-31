@@ -11,6 +11,7 @@ import {
 } from "@bb/shared-ui/dropdown-menu";
 import { Icon } from "@bb/shared-ui/icon";
 import { Input } from "@bb/shared-ui/input";
+import { Textarea } from "@bb/shared-ui/textarea";
 import { Link } from "react-router-dom";
 import { SettingsWithControl } from "@/components/ui/settings-section.js";
 import { getPluginDetailRoutePath } from "@/lib/route-paths";
@@ -33,17 +34,28 @@ import {
 import { useSidebarNavigation } from "@/hooks/queries/sidebar-navigation-query";
 import { usePluginSlots } from "@/lib/plugin-slots";
 
-/**
- * Plugin configuration rendered inside the canonical Plugins detail surface.
- * Declarative settings remain host-rendered, while `settingsSection` slots
- * can provide richer plugin-owned controls. Secrets are write-only: the
- * server reports only `{ set }`, and an empty secret input leaves it unchanged.
- */
-
 const DROPDOWN_TRIGGER_CLASS =
   "h-7 w-full justify-between border-border/60 bg-card px-2 text-xs sm:w-44";
 const DROPDOWN_CONTENT_CLASS =
   "min-w-[var(--radix-dropdown-menu-trigger-width)]";
+
+const MULTILINE_MIN_ROWS = 6;
+const MULTILINE_MAX_ROWS = 24;
+const MULTILINE_TEXTAREA_CLASS =
+  "max-h-96 min-h-32 w-full resize-y overflow-y-auto font-mono text-xs field-sizing-content";
+
+function multilineRows(value: string): number {
+  const lines = value.split("\n").length;
+  return Math.min(MULTILINE_MAX_ROWS, Math.max(MULTILINE_MIN_ROWS, lines + 1));
+}
+
+function isMultilineSetting(descriptor: PluginSettingFieldDescriptor): boolean {
+  return (
+    descriptor.type === "string" &&
+    descriptor.experimental_multiline === true &&
+    descriptor.secret !== true
+  );
+}
 
 interface SettingOptionPickerProps {
   ariaLabel: string;
@@ -89,7 +101,6 @@ interface PluginSettingFieldProps {
   descriptor: PluginSettingFieldDescriptor;
   draft: unknown;
   onChange: (value: string | boolean) => void;
-  settingKey: string;
   storedValue: unknown;
 }
 
@@ -97,7 +108,6 @@ function PluginSettingField({
   descriptor,
   draft,
   onChange,
-  settingKey,
   storedValue,
 }: PluginSettingFieldProps) {
   const projects = useSidebarNavigation({
@@ -173,7 +183,6 @@ function PluginSettingField({
     );
   }
 
-  // type === "string" (including secrets).
   const isSecret = descriptor.secret === true;
   const secretIsSet =
     isSecret &&
@@ -186,6 +195,20 @@ function PluginSettingField({
       : !isSecret && typeof storedValue === "string"
         ? storedValue
         : "";
+  if (isMultilineSetting(descriptor)) {
+    return (
+      <Textarea
+        value={value}
+        aria-label={descriptor.label}
+        rows={multilineRows(value)}
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        onChange={(event) => onChange(event.target.value)}
+        className={MULTILINE_TEXTAREA_CLASS}
+      />
+    );
+  }
   return (
     <Input
       type={isSecret ? "password" : "text"}
@@ -198,7 +221,6 @@ function PluginSettingField({
   );
 }
 
-/** Host-rendered declarative settings form for a plugin detail page. */
 export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   const queryClient = useQueryClient();
   const viewQuery = usePluginSettingsView(pluginId, { enabled: true });
@@ -221,8 +243,6 @@ export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   const view = viewQuery.data ?? null;
   if (view === null || Object.keys(view.schema).length === 0) return null;
 
-  // Secrets are write-only; an untouched or emptied secret input means
-  // "leave unchanged", so it never rides the update payload.
   const changedValues: Record<string, unknown> = {};
   for (const [key, draft] of Object.entries(drafts)) {
     const descriptor = view.schema[key];
@@ -251,12 +271,12 @@ export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
               ? "secret"
               : undefined
           }
+          controlPlacement={isMultilineSetting(descriptor) ? "below" : "inline"}
           {...(descriptor.description !== undefined
             ? { description: descriptor.description }
             : {})}
         >
           <PluginSettingField
-            settingKey={key}
             descriptor={descriptor}
             storedValue={view.values[key]}
             draft={drafts[key]}
@@ -284,22 +304,12 @@ export function PluginSettingsForm({ pluginId }: { pluginId: string }) {
   );
 }
 
-/**
- * Statuses whose factory ran, so a settings schema exists server-side. A
- * needs-configuration plugin MUST be configurable here — that status exists
- * precisely to send the user to this form — and degraded plugins are loaded
- * too. Errored/missing/incompatible plugins have no schema to render.
- */
 const PLUGIN_STATUSES_WITH_SETTINGS = [
   "running",
   "needs-configuration",
   "degraded",
 ];
 
-/**
- * The Settings-page home for one plugin's configuration. The Extensions
- * detail page links here rather than hosting the form itself.
- */
 export function PluginSettingsPage({ pluginId }: { pluginId: string }) {
   const listQuery = usePluginList({ enabled: true });
   const plugin =
@@ -320,9 +330,6 @@ export function PluginSettingsPage({ pluginId }: { pluginId: string }) {
       </p>
     );
   }
-  // Mirrors the Extensions detail page: the same header anatomy and section
-  // stack, with a "Plugin details" section that is the counterpart of the
-  // detail page's Configuration section (each one sentence linking across).
   return (
     <div className="mx-auto w-full max-w-5xl">
       <div className="flex items-center gap-3">
@@ -372,7 +379,6 @@ export function PluginSettingsPage({ pluginId }: { pluginId: string }) {
   );
 }
 
-/** Exported for tests (status gating of the settings form). */
 export function PluginSettingsDetail({ plugin }: { plugin: PluginListItem }) {
   const { settingsSections } = usePluginSlots();
   const hasSettingsSections = settingsSections.some(

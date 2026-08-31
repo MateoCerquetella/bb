@@ -6,22 +6,24 @@ import {
   useLayoutEffect,
   useMemo,
   useRef,
+  useTransition,
   type ComponentPropsWithoutRef,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
 import { useNavigate, type NavigateOptions } from "react-router-dom";
+import { useStore } from "jotai";
+import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
 import { isRoutePath, resolveRouteHref } from "@/lib/route-paths";
 import { getDesktopBrowserApi } from "@/lib/bb-desktop";
+import { openPaneContentInSplit } from "@/lib/split-layout/openPaneContentInSplit";
+import { paneContentForPathname } from "@/views/thread-detail/splitThreadNavigation";
 
-export interface RouteNavigationProviderProps {
+interface RouteNavigationProviderProps {
   children: ReactNode;
 }
 
-export interface RouteAnchorProps extends Omit<
-  ComponentPropsWithoutRef<"a">,
-  "href"
-> {
+interface RouteAnchorProps extends Omit<ComponentPropsWithoutRef<"a">, "href"> {
   href: string | undefined;
 }
 
@@ -29,35 +31,30 @@ interface ShouldHandleRouteAnchorClickArgs {
   event: ReactMouseEvent<HTMLAnchorElement>;
 }
 
-export interface RouteNavigateOptions {
+interface RouteNavigateOptions {
   replace?: boolean;
   state?: NavigateOptions["state"];
 }
 
-/** Navigate to an absolute app route (`/projects/...`); see {@link useRouteNavigate}. */
-export type RouteNavigate = (
-  path: string,
-  options?: RouteNavigateOptions,
-) => void;
+type RouteNavigate = (path: string, options?: RouteNavigateOptions) => void;
 
-const RouteNavigationContext = createContext<RouteNavigate | null>(null);
+interface RouteNavigation {
+  navigate: RouteNavigate;
+  openInSplit: (path: string) => boolean;
+}
 
-/**
- * A `navigate` whose identity never changes and whose caller does not
- * subscribe to the router's location.
- *
- * Under `<BrowserRouter>` react-router's `useNavigate()` reads `useLocation()`
- * and rebuilds its function per pathname, so every component that calls it
- * re-renders on every navigation and every callback listing it as a
- * dependency is rebuilt. Sidebar rows, the thread-actions context and the fork
- * handler only navigate to absolute app routes, so they read this one stable
- * function from {@link RouteNavigationProvider} (mounted once at the app root,
- * which holds the live `useNavigate()` in a ref) instead. Without a provider
- * the returned function throws when called, so a misplaced consumer fails at
- * the click, not silently.
- */
+const RouteNavigationContext = createContext<RouteNavigation | null>(null);
+
+const RouteNavigationPendingContext = createContext(false);
+
+export function useIsRouteNavigationPending(): boolean {
+  return useContext(RouteNavigationPendingContext);
+}
+
 export function useRouteNavigate(): RouteNavigate {
-  return useContext(RouteNavigationContext) ?? navigateWithoutProvider;
+  return (
+    useContext(RouteNavigationContext)?.navigate ?? navigateWithoutProvider
+  );
 }
 
 function navigateWithoutProvider(path: string): void {
@@ -92,21 +89,40 @@ export function RouteNavigationProvider({
   children,
 }: RouteNavigationProviderProps) {
   const navigate = useNavigate();
-  // The live `navigate` changes per pathname; the context value must not, or
-  // every consumer would re-render per navigation (the thing this exists to
-  // avoid). Layout effect: the ref is current before any child effect or
-  // event handler can navigate after a commit.
+  const store = useStore();
+  const isCompact = useIsCompactViewport();
   const navigateRef = useRef(navigate);
   useLayoutEffect(() => {
     navigateRef.current = navigate;
   }, [navigate]);
-  const navigateRoute = useCallback<RouteNavigate>((path, options) => {
-    if (options === undefined) {
-      navigateRef.current(path);
-      return;
-    }
-    navigateRef.current(path, options);
-  }, []);
+  const [isNavigationPending, startNavigationTransition] = useTransition();
+  const navigateRoute = useCallback<RouteNavigate>(
+    (path, options) => {
+      startNavigationTransition(() => {
+        if (options === undefined) {
+          navigateRef.current(path);
+          return;
+        }
+        navigateRef.current(path, options);
+      });
+    },
+    [startNavigationTransition],
+  );
+  const openInSplit = useCallback<RouteNavigation["openInSplit"]>(
+    (path) => {
+      const content = paneContentForPathname(path.split(/[?#]/)[0] ?? path);
+      if (content === null) return false;
+      openPaneContentInSplit({
+        store,
+        navigate: navigateRoute,
+        content,
+        route: path,
+        enabled: !isCompact,
+      });
+      return true;
+    },
+    [isCompact, navigateRoute, store],
+  );
   useEffect(() => {
     const browserApi = getDesktopBrowserApi();
     if (browserApi === null) {
@@ -120,10 +136,54 @@ export function RouteNavigationProvider({
     });
   }, [navigateRoute]);
 
+  const value = useMemo<RouteNavigation>(
+    () => ({ navigate: navigateRoute, openInSplit }),
+    [navigateRoute, openInSplit],
+  );
   return (
-    <RouteNavigationContext.Provider value={navigateRoute}>
-      {children}
+    <RouteNavigationContext.Provider value={value}>
+      <RouteNavigationPendingContext.Provider value={isNavigationPending}>
+        {children}
+      </RouteNavigationPendingContext.Provider>
     </RouteNavigationContext.Provider>
+  );
+}
+
+export function useRouteAnchorDelegate(): (
+  event: ReactMouseEvent<HTMLElement>,
+) => void {
+  const navigation = useContext(RouteNavigationContext);
+  return useCallback(
+    (event) => {
+      if (navigation === null || event.defaultPrevented) return;
+      const anchor =
+        event.target instanceof Element
+          ? event.target.closest<HTMLAnchorElement>("a[href]")
+          : null;
+      if (anchor === null || !event.currentTarget.contains(anchor)) return;
+      const target = anchor.getAttribute("target");
+      if (target !== null && target !== "" && target !== "_self") return;
+      if (event.button !== 0 || event.altKey || event.shiftKey) return;
+      const origin = currentOrigin();
+      if (origin === null) return;
+      const route = resolveRouteHref({
+        currentOrigin: origin,
+        href: anchor.getAttribute("href") ?? "",
+      });
+      if (route === null) return;
+      const opensBeside =
+        event.metaKey ||
+        event.ctrlKey ||
+        paneContentForPathname(route.path.split(/[?#]/)[0] ?? route.path)
+          ?.kind === "plugin-detail";
+      if (opensBeside) {
+        if (navigation.openInSplit(route.path)) event.preventDefault();
+        return;
+      }
+      event.preventDefault();
+      navigation.navigate(route.path);
+    },
+    [navigation],
   );
 }
 
@@ -134,7 +194,7 @@ export function RouteAnchor({
   target,
   ...anchorProps
 }: RouteAnchorProps) {
-  const navigateRoute = useContext(RouteNavigationContext);
+  const navigation = useContext(RouteNavigationContext);
   const route = useMemo(() => {
     const origin = currentOrigin();
     return origin === null || href === undefined
@@ -146,16 +206,16 @@ export function RouteAnchor({
       onClick?.(event);
       if (
         route === null ||
-        navigateRoute === null ||
+        navigation === null ||
         !shouldHandleRouteAnchorClick({ event })
       ) {
         return;
       }
 
       event.preventDefault();
-      navigateRoute(route.path);
+      navigation.navigate(route.path);
     },
-    [navigateRoute, onClick, route],
+    [navigation, onClick, route],
   );
 
   return (

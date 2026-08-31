@@ -24,28 +24,28 @@ const LOCAL_NO_FILE_OPEN_TARGETS_DESCRIPTION = "No local app can open files.";
 const LOCAL_NO_DIRECTORY_OPEN_TARGETS_DESCRIPTION =
   "No local app can open directories.";
 
-export interface UseLocalOpenTargetsArgs {
+interface UseLocalOpenTargetsArgs {
   enabled: boolean;
   openContext?: OpenInTargetContext;
 }
 
-export interface OpenLocalPathRequest {
+interface OpenLocalPathRequest {
   columnNumber?: number | null;
   lineNumber: number | null;
   path: string;
 }
 
-export interface OpenPathInDirectoryTargetArgs extends OpenLocalPathRequest {
+interface OpenPathInDirectoryTargetArgs extends OpenLocalPathRequest {
   rememberTarget: boolean;
   targetId: WorkspaceOpenTargetId;
 }
 
-export interface OpenPathInFileTargetArgs extends OpenLocalPathRequest {
+interface OpenPathInFileTargetArgs extends OpenLocalPathRequest {
   rememberTarget: boolean;
   targetId: WorkspaceOpenTargetId;
 }
 
-export interface OpenPathInPreferredTargetArgs extends OpenLocalPathRequest {}
+interface OpenPathInPreferredTargetArgs extends OpenLocalPathRequest {}
 
 interface OpenPathInAvailableTargetArgs extends OpenLocalPathRequest {
   rememberTarget: boolean;
@@ -53,11 +53,12 @@ interface OpenPathInAvailableTargetArgs extends OpenLocalPathRequest {
   targetKind: OpenUnavailableTargetKind;
 }
 
-export interface UseLocalOpenTargetsResult {
+interface UseLocalOpenTargetsResult {
   canOpenPreferredDirectoryTarget: boolean;
   canOpenPreferredFileTarget: boolean;
   directoryOpenTargets: WorkspaceOpenTarget[];
   fileOpenTargets: WorkspaceOpenTarget[];
+  isLoading: boolean;
   openPathInDirectoryTarget: (
     args: OpenPathInDirectoryTargetArgs,
   ) => Promise<boolean>;
@@ -176,9 +177,6 @@ function useOpenTargetResolution(
       ),
     [args.contextKind, args.workspaceOpenTargets],
   );
-  // Resolve locally from the already-gated `workspaceOpenTargets` so that
-  // callers passing `enabled: false` don't trigger a daemon fetch via the
-  // global atom.
   const preferredDirectoryTarget = useMemo(
     () =>
       resolvePreferredWorkspaceOpenTarget({
@@ -235,6 +233,7 @@ export function useLocalOpenTargets(
   const { hasDaemon } = useHostDaemon();
   const {
     fetchWorkspaceOpenTargetsForPath,
+    isLoading,
     openWorkspace,
     workspaceOpenTargets,
   } = useWorkspaceOpenTargets(args);
@@ -449,6 +448,7 @@ export function useLocalOpenTargets(
     canOpenPreferredFileTarget: preferredFileTarget !== null,
     directoryOpenTargets,
     fileOpenTargets,
+    isLoading,
     openPathInDirectoryTarget,
     openPathInFileTarget,
     openPathInPreferredDirectoryTarget,

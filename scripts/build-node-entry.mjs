@@ -1,5 +1,4 @@
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { buildNodeEsmEntry, copyDirectory } from "./build-utils.mjs";
 
 const packageRoot = process.cwd();
@@ -7,7 +6,7 @@ const [entryPointArg, outfileArg, ...flags] = process.argv.slice(2);
 
 if (!entryPointArg || !outfileArg) {
   throw new Error(
-    "Usage: node scripts/build-node-entry.mjs <entrypoint> <outfile> [--clean-dist] [--executable] [--external <pattern>] [--copy-dir <from> <to>]",
+    "Usage: node scripts/build-node-entry.mjs <entrypoint> <outfile> [--clean-dist] [--executable] [--split] [--external <pattern>] [--copy-dir <from> <to>]",
   );
 }
 
@@ -58,6 +57,7 @@ await buildNodeEsmEntry({
   external: parseExternalPatterns(flags),
   outfile: path.resolve(packageRoot, outfileArg),
   packageRoot,
+  splitting: flags.includes("--split"),
 });
 
 for (const copyArgs of parseCopyDirectories(flags)) {

@@ -10,19 +10,23 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   environmentDiffFilesQueryKeyPrefix,
   environmentFilePreviewQueryKeyPrefix,
+  hostFilePreviewQueryKey,
 } from "@/hooks/queries/query-keys";
 import { sdk } from "@/lib/sdk";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import {
   GitDiffTabContent,
+  HostScopedFilePreviewTabContent,
   WorkspaceFilePreviewTabContent,
 } from "./ThreadSecondaryPanelTabContent";
 
 vi.mock("@/lib/sdk", () => ({
-  sdk: { environments: { diffFiles: vi.fn(), diffFile: vi.fn() } },
+  sdk: {
+    environments: { diffFiles: vi.fn(), diffFile: vi.fn() },
+    files: { createPreview: vi.fn(), read: vi.fn() },
+  },
 }));
 
-// The preview body is not under test; keep pierre out of jsdom.
 vi.mock("@pierre/diffs/react", async () => {
   const React = await import("react");
   return {
@@ -68,12 +72,15 @@ describe("GitDiffTabContent panel gating", () => {
           target={TARGET}
           isDiffPanelActive
           isPanelOpen={isPanelOpen}
-          gitDiffViewOptions={{}}
+          gitDiffPresentation={{
+            view: "unified",
+            overflow: "scroll",
+            showLineNumbers: true,
+          }}
         />
       </Wrapper>
     );
 
-    // Retained-but-closed panel: the body mounts, the TOC does not load.
     const view = render(renderTab(false));
     expect(sdk.environments.diffFiles).not.toHaveBeenCalled();
 
@@ -82,8 +89,6 @@ describe("GitDiffTabContent panel gating", () => {
       expect(sdk.environments.diffFiles).toHaveBeenCalledTimes(1);
     });
 
-    // Closed again: realtime workspace writes invalidate the TOC, but a hidden
-    // panel must not refetch it.
     view.rerender(renderTab(false));
     await act(async () => {
       await queryClient.invalidateQueries({
@@ -92,7 +97,6 @@ describe("GitDiffTabContent panel gating", () => {
     });
     expect(sdk.environments.diffFiles).toHaveBeenCalledTimes(1);
 
-    // Reopen: the stale TOC refreshes exactly once.
     view.rerender(renderTab(true));
     await waitFor(() => {
       expect(sdk.environments.diffFiles).toHaveBeenCalledTimes(2);
@@ -134,6 +138,57 @@ describe("WorkspaceFilePreviewTabContent panel gating", () => {
     view.rerender(renderTab(true));
     await waitFor(() => {
       expect(sdk.environments.diffFile).toHaveBeenCalledTimes(2);
+    });
+  });
+});
+
+describe("HostScopedFilePreviewTabContent panel gating", () => {
+  it("does not start or refetch a host read while the retained panel is closed", async () => {
+    vi.mocked(sdk.files.createPreview).mockResolvedValue({
+      baseUrl: "/api/v1/file-previews/lease-1",
+      expiresAtMs: Date.now() + 60_000,
+    });
+    vi.mocked(sdk.files.read).mockResolvedValue({
+      path: "/tmp/example.txt",
+      content: "hello\n",
+      contentEncoding: "utf8",
+      mimeType: "text/plain",
+      modifiedAtMs: 1,
+      sha256: "hash",
+      sizeBytes: 6,
+    });
+    const { queryClient, wrapper: Wrapper } = createQueryClientTestHarness();
+    const renderTab = (isPanelOpen: boolean) => (
+      <Wrapper>
+        <HostScopedFilePreviewTabContent
+          activePath="/tmp/example.txt"
+          hostId="host-1"
+          isPanelOpen={isPanelOpen}
+          lineRange={null}
+        />
+      </Wrapper>
+    );
+
+    const view = render(renderTab(false));
+    expect(sdk.files.read).not.toHaveBeenCalled();
+    expect(sdk.files.createPreview).not.toHaveBeenCalled();
+
+    view.rerender(renderTab(true));
+    await waitFor(() => {
+      expect(sdk.files.read).toHaveBeenCalledTimes(1);
+    });
+
+    view.rerender(renderTab(false));
+    await act(async () => {
+      await queryClient.invalidateQueries({
+        queryKey: hostFilePreviewQueryKey("host-1", "/tmp/example.txt"),
+      });
+    });
+    expect(sdk.files.read).toHaveBeenCalledTimes(1);
+
+    view.rerender(renderTab(true));
+    await waitFor(() => {
+      expect(sdk.files.read).toHaveBeenCalledTimes(2);
     });
   });
 });

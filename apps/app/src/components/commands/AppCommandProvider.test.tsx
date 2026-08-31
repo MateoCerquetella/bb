@@ -216,6 +216,7 @@ vi.mock("@/lib/bb-desktop", () => ({
 
 interface HandlerProps {
   command?: AppCommandId;
+  enabled?: boolean;
   name: string;
   priority?: number;
   result: boolean;
@@ -223,6 +224,7 @@ interface HandlerProps {
 
 function Handler({
   command = "thread.search",
+  enabled,
   name,
   priority,
   result,
@@ -234,6 +236,7 @@ function Handler({
       return result;
     },
     priority,
+    enabled,
   );
   return null;
 }
@@ -525,6 +528,13 @@ describe("AppCommandProvider", () => {
     expect(testState.calls).toEqual([]);
   });
 
+  it("does not register a disabled handler", () => {
+    renderProvider(<Handler enabled={false} name="disabled" result={true} />);
+
+    expect(dispatchShortcut().defaultPrevented).toBe(false);
+    expect(testState.calls).toEqual([]);
+  });
+
   it("lets equal-priority handlers fall through to the focus-owning instance", () => {
     renderProvider(
       <>
@@ -581,9 +591,6 @@ describe("AppCommandProvider", () => {
     expect(testState.calls).toEqual(["browser"]);
   });
 
-  // The compact sidebar drawer keeps its `aria-modal` panel mounted across
-  // open/close and only marks it `inert` while closed, so a retained panel used
-  // to keep `modalOpen` on for the rest of the session.
   it.each([
     ["thread.new" as const, "o", true],
     ["panel.toggle" as const, "j", false],
@@ -594,8 +601,7 @@ describe("AppCommandProvider", () => {
         <>
           <Handler command={command} name={command} result={true} />
           <div role="dialog" aria-modal="true" data-state="closed" inert>
-            {/* Nested and still marked open: only an inert ancestor rules it
-                out, so this covers the ancestor half of the selector. */}
+            {}
             <div role="dialog" data-state="open">
               <button type="button">Sidebar entry</button>
             </div>

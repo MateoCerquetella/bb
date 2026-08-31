@@ -1,8 +1,6 @@
 import { z } from "zod";
 import { terminalCreateTargetSchema } from "./terminals.js";
 
-// Plugin-panel ids include encoded params, so allow the bounded 1 MiB params
-// payload to expand under URI encoding while still capping request size.
 const THREAD_TAB_ID_MAX_LENGTH = 4_194_304;
 const THREAD_TAB_PATH_MAX_LENGTH = 32_768;
 const THREAD_TAB_TITLE_MAX_LENGTH = 1_024;
@@ -32,11 +30,6 @@ const threadTabEnvironmentFileSourceSchema = z.discriminatedUnion("kind", [
     .strict(),
 ]);
 
-/**
- * The native file preview a plugin file-opener panel diverted, retained so the
- * tab can restore the built-in `Original` view. Present only on plugin-panel
- * tabs that replaced a native file preview.
- */
 export const threadTabFileOpenerOwnerSchema = z.discriminatedUnion("kind", [
   z
     .object({
@@ -56,7 +49,8 @@ export const threadTabFileOpenerOwnerSchema = z.discriminatedUnion("kind", [
     .strict(),
   z
     .object({
-      environmentId: z.string().min(1),
+      environmentId: z.string().min(1).nullable().default(null),
+      hostId: z.string().min(1).nullable().default(null),
       kind: z.literal("host-file-preview"),
       tab: z
         .object({
@@ -64,9 +58,15 @@ export const threadTabFileOpenerOwnerSchema = z.discriminatedUnion("kind", [
           path: threadTabPathSchema,
         })
         .strict(),
-      threadId: z.string().min(1),
+      threadId: z.string().min(1).nullable().default(null),
     })
-    .strict(),
+    .strict()
+    .refine(
+      (owner) =>
+        owner.hostId !== null ||
+        (owner.environmentId !== null && owner.threadId !== null),
+      { message: "hostId or threadId/environmentId is required" },
+    ),
   z
     .object({
       environmentId: z.string().min(1).nullable(),
@@ -114,6 +114,7 @@ export const threadTabSchema = z.discriminatedUnion("kind", [
   z
     .object({
       environmentId: z.string().min(1).nullable(),
+      hostId: z.string().min(1).nullable().default(null),
       id: threadTabIdSchema,
       kind: z.literal("host-file-preview"),
       lineRange: threadTabLineRangeSchema.nullable(),
@@ -156,9 +157,6 @@ export const threadTabSchema = z.discriminatedUnion("kind", [
     .object({
       id: threadTabIdSchema,
       kind: z.literal("terminal"),
-      // Nav-panel right panels open terminals against an explicit target and
-      // record it here. Absent on thread/root-compose tabs, whose surface
-      // owns the target. Same shape the terminal was created with.
       target: terminalCreateTargetSchema.optional(),
       terminalId: z.string().min(1).max(THREAD_TAB_PATH_MAX_LENGTH),
     })
@@ -196,6 +194,7 @@ export const threadTabsResponseSchema = z
   })
   .strict();
 export type ThreadTabsResponse = z.infer<typeof threadTabsResponseSchema>;
+export type ThreadTabsWireResponse = z.input<typeof threadTabsResponseSchema>;
 
 export const updateThreadTabsRequestSchema = z
   .object({

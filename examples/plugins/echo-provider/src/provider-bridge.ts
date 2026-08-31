@@ -1,173 +1,587 @@
-/**
- * The echo-agent provider bridge: the smallest correct implementation of the
- * bb Provider Bridge Protocol (docs/provider-bridge-protocol.md).
- *
- * `bb plugin build` bundles this file into a fully self-contained
- * dist/provider-bridge.mjs; the host daemon downloads that artifact by
- * content hash, verifies it, and runs it with its own node for every thread
- * on this provider. Transport is line-delimited JSON-RPC 2.0 on
- * stdin/stdout.
- *
- * What "correct" means here, in protocol terms:
- * - Hygiene: an unknown method answers METHOD_NOT_FOUND (-32601); invalid
- *   params answer INVALID_PARAMS (-32602) carrying the validation issues; a
- *   non-JSON line and an unsolicited response-shaped line are ignored and
- *   the bridge stays alive. The dispatch table is keyed by the protocol
- *   package's own method vocabulary, so it cannot drift from the schemas.
- * - Ids: the bridge mints every turn and item id, with per-instance entropy
- *   so ids never collide across process restarts or session resumes.
- * - Grammar: every accepted turn settles (accepted → started → completed);
- *   every item opens with item/started before any delta; a release stop
- *   fabricates nothing.
- */
 import {
+  type ClientTurnRequestId,
+  type DeltaPresentation,
+  type DynamicTool,
   type PromptInput,
-  type ThreadEvent,
+  type ProviderHealthResult,
+  type ThreadDelta,
+  type ThreadEventTokenUsageBreakdown,
+  BRIDGE_INBOUND_REQUEST_METHODS,
   BRIDGE_JSON_RPC_ERRORS,
   BRIDGE_NOTIFICATION_METHODS,
   BRIDGE_REQUEST_METHODS,
   PROVIDER_BRIDGE_PROTOCOL_VERSION,
+  THREAD_DELTA_GRAMMAR_V3,
+  THREAD_DELTA_NOTIFICATION_METHOD,
+  ZERO_TOKEN_USAGE,
+  addTokenUsage,
+  createBridgeIo,
+  decodeToolCallResponsePayload,
+  experimental_defineProviderBridge,
   initializeParamsSchema,
   modelListParamsSchema,
+  providerMaintenanceParamsSchema,
+  runBridgeRequest,
   threadResumeParamsSchema,
   threadStartParamsSchema,
   threadStopParamsSchema,
   turnStartParamsSchema,
   turnSteerParamsSchema,
-  experimental_defineProviderBridge,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import { randomUUID } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { z } from "zod";
+import {
+  AGENT_MESSAGE_PRESENTATION,
+  ECHO_GREETING_ENV,
+  ECHO_MODEL,
+  ECHO_MODEL_ID,
+  ECHO_MOOD_KIND,
+  ECHO_RECEIPT_KIND,
+  ECHO_STAMP_TOOL_NAME,
+  NOOP_TOOL_PRESENTATION,
+  commandPresentation,
+  delegationPresentation,
+  echoProviderOptionsSchema,
+  fileReadPresentation,
+  planStepsPresentation,
+  receiptPresentation,
+  searchPresentation,
+  type EchoMood,
+  type EchoProviderOptions,
+  type EchoReceipt,
+} from "./vocabulary.js";
 
-// ---------------------------------------------------------------------------
-// State: one bridge process serves many threads; sessions are in-memory only
-// (the echo agent has nothing to persist, so its handshake advertises no
-// sessionRestore and every capability defaults to "no").
-// ---------------------------------------------------------------------------
-
-/** Per-instance entropy baked into every minted id (the #1224 lesson). */
 const instanceNonce = randomUUID().replaceAll("-", "").slice(0, 12);
 let threadCounter = 0;
-let turnCounter = 0;
 
-/** threadId → providerThreadId for sessions this instance has opened. */
-const sessions = new Map<string, string>();
+interface Session {
+  threadId: string;
+  providerThreadId: string;
+  cwd: string;
+  turnsEchoed: number;
+  usageTotal: ThreadEventTokenUsageBreakdown;
+  tools: ReadonlyMap<string, DynamicTool>;
+}
+
+const sessions = new Map<string, Session>();
 
 type JsonRpcId = string | number;
 
-/** The single stdout writer — protocol traffic only, never stray logs. */
-function writeMessage(message: Record<string, unknown>): void {
-  process.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", ...message })}\n`);
-}
+type OutboundMessage = { jsonrpc: "2.0" } & Record<string, unknown>;
 
-function respondResult(id: JsonRpcId, result: unknown): void {
-  writeMessage({ id, result });
-}
-
-function respondError(
-  id: JsonRpcId,
-  code: number,
-  message: string,
-  data?: unknown,
-): void {
-  writeMessage({
-    id,
-    error: { code, message, ...(data !== undefined ? { data } : {}) },
-  });
-}
+const io = createBridgeIo<OutboundMessage>();
 
 function notify(method: string, params: Record<string, unknown>): void {
-  writeMessage({ method, params });
+  io.send({ jsonrpc: "2.0", method, params });
 }
 
-function emitThreadEvent(threadId: string, event: ThreadEvent): void {
-  notify(BRIDGE_NOTIFICATION_METHODS.threadEvent, { threadId, event });
+function emitDeltas(threadId: string, deltas: ThreadDelta[]): void {
+  notify(THREAD_DELTA_NOTIFICATION_METHOD, { threadId, deltas });
 }
 
-// ---------------------------------------------------------------------------
-// The echo turn: accepted → started → item/started → delta(s) → completed.
-// Turns settle synchronously — echoing needs no provider round-trip.
-// ---------------------------------------------------------------------------
+let outboundRequestCounter = 0;
+
+interface PendingToolCall {
+  turn: TurnContext;
+}
+
+const pendingToolCalls = new Map<string, PendingToolCall>();
+
+function sendRequest(method: string, params: Record<string, unknown>): string {
+  outboundRequestCounter += 1;
+  const id = `echo-req-${outboundRequestCounter}`;
+  io.send({ jsonrpc: "2.0", id, method, params });
+  return id;
+}
 
 function promptText(input: readonly PromptInput[]): string {
   return input
-    .filter((item): item is Extract<PromptInput, { type: "text" }> =>
-      item.type === "text",
+    .filter(
+      (item): item is Extract<PromptInput, { type: "text" }> =>
+        item.type === "text",
     )
     .map((item) => item.text)
     .join("");
 }
 
-function runEchoTurn(args: {
-  threadId: string;
-  providerThreadId: string;
-  input: readonly PromptInput[];
-  /** Present only for turn/start; thread/start input has no request id. */
-  clientRequestId?: string;
-}): void {
-  turnCounter += 1;
-  const turnId = `turn_echo_${instanceNonce}_${turnCounter}`;
-  const itemId = `${turnId}_item_1`;
-  const scope = { kind: "turn", turnId } as const;
-  const base = {
-    threadId: args.threadId,
-    providerThreadId: args.providerThreadId,
-  };
-  const text = `echo: ${promptText(args.input)}`;
-
-  if (args.clientRequestId !== undefined) {
-    emitThreadEvent(args.threadId, {
-      type: "turn/input/accepted",
-      ...base,
-      clientRequestId: args.clientRequestId,
-      scope,
-    });
+function parseProviderOptions(options: unknown): {
+  source: "server" | "defaults";
+  values: EchoProviderOptions;
+} {
+  const parsed = echoProviderOptionsSchema.safeParse(options);
+  if (parsed.success) {
+    return { source: "server", values: parsed.data };
   }
-  emitThreadEvent(args.threadId, { type: "turn/started", ...base, scope });
-  emitThreadEvent(args.threadId, {
-    type: "item/started",
-    ...base,
-    item: { type: "agentMessage", id: itemId, text: "" },
-    scope,
-  });
-  emitThreadEvent(args.threadId, {
-    type: "item/agentMessage/delta",
-    ...base,
-    itemId,
-    delta: text,
-    scope,
-  });
-  emitThreadEvent(args.threadId, {
-    type: "item/completed",
-    ...base,
-    item: { type: "agentMessage", id: itemId, text },
-    scope,
-  });
-  emitThreadEvent(args.threadId, {
-    type: "turn/completed",
-    ...base,
-    status: "completed",
-    scope,
-  });
+  return {
+    source: "defaults",
+    values: { shout: false, model: ECHO_MODEL_ID, promptMode: null },
+  };
 }
 
-// ---------------------------------------------------------------------------
-// Request handlers, keyed by the protocol vocabulary. A vocabulary method
-// with no handler here (thread/fork, thread/archive, …) answers -32601 like
-// any unknown method — the runtime only sends capability-gated methods to
-// bridges that advertised them, and this bridge advertises none.
-// ---------------------------------------------------------------------------
+interface TurnContext {
+  session: Session;
+  ordinal: number;
+  prompt: string;
+  providerOptions: ReturnType<typeof parseProviderOptions>;
+  itemCount: number;
+  malformedReceipt: boolean;
+  stamp: { itemId: string; presentation: DeltaPresentation | undefined } | null;
+}
+
+function itemId(turn: TurnContext, name: string): string {
+  return `echo-${turn.session.providerThreadId}-t${turn.ordinal}-${name}`;
+}
+
+function runEchoTurn(args: {
+  session: Session;
+  input: readonly PromptInput[];
+  options: unknown;
+  clientRequestId?: ClientTurnRequestId;
+}): void {
+  const { session } = args;
+  const prompt = promptText(args.input);
+  const deltas: ThreadDelta[] = [];
+  if (args.clientRequestId !== undefined) {
+    deltas.push({
+      kind: "input.accepted",
+      clientRequestId: args.clientRequestId,
+    });
+  }
+
+  if (/(?:^|\s)\/noop(?:\s|$)/u.test(prompt)) {
+    deltas.push({
+      kind: "turn.boundary",
+      status: "completed",
+      claimIfIdle: true,
+    });
+    emitDeltas(session.threadId, deltas);
+    return;
+  }
+
+  session.turnsEchoed += 1;
+  const turn: TurnContext = {
+    session,
+    ordinal: session.turnsEchoed,
+    prompt,
+    providerOptions: parseProviderOptions(args.options),
+    itemCount: 0,
+    malformedReceipt: /(?:^|\s)malformed-receipt(?:\s|$)/u.test(prompt),
+    stamp: null,
+  };
+  deltas.push({ kind: "turn.open" });
+  deltas.push(...commandDeltas(turn));
+  deltas.push(...fileReadDeltas(turn));
+  deltas.push(...searchDeltas(turn));
+  deltas.push(...delegationDeltas(turn));
+  deltas.push(...planStepsDeltas(turn));
+  deltas.push(...suppressedToolDeltas(turn));
+
+  const stampTool = session.tools.get(ECHO_STAMP_TOOL_NAME);
+  if (stampTool !== undefined) {
+    const id = itemId(turn, "stamp");
+    turn.stamp = { itemId: id, presentation: stampTool.presentation };
+    turn.itemCount += 1;
+    deltas.push({
+      kind: "item.open",
+      key: { providerItemId: id },
+      item: {
+        type: "tool",
+        tool: ECHO_STAMP_TOOL_NAME,
+        server: "bb",
+        args: { text: prompt },
+      },
+      ...(stampTool.presentation === undefined
+        ? {}
+        : { presentation: stampTool.presentation }),
+    });
+    emitDeltas(session.threadId, deltas);
+    const requestId = sendRequest(BRIDGE_INBOUND_REQUEST_METHODS.toolCall, {
+      providerThreadId: session.providerThreadId,
+      threadId: session.threadId,
+      turnId: null,
+      callId: id,
+      tool: ECHO_STAMP_TOOL_NAME,
+      arguments: { text: prompt },
+      providerNativeIds: true,
+    });
+    pendingToolCalls.set(requestId, { turn });
+    return;
+  }
+  emitDeltas(session.threadId, deltas);
+  finishEchoTurn(turn, null);
+}
+
+function commandDeltas(turn: TurnContext): ThreadDelta[] {
+  const id = itemId(turn, "command");
+  const command = `echo ${JSON.stringify(turn.prompt)}`;
+  const output = `${turn.prompt}\n`;
+  const presentation = commandPresentation(command);
+  turn.itemCount += 1;
+  return [
+    {
+      kind: "item.open",
+      key: { providerItemId: id },
+      item: { type: "command", command, cwd: turn.session.cwd },
+      presentation,
+    },
+    {
+      kind: "item.outputDelta",
+      key: { providerItemId: id },
+      channel: "command",
+      text: output,
+    },
+    {
+      kind: "item.close",
+      key: { providerItemId: id },
+      status: "completed",
+      exitCode: 0,
+      aggregatedOutput: output,
+      item: {
+        type: "command",
+        command,
+        cwd: turn.session.cwd,
+        aggregatedOutput: output,
+        exitCode: 0,
+        durationMs: 1,
+      },
+      presentation,
+    },
+  ];
+}
+
+function fileReadDeltas(turn: TurnContext): ThreadDelta[] {
+  const id = itemId(turn, "read");
+  const path = join(turn.session.cwd, "README.md");
+  const presentation = fileReadPresentation(path);
+  turn.itemCount += 1;
+  return [
+    {
+      kind: "item.open",
+      key: { providerItemId: id },
+      item: { type: "fileRead", path },
+      presentation,
+    },
+    {
+      kind: "item.close",
+      key: { providerItemId: id },
+      status: "completed",
+      item: { type: "fileRead", path },
+      presentation,
+    },
+  ];
+}
+
+function searchDeltas(turn: TurnContext): ThreadDelta[] {
+  const id = itemId(turn, "search");
+  const item = {
+    type: "search",
+    mode: "content",
+    query: turn.prompt,
+    path: turn.session.cwd,
+  } as const;
+  const presentation = searchPresentation(turn.prompt);
+  turn.itemCount += 1;
+  return [
+    { kind: "item.open", key: { providerItemId: id }, item, presentation },
+    {
+      kind: "item.close",
+      key: { providerItemId: id },
+      status: "completed",
+      item,
+      presentation,
+    },
+  ];
+}
+
+function delegationDeltas(turn: TurnContext): ThreadDelta[] {
+  const id = itemId(turn, "delegate");
+  const childTurnId = `${id}-turn`;
+  const childRef = `${turn.session.threadId}-t${turn.ordinal}-child`;
+  const childMessageId = `${id}-message`;
+  const label = `Echo "${turn.prompt}" one more time`;
+  const childText = `child echo: ${turn.prompt}`;
+  const presentation = delegationPresentation(label);
+  turn.itemCount += 1;
+  return [
+    {
+      kind: "item.open",
+      key: { providerItemId: id },
+      item: { type: "delegation", childRef, label, background: false },
+      presentation,
+    },
+    { kind: "turn.open", providerTurnId: childTurnId, parentRef: id },
+    {
+      kind: "item.open",
+      key: { providerItemId: childMessageId, parentRef: id },
+      item: { type: "agentMessage", text: "" },
+      presentation: AGENT_MESSAGE_PRESENTATION,
+      providerTurnId: childTurnId,
+    },
+    {
+      kind: "item.textDelta",
+      key: { providerItemId: childMessageId, parentRef: id },
+      channel: "agentMessage",
+      text: childText,
+      providerTurnId: childTurnId,
+    },
+    {
+      kind: "item.textClose",
+      key: { providerItemId: childMessageId, parentRef: id },
+      channel: "agentMessage",
+      text: childText,
+      providerTurnId: childTurnId,
+    },
+    { kind: "turn.boundary", status: "completed", providerTurnId: childTurnId },
+    {
+      kind: "item.close",
+      key: { providerItemId: id },
+      status: "completed",
+      item: {
+        type: "delegation",
+        childRef,
+        label,
+        background: false,
+        summary: childText,
+      },
+      presentation,
+    },
+  ];
+}
+
+function planStepsDeltas(turn: TurnContext): ThreadDelta[] {
+  const id = itemId(turn, "plan");
+  const steps = [
+    { step: "Hear the prompt", status: "completed" },
+    { step: `Echo "${turn.prompt}"`, status: "active" },
+    { step: "Write the receipt", status: "pending" },
+  ] as const;
+  const explanation = "The echo agent's three-step plan.";
+  turn.itemCount += 1;
+  return [
+    {
+      kind: "item.open",
+      key: { providerItemId: id },
+      item: { type: "planSteps", steps: [...steps], explanation },
+      presentation: planStepsPresentation(steps[1].step),
+    },
+    {
+      kind: "item.close",
+      key: { providerItemId: id },
+      status: "completed",
+      item: {
+        type: "planSteps",
+        steps: steps.map((step) => ({ step: step.step, status: "completed" })),
+        explanation,
+      },
+      presentation: planStepsPresentation(steps[2].step),
+    },
+  ];
+}
+
+function suppressedToolDeltas(turn: TurnContext): ThreadDelta[] {
+  const id = itemId(turn, "noop");
+  turn.itemCount += 1;
+  return [
+    {
+      kind: "item.open",
+      key: { providerItemId: id },
+      item: { type: "tool", tool: "echo_noop", args: {} },
+      presentation: NOOP_TOOL_PRESENTATION,
+    },
+    {
+      kind: "item.close",
+      key: { providerItemId: id },
+      status: "completed",
+      item: { type: "tool", tool: "echo_noop", args: {}, result: "ahem" },
+      presentation: NOOP_TOOL_PRESENTATION,
+    },
+  ];
+}
+
+function finishEchoTurn(
+  turn: TurnContext,
+  stamp: { content: string; isError: boolean } | null,
+): void {
+  const { session } = turn;
+  const deltas: ThreadDelta[] = [];
+
+  if (turn.stamp !== null) {
+    deltas.push({
+      kind: "item.close",
+      key: { providerItemId: turn.stamp.itemId },
+      status: stamp === null || stamp.isError ? "failed" : "completed",
+      item: {
+        type: "tool",
+        tool: ECHO_STAMP_TOOL_NAME,
+        server: "bb",
+        args: { text: turn.prompt },
+        ...(stamp === null
+          ? { error: "no reply" }
+          : stamp.isError
+            ? { error: stamp.content }
+            : { result: stamp.content }),
+      },
+      ...(turn.stamp.presentation === undefined
+        ? {}
+        : { presentation: turn.stamp.presentation }),
+    });
+  }
+
+  const receiptId = itemId(turn, "receipt");
+  const receipt: EchoReceipt = {
+    prompt: turn.prompt,
+    itemCount: turn.itemCount,
+    shouted: turn.providerOptions.values.shout,
+  };
+  const receiptPayload = turn.malformedReceipt
+    ? { prompt: 42, itemCount: "many" }
+    : receipt;
+  const receiptRow = receiptPresentation(receipt);
+  deltas.push(
+    {
+      kind: "item.open",
+      key: { providerItemId: receiptId },
+      item: {
+        type: "extension",
+        kind: ECHO_RECEIPT_KIND,
+        payload: receiptPayload,
+      },
+      presentation: receiptRow,
+    },
+    {
+      kind: "item.close",
+      key: { providerItemId: receiptId },
+      status: "completed",
+      item: {
+        type: "extension",
+        kind: ECHO_RECEIPT_KIND,
+        payload: receiptPayload,
+      },
+      presentation: receiptRow,
+    },
+  );
+
+  const mood: EchoMood = {
+    mood: session.turnsEchoed > 3 ? "bored" : "cheerful",
+    turnsEchoed: session.turnsEchoed,
+  };
+  deltas.push({
+    kind: "extension.state",
+    extensionKind: ECHO_MOOD_KIND,
+    payload: mood,
+  });
+
+  const options = turn.providerOptions.values;
+  const echoed = options.shout ? turn.prompt.toUpperCase() : turn.prompt;
+  const greeting = process.env[ECHO_GREETING_ENV];
+  const lines = [
+    `echo: ${echoed}`,
+    `providerOptions (${turn.providerOptions.source}): shout=${String(options.shout)} model=${options.model} promptMode=${options.promptMode ?? "none"}`,
+    `${ECHO_GREETING_ENV}=${greeting === undefined ? "<unset>" : greeting}`,
+    ...(stamp === null ? [] : [`${ECHO_STAMP_TOOL_NAME}: ${stamp.content}`]),
+  ];
+  const text = lines.join("\n");
+  const messageKey = { providerItemId: itemId(turn, "message") };
+  deltas.push(
+    {
+      kind: "item.open",
+      key: messageKey,
+      item: { type: "agentMessage", text: "" },
+      presentation: AGENT_MESSAGE_PRESENTATION,
+    },
+    {
+      kind: "item.textDelta",
+      key: messageKey,
+      channel: "agentMessage",
+      text: lines[0] ?? "",
+    },
+    {
+      kind: "item.textDelta",
+      key: messageKey,
+      channel: "agentMessage",
+      text: text.slice((lines[0] ?? "").length),
+    },
+    { kind: "item.textClose", key: messageKey, channel: "agentMessage", text },
+  );
+
+  const last: ThreadEventTokenUsageBreakdown = {
+    ...ZERO_TOKEN_USAGE,
+    inputTokens: turn.prompt.length,
+    outputTokens: text.length,
+    totalTokens: turn.prompt.length + text.length,
+  };
+  session.usageTotal = addTokenUsage(session.usageTotal, last);
+  deltas.push(
+    {
+      kind: "usage",
+      total: session.usageTotal,
+      last,
+      modelContextWindow: 8192,
+    },
+    {
+      kind: "contextWindow",
+      used: session.usageTotal.totalTokens,
+      size: 8192,
+      estimated: true,
+      attach: "open",
+    },
+    { kind: "turn.boundary", status: "completed" },
+  );
+  emitDeltas(session.threadId, deltas);
+}
+
+function openSession(args: {
+  threadId: string;
+  providerThreadId: string;
+  cwd: string;
+  dynamicTools: readonly DynamicTool[] | undefined;
+}): Session {
+  const session: Session = {
+    threadId: args.threadId,
+    providerThreadId: args.providerThreadId,
+    cwd: args.cwd,
+    turnsEchoed: 0,
+    usageTotal: ZERO_TOKEN_USAGE,
+    tools: new Map((args.dynamicTools ?? []).map((tool) => [tool.name, tool])),
+  };
+  sessions.set(args.threadId, session);
+  notify(BRIDGE_NOTIFICATION_METHODS.threadIdentity, {
+    threadId: args.threadId,
+    providerThreadId: args.providerThreadId,
+  });
+  emitDeltas(args.threadId, [{ kind: "session.reset" }]);
+  return session;
+}
 
 type RequestHandler = (id: JsonRpcId, params: unknown) => void;
 
+const ECHO_HEALTH: ProviderHealthResult = {
+  supported: true,
+  health: {
+    status: "ready",
+    statusMessage: null,
+    accountEmail: null,
+    planLabel: null,
+    installedVersion: null,
+    minimumSupportedVersion: null,
+    canInstall: false,
+    canUpdate: false,
+    loginCommand: null,
+  },
+};
+
 function invalidParams(id: JsonRpcId, method: string, issues: unknown): void {
-  respondError(
+  io.send({
+    jsonrpc: "2.0",
     id,
-    BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS,
-    `Invalid params for ${method}`,
-    issues,
-  );
+    error: {
+      code: BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS,
+      message: `Invalid params for ${method}`,
+      data: issues,
+    },
+  });
 }
 
 const handlers: Record<string, RequestHandler> = {
@@ -177,12 +591,18 @@ const handlers: Record<string, RequestHandler> = {
       invalidParams(id, BRIDGE_REQUEST_METHODS.initialize, parsed.error.issues);
       return;
     }
-    // All capabilities absent: sessionRestore, threadArchive, threadRename
-    // and threadGoalClear read false and fork reads "none", so the runtime
-    // will never send this bridge a capability-gated method.
-    respondResult(id, {
+    io.sendResult(id, {
       protocolVersion: PROVIDER_BRIDGE_PROTOCOL_VERSION,
-      capabilities: {},
+      capabilities: {
+        grammarVersions: [THREAD_DELTA_GRAMMAR_V3, THREAD_DELTA_GRAMMAR_V3],
+        sessionRestore: true,
+        threadArchive: false,
+        threadRename: false,
+        threadGoalClear: false,
+        fork: "none",
+        approvalEnforcedBy: "runtime",
+        steerMode: "queue",
+      },
     });
   },
 
@@ -192,8 +612,23 @@ const handlers: Record<string, RequestHandler> = {
       invalidParams(id, BRIDGE_REQUEST_METHODS.modelList, parsed.error.issues);
       return;
     }
-    // The echo agent exposes no models; the picker falls back to defaults.
-    respondResult(id, { models: [], selectedOnlyModels: [] });
+    io.sendResult(id, {
+      models: [{ ...ECHO_MODEL, model: ECHO_MODEL_ID }],
+      selectedOnlyModels: [],
+    });
+  },
+
+  [BRIDGE_REQUEST_METHODS.providerHealth]: (id, params) => {
+    const parsed = providerMaintenanceParamsSchema.safeParse(params);
+    if (!parsed.success) {
+      invalidParams(
+        id,
+        BRIDGE_REQUEST_METHODS.providerHealth,
+        parsed.error.issues,
+      );
+      return;
+    }
+    io.sendResult(id, ECHO_HEALTH);
   },
 
   [BRIDGE_REQUEST_METHODS.threadStart]: (id, params) => {
@@ -208,21 +643,18 @@ const handlers: Record<string, RequestHandler> = {
     }
     threadCounter += 1;
     const providerThreadId = `echo_${instanceNonce}_${threadCounter}`;
-    sessions.set(parsed.data.threadId, providerThreadId);
-    // Identity precedes every thread/event for the session.
-    notify(BRIDGE_NOTIFICATION_METHODS.threadIdentity, {
+    const session = openSession({
       threadId: parsed.data.threadId,
       providerThreadId,
+      cwd: parsed.data.cwd,
+      dynamicTools: parsed.data.dynamicTools,
     });
-    respondResult(id, { providerThreadId });
-    // A start that carries input runs its first turn immediately. It has no
-    // clientRequestId (only turn/start and turn/steer carry one), so no
-    // turn/input/accepted is emitted for it.
+    io.sendResult(id, { providerThreadId, sessionRestorable: true });
     if (parsed.data.input !== undefined && parsed.data.input.length > 0) {
       runEchoTurn({
-        threadId: parsed.data.threadId,
-        providerThreadId,
+        session,
         input: parsed.data.input,
+        options: parsed.data.options.providerOptions,
       });
     }
   },
@@ -237,15 +669,16 @@ const handlers: Record<string, RequestHandler> = {
       );
       return;
     }
-    // Stateless resume: re-adopt the caller's provider thread id. Turn and
-    // item ids stay unique across the resume because every minted id embeds
-    // the instance nonce plus a monotonic counter.
-    sessions.set(parsed.data.threadId, parsed.data.providerThreadId);
-    notify(BRIDGE_NOTIFICATION_METHODS.threadIdentity, {
+    openSession({
       threadId: parsed.data.threadId,
       providerThreadId: parsed.data.providerThreadId,
+      cwd: parsed.data.cwd,
+      dynamicTools: parsed.data.dynamicTools,
     });
-    respondResult(id, { providerThreadId: parsed.data.providerThreadId });
+    io.sendResult(id, {
+      providerThreadId: parsed.data.providerThreadId,
+      sessionRestorable: true,
+    });
   },
 
   [BRIDGE_REQUEST_METHODS.turnStart]: (id, params) => {
@@ -254,11 +687,20 @@ const handlers: Record<string, RequestHandler> = {
       invalidParams(id, BRIDGE_REQUEST_METHODS.turnStart, parsed.error.issues);
       return;
     }
-    respondResult(id, {});
+    const session = sessions.get(parsed.data.threadId);
+    if (session === undefined) {
+      io.sendError(
+        id,
+        BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS,
+        `No session for thread ${parsed.data.threadId}; send thread/start or thread/resume first`,
+      );
+      return;
+    }
+    io.sendResult(id, {});
     runEchoTurn({
-      threadId: parsed.data.threadId,
-      providerThreadId: parsed.data.providerThreadId,
+      session,
       input: parsed.data.input,
+      options: parsed.data.options.providerOptions,
       clientRequestId: parsed.data.clientRequestId,
     });
   },
@@ -269,9 +711,7 @@ const handlers: Record<string, RequestHandler> = {
       invalidParams(id, BRIDGE_REQUEST_METHODS.turnSteer, parsed.error.issues);
       return;
     }
-    // Echo turns settle synchronously, so a steer can never find its target
-    // turn still active. The honest reply is the typed protocol error.
-    respondError(
+    io.sendError(
       id,
       BRIDGE_JSON_RPC_ERRORS.NO_ACTIVE_TURN,
       `No active turn to steer (expected ${parsed.data.expectedTurnId})`,
@@ -284,25 +724,54 @@ const handlers: Record<string, RequestHandler> = {
       invalidParams(id, BRIDGE_REQUEST_METHODS.threadStop, parsed.error.issues);
       return;
     }
-    // Both intents drop the in-memory session. `release` detaches an idle
-    // session and must fabricate nothing; `interrupt` would settle an active
-    // turn, but echo turns are synchronous so none can be in flight.
     sessions.delete(parsed.data.threadId);
-    respondResult(id, {});
+    io.sendResult(id, {});
   },
 };
 
-// ---------------------------------------------------------------------------
-// Line handling. Exported so tests can drive the bridge in-process — the
-// conformance kit's transport calls handleLine and drains captured stdout.
-// ---------------------------------------------------------------------------
+const jsonRpcResponseSchema = z
+  .object({
+    id: z.union([z.string(), z.number()]),
+    result: z.unknown().optional(),
+    error: z.unknown().optional(),
+  })
+  .passthrough();
+
+function handleResponse(message: unknown): void {
+  const parsed = jsonRpcResponseSchema.safeParse(message);
+  if (!parsed.success || typeof parsed.data.id !== "string") {
+    return;
+  }
+  const pending = pendingToolCalls.get(parsed.data.id);
+  if (pending === undefined) {
+    return;
+  }
+  pendingToolCalls.delete(parsed.data.id);
+  if (!sessions.has(pending.turn.session.threadId)) {
+    return;
+  }
+  if (parsed.data.error !== undefined) {
+    const error = z
+      .object({ message: z.string() })
+      .safeParse(parsed.data.error);
+    finishEchoTurn(pending.turn, {
+      content: error.success ? error.data.message : "tool call failed",
+      isError: true,
+    });
+    return;
+  }
+  const decoded = decodeToolCallResponsePayload(parsed.data.result);
+  finishEchoTurn(pending.turn, {
+    content: decoded.content,
+    isError: decoded.isError,
+  });
+}
 
 export function handleLine(line: string): void {
   let message: unknown;
   try {
     message = JSON.parse(line);
   } catch {
-    // A non-JSON line is ignored; the bridge stays alive.
     return;
   }
   if (
@@ -317,38 +786,32 @@ export function handleLine(line: string): void {
     method?: unknown;
     params?: unknown;
   };
-  // Request vs response is discriminated on the presence of `method`, never
-  // on result shape: a response-shaped line is not treated as a request.
   if (typeof method !== "string") {
+    handleResponse(message);
     return;
   }
   if (typeof id !== "string" && typeof id !== "number") {
-    // Notification: unknown ones are ignored by design.
     return;
   }
   const handler = handlers[method];
   if (handler === undefined) {
-    respondError(
+    io.sendError(
       id,
       BRIDGE_JSON_RPC_ERRORS.METHOD_NOT_FOUND,
       `Method not found: ${method}`,
     );
     return;
   }
-  handler(id, params);
+  runBridgeRequest({
+    request: { id, method, params },
+    sendError: io.sendError,
+    handleRequest: async (request) => handler(request.id, request.params),
+  });
 }
 
-/**
- * The bridge surface this plugin's host artifact exports. The daemon-side
- * bootstrap imports the artifact, finds this export, and owns the process:
- * argv, the plugin-scoped directories below, stdin framing, and signals.
- * Importing this module (the conformance test does) starts nothing.
- */
 export const experimental_providerBridge = experimental_defineProviderBridge({
   handleLine,
   start(context) {
-    // Proof that a bridge really is handed its plugin's own directories: the
-    // echo agent has nothing to persist, so it just records where it booted.
     writeFileSync(
       join(context.dataDir, "last-boot.json"),
       `${JSON.stringify({ pluginId: context.pluginId, tempDir: context.tempDir })}\n`,

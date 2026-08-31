@@ -3,18 +3,19 @@ import { NavLink } from "react-router-dom";
 import {
   assertNever,
   buildPendingInteractionApprovalResolution,
+  describePendingInteractionToolUse,
   formatPendingInteractionSubjectDetailLines,
+  type PendingInteractionToolUseAsk,
 } from "@bb/core-ui";
 import { extractShellCommandFromString } from "@bb/thread-view";
 import {
-  isApprovalPendingInteractionPayload,
-  isUserQuestionPendingInteractionPayload,
+  isPluginPendingInteraction,
   type ApprovalPendingInteractionPayload,
   type PendingInteraction,
   type PendingInteractionApprovalDecision,
   type PendingInteractionApprovalSubject,
   type PendingInteractionResolution,
-  type UserQuestionPendingInteractionPayload,
+  type PendingInteractionUserQuestionQuestion,
 } from "@bb/domain";
 import { Button } from "@bb/shared-ui/button";
 import { ExpandableLine } from "@/components/ui/expandable-line.js";
@@ -23,7 +24,18 @@ import { MarkdownPreview } from "@/components/ui/markdown-preview.js";
 import { getDetailScrollMaxHeightClass } from "@/components/ui/detail-scroll-size.js";
 import { UserQuestionAnswerForm } from "@/components/thread/user-questions/UserQuestionInteractionContent.js";
 import { useResolveThreadPendingInteraction } from "@/hooks/mutations/thread-interaction-mutations";
+import { PluginPendingInteractionComposer } from "@/components/plugin/PluginPendingInteractionComposer";
+import {
+  classifyInteractionRequest,
+  type InteractionRequestView,
+} from "./interaction-request";
 import { getMutationErrorMessage } from "@/lib/mutation-errors";
+import {
+  presentationIconName,
+  presentationTintStyle,
+} from "@/components/thread/timeline/presentation-display";
+import { PluginCompactIconMask } from "@/components/plugin/PluginIcon";
+import { usePluginIconUrl } from "@/lib/plugin-logos";
 import { cn } from "@bb/shared-ui/lib/utils";
 
 interface ThreadPendingInteractionSourceThread {
@@ -37,22 +49,27 @@ interface ThreadPendingInteractionBannerProps {
   threadId: string;
 }
 
+type ApprovalBannerSubject = Extract<
+  InteractionRequestView,
+  { family: "approval" }
+>["subject"];
+
 interface ApprovalPendingInteractionBannerProps {
   interaction: PendingInteraction;
   payload: ApprovalPendingInteractionPayload;
+  subject: ApprovalBannerSubject;
   sourceThread?: ThreadPendingInteractionSourceThread;
   threadId: string;
 }
 
 interface UserQuestionPendingInteractionBannerProps {
   interaction: PendingInteraction;
-  payload: UserQuestionPendingInteractionPayload;
+  questions: readonly PendingInteractionUserQuestionQuestion[];
   sourceThread?: ThreadPendingInteractionSourceThread;
   threadId: string;
 }
 
 interface BannerShellProps {
-  /** Heading line. Omitted when the body supplies its own (e.g. the question form). */
   title?: string;
   errorMessage?: string | null;
   footer?: ReactNode;
@@ -68,6 +85,7 @@ interface ApprovalSubject {
 interface BuildApprovalSubjectInput {
   interaction: PendingInteraction;
   payload: ApprovalPendingInteractionPayload;
+  subject: ApprovalBannerSubject;
 }
 
 export function ThreadPendingInteractionBanner({
@@ -75,31 +93,140 @@ export function ThreadPendingInteractionBanner({
   sourceThread,
   threadId,
 }: ThreadPendingInteractionBannerProps) {
-  if (interaction.payload.kind === "plugin") {
-    return null;
-  }
-  if (isUserQuestionPendingInteractionPayload(interaction.payload)) {
+  const request = classifyInteractionRequest(interaction);
+  if (request.family === "approval") {
     return (
-      <ThreadUserQuestionPendingInteractionBanner
+      <ApprovalPendingInteractionBanner
         interaction={interaction}
-        payload={interaction.payload}
+        payload={request.payload}
+        subject={request.subject}
         sourceThread={sourceThread}
         threadId={threadId}
       />
     );
   }
-
-  if (!isApprovalPendingInteractionPayload(interaction.payload)) {
-    return assertNever(interaction.payload);
+  switch (request.kind) {
+    case "user_question":
+      return (
+        <ThreadUserQuestionPendingInteractionBanner
+          interaction={interaction}
+          questions={request.questions}
+          sourceThread={sourceThread}
+          threadId={threadId}
+        />
+      );
+    case "plan_review":
+      return (
+        <PlanReviewRequestBanner
+          interaction={interaction}
+          request={request}
+          sourceThread={sourceThread}
+          threadId={threadId}
+        />
+      );
+    default:
+      return (
+        <div
+          data-testid="plugin-request-banner"
+          data-request-kind={request.kind}
+        >
+          {sourceThread ? (
+            <NavLink
+              to={sourceThread.href}
+              className="mb-1 block text-xs text-muted-foreground no-underline hover:underline"
+            >
+              From child thread: {sourceThread.title}
+            </NavLink>
+          ) : null}
+          <PluginPendingInteractionComposer
+            interaction={interaction}
+            request={{
+              pluginId: request.pluginId,
+              rendererId: request.name,
+              title: request.title,
+              data: request.data,
+            }}
+            dismissal={
+              isPluginPendingInteraction(interaction) ? "cancel" : "stop-turn"
+            }
+          />
+        </div>
+      );
   }
+}
 
+interface PlanReviewRequestBannerProps {
+  interaction: PendingInteraction;
+  request: Extract<InteractionRequestView, { kind: "plan_review" }>;
+  sourceThread?: ThreadPendingInteractionSourceThread;
+  threadId: string;
+}
+
+function PlanReviewRequestBanner({
+  interaction,
+  request,
+  sourceThread,
+  threadId,
+}: PlanReviewRequestBannerProps) {
+  const resolvePendingInteraction = useResolveThreadPendingInteraction();
+  const isResolving = interaction.status === "resolving";
+  const submittedDecision = approvalResolutionDecision(interaction.resolution);
+  const mutationErrorMessage = resolvePendingInteraction.error
+    ? getMutationErrorMessage({
+        error: resolvePendingInteraction.error,
+        fallbackMessage: "Failed to resolve plan review",
+        lifecycleOperation: "resolve_interaction",
+      })
+    : null;
+  const submitDisabled = resolvePendingInteraction.isPending || isResolving;
+  const { approval } = request;
+  const submitDecision = (
+    decision: PendingInteractionApprovalDecision,
+  ): void => {
+    const resolution = buildPendingInteractionApprovalResolution(
+      interaction,
+      decision,
+    );
+    void resolvePendingInteraction
+      .mutateAsync({ threadId, interactionId: interaction.id, resolution })
+      .catch(() => {});
+  };
+  const { plan, planFilePath } = request.review;
   return (
-    <ApprovalPendingInteractionBanner
-      interaction={interaction}
-      payload={interaction.payload}
+    <BannerShell
+      title={approval.reason ?? "Ready to code?"}
+      errorMessage={mutationErrorMessage}
       sourceThread={sourceThread}
-      threadId={threadId}
-    />
+      footer={approval.availableDecisions.map((decision) => (
+        <ApprovalDecisionButton
+          key={decision}
+          decision={decision}
+          disabled={submitDisabled}
+          isLoading={isResolving && submittedDecision === decision}
+          onClick={() => submitDecision(decision)}
+          subjectKind="plan"
+        />
+      ))}
+    >
+      <div
+        className="overflow-hidden rounded-lg border border-border bg-card"
+        data-testid="plan-review-request"
+      >
+        <div
+          className={cn(
+            getDetailScrollMaxHeightClass("base"),
+            "overflow-auto px-3 py-2",
+          )}
+        >
+          <MarkdownPreview content={plan} className="text-xs" />
+        </div>
+        {planFilePath ? (
+          <p className="truncate border-t border-border px-3 py-2 font-mono text-xs text-muted-foreground">
+            {planFilePath}
+          </p>
+        ) : null}
+      </div>
+    </BannerShell>
   );
 }
 
@@ -147,15 +274,16 @@ function BannerShell({
 function ApprovalPendingInteractionBanner({
   interaction,
   payload,
+  subject,
   sourceThread,
   threadId,
 }: ApprovalPendingInteractionBannerProps) {
   const resolvePendingInteraction = useResolveThreadPendingInteraction();
   const isResolving = interaction.status === "resolving";
   const submittedDecision = approvalResolutionDecision(interaction.resolution);
-  const subject = useMemo(
-    () => buildApprovalSubject({ interaction, payload }),
-    [interaction, payload],
+  const view = useMemo(
+    () => buildApprovalSubject({ interaction, payload, subject }),
+    [interaction, payload, subject],
   );
   const mutationErrorMessage = resolvePendingInteraction.error
     ? getMutationErrorMessage({
@@ -184,7 +312,7 @@ function ApprovalPendingInteractionBanner({
 
   return (
     <BannerShell
-      title={subject.title}
+      title={view.title}
       errorMessage={mutationErrorMessage}
       sourceThread={sourceThread}
       footer={payload.availableDecisions.map((decision) => (
@@ -194,31 +322,29 @@ function ApprovalPendingInteractionBanner({
           disabled={submitDisabled}
           isLoading={isResolving && submittedDecision === decision}
           onClick={() => submitDecision(decision)}
-          subjectKind={payload.subject.kind}
+          subjectKind={subject.kind}
         />
       ))}
     >
-      {subject.body}
+      {view.body}
     </BannerShell>
   );
 }
 
 function ThreadUserQuestionPendingInteractionBanner({
   interaction,
-  payload,
+  questions,
   sourceThread,
   threadId,
 }: UserQuestionPendingInteractionBannerProps) {
   const isResolving = interaction.status === "resolving";
 
-  // No shell title: the form supplies its own heading (the current question
-  // prompt) plus the question tab strip.
   return (
     <BannerShell sourceThread={sourceThread}>
       <UserQuestionAnswerForm
         interactionId={interaction.id}
         isResolving={isResolving}
-        questions={payload.questions}
+        questions={questions}
         threadId={threadId}
       />
     </BannerShell>
@@ -259,9 +385,6 @@ function ApprovalDecisionButton({
 function approvalDecisionButtonVariant(
   decision: PendingInteractionApprovalDecision,
 ): "default" | "outline" | "ghost" {
-  // Three-level hierarchy: filled primary for the safest yes, outline for the
-  // longer-lived yes, ghost for the dismissive no. Keeps Deny visible without
-  // letting it compete with the affirmative actions.
   switch (decision) {
     case "allow_once":
       return "default";
@@ -302,20 +425,56 @@ function ApprovalDetailList({
   );
 }
 
+function ToolUseAskCard({ ask }: { ask: PendingInteractionToolUseAsk }) {
+  const iconUrl = usePluginIconUrl(ask.icon.glyph);
+  return (
+    <div
+      className="min-w-0 max-w-full overflow-hidden rounded-lg border border-border bg-card px-3 py-2"
+      data-testid="tool-use-ask"
+    >
+      <div className="flex min-w-0 items-center gap-2 text-xs text-foreground">
+        {iconUrl !== undefined ? (
+          <PluginCompactIconMask
+            url={iconUrl}
+            className="size-3.5"
+            style={presentationTintStyle(ask)}
+          />
+        ) : (
+          <Icon
+            name={presentationIconName(ask) ?? "Terminal"}
+            className="size-3.5 shrink-0"
+            style={presentationTintStyle(ask)}
+          />
+        )}
+        <span className="min-w-0 truncate font-mono">
+          {ask.headline ?? ask.tool}
+        </span>
+      </div>
+      {ask.headline !== null ? (
+        <p className="mt-1 text-xs text-muted-foreground">Tool: {ask.tool}</p>
+      ) : null}
+      {ask.detail !== null ? (
+        <MarkdownPreview
+          content={ask.detail}
+          className="mt-1 text-xs text-muted-foreground"
+          imagePolicy="alt-text"
+        />
+      ) : null}
+    </div>
+  );
+}
+
 function buildApprovalSubject({
   interaction,
   payload,
+  subject,
 }: BuildApprovalSubjectInput): ApprovalSubject {
-  switch (payload.subject.kind) {
+  switch (subject.kind) {
     case "command": {
-      const rawCommand = payload.subject.command;
+      const rawCommand = subject.command;
       const command = rawCommand
         ? (extractShellCommandFromString(rawCommand) ?? rawCommand)
         : null;
-      // The cwd value is a self-describing absolute path, so the "Cwd: "
-      // prefix from the shared formatter reads as redundant in the banner.
-      // Strip the label here; other prefixed lines (Action:, Session grant:)
-      // need their labels to be readable.
       const detailLines = formatPendingInteractionSubjectDetailLines(
         interaction,
       )
@@ -373,31 +532,15 @@ function buildApprovalSubject({
           ) : null,
       };
     }
-    case "plan": {
-      const { plan, planFilePath } = payload.subject;
+    case "tool_use": {
+      const ask = describePendingInteractionToolUse({ ...payload, subject });
       return {
-        title: payload.reason ?? "Ready to code?",
-        body: (
-          <div className="overflow-hidden rounded-lg border border-border bg-card">
-            <div
-              className={cn(
-                getDetailScrollMaxHeightClass("base"),
-                "overflow-auto px-3 py-2",
-              )}
-            >
-              <MarkdownPreview content={plan} className="text-xs" />
-            </div>
-            {planFilePath ? (
-              <p className="truncate border-t border-border px-3 py-2 font-mono text-xs text-muted-foreground">
-                {planFilePath}
-              </p>
-            ) : null}
-          </div>
-        ),
+        title: ask.title,
+        body: <ToolUseAskCard ask={ask} />,
       };
     }
     default:
-      return assertNever(payload.subject);
+      return assertNever(subject);
   }
 }
 
@@ -405,8 +548,6 @@ function labelForApprovalDecision(
   decision: PendingInteractionApprovalDecision,
   subjectKind: PendingInteractionApprovalSubject["kind"],
 ): string {
-  // A plan verdict decides whether the work starts, not what the agent may
-  // touch, so the permission vocabulary would misdescribe both buttons.
   if (subjectKind === "plan") {
     return decision === "deny" ? "Keep planning" : "Approve plan";
   }

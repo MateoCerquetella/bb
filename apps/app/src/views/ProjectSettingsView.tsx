@@ -1,12 +1,8 @@
 import { useCallback, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-// Route views render icons outside the shell's core set. Importing the
-// extended registry here ships it as a static dependency of this route chunk,
-// so those icons never flash blank waiting for an on-demand load.
 import "@bb/shared-ui/icon-extended";
 import {
   findLocalPathProjectSourceForHost,
-  isLocalPathProjectSource,
   type Host,
   type LocalPathProjectSource,
 } from "@bb/domain";
@@ -87,10 +83,7 @@ export function ProjectSettingsView() {
           { onSuccess: closeDialog },
         );
       } else if (target.kind === "update") {
-        const source = sources.find(
-          (candidate): candidate is LocalPathProjectSource =>
-            isLocalPathProjectSource(candidate) && candidate.hostId === hostId,
-        );
+        const source = sources.find((candidate) => candidate.hostId === hostId);
         if (!source) return;
         updateLocalSource.mutate(
           { projectId, sourceId: source.id, path },
@@ -129,10 +122,7 @@ export function ProjectSettingsView() {
   const pickerHostSourcePaths = useMemo(() => {
     if (!pickerHostId) return [];
     return sources
-      .filter(
-        (source): source is LocalPathProjectSource =>
-          isLocalPathProjectSource(source) && source.hostId === pickerHostId,
-      )
+      .filter((source) => source.hostId === pickerHostId)
       .map((source) => source.path);
   }, [pickerHostId, sources]);
   const pathExistence = useHostPathExistence(
@@ -159,9 +149,6 @@ export function ProjectSettingsView() {
     () => new Map(hosts.map((host) => [host.id, host])),
     [hosts],
   );
-  // Machine surfaces (source-row chrome, the machine-aware add menu from
-  // Mockup E) only appear once there's more than one machine to tell apart —
-  // a single-host setup keeps the pre-experiment UI unchanged.
   const multipleMachines = hosts.length > 1;
   const showAddLocalSourceButton =
     !multipleMachines &&
@@ -246,9 +233,7 @@ export function ProjectSettingsView() {
               <SettingsRowList>
                 {sources.map((source) => {
                   const isPickerHostSource =
-                    isLocalPathProjectSource(source) &&
-                    pickerHostId != null &&
-                    source.hostId === pickerHostId;
+                    pickerHostId != null && source.hostId === pickerHostId;
                   const isInvalid =
                     isPickerHostSource &&
                     isHostPathMissing(pathExistence, source.path);

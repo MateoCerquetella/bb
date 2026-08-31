@@ -65,8 +65,6 @@ class FakeDesktopWindowWebContents implements DesktopWindowWebContents {
   public readonly contextMenuListeners: Parameters<
     DesktopContextMenuWebContents["on"]
   >[1][] = [];
-  public readonly executedScripts: string[] = [];
-  public readonly insertedTexts: string[] = [];
   public readonly replacedMisspellings: string[] = [];
   public windowOpenHandler: DesktopWindowOpenHandler | null = null;
   public readonly zoomFactors: number[] = [];
@@ -79,15 +77,6 @@ class FakeDesktopWindowWebContents implements DesktopWindowWebContents {
     if (options.mode === "detach") {
       this.devToolsOpenCount += 1;
     }
-  }
-
-  executeJavaScript(script: string): Promise<unknown> {
-    this.executedScripts.push(script);
-    return Promise.resolve(null);
-  }
-
-  insertText(text: string): void {
-    this.insertedTexts.push(text);
   }
 
   send(channel: string, payload: unknown): void {
@@ -251,6 +240,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -279,8 +270,6 @@ describe("desktop window factory", () => {
     expect(createdWindows[0]?.webContents.spellCheckerEnabledValues).toEqual([
       true,
     ]);
-    // Equal x/y inset places the traffic lights on a 45° diagonal from the
-    // window's top-left corner (see MACOS_TRAFFIC_LIGHT_DIAGONAL_INSET).
     expect(createdWindows[0]?.options.trafficLightPosition).toEqual({
       x: 18,
       y: 18,
@@ -346,6 +335,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -404,6 +395,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -459,6 +452,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -516,6 +511,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -576,6 +573,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: true,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -634,6 +633,8 @@ describe("desktop window factory", () => {
       ],
       icon: undefined,
       isMac: false,
+      isLinuxTransparent: false,
+      isLinuxFrameless: false,
       isQuitting() {
         return false;
       },
@@ -645,6 +646,85 @@ describe("desktop window factory", () => {
     await factory.createWindow({ initialUrl: null, stateKey: null });
 
     expect(createdWindows[0]?.options).not.toHaveProperty("frame");
+    expect(createdWindows[0]?.options).not.toHaveProperty("titleBarStyle");
+    expect(createdWindows[0]?.options).not.toHaveProperty(
+      "trafficLightPosition",
+    );
+  });
+
+  it("enables transparent Linux windows when requested", async () => {
+    const tempDir = await createTempDir();
+    const createdWindows: FakeDesktopWindow[] = [];
+    const browserWindowCreator: DesktopBrowserWindowCreator = {
+      create(options) {
+        const browserWindow = new FakeDesktopWindow({ options });
+        createdWindows.push(browserWindow);
+        return browserWindow;
+      },
+    };
+    const factory = createDesktopWindowFactory({
+      browserWindowCreator,
+      createWindowStateKey() {
+        return "transparent-linux-window";
+      },
+      displayWorkAreas: [{ height: 900, width: 1440, x: 0, y: 0 }],
+      icon: undefined,
+      isLinuxTransparent: true,
+      isMac: false,
+      isLinuxFrameless: false,
+      isQuitting() {
+        return false;
+      },
+      openExternalUrl() {},
+      preloadPath: "/tmp/preload.cjs",
+      userDataPath: tempDir.path,
+    });
+
+    await factory.createWindow({ initialUrl: null, stateKey: null });
+
+    expect(createdWindows[0]?.options.transparent).toBe(true);
+    expect(createdWindows[0]?.options.backgroundColor).toBe("#00000000");
+    expect(createdWindows[0]?.options).not.toHaveProperty("frame");
+  });
+
+  it("removes the native window frame when requested on Linux", async () => {
+    const tempDir = await createTempDir();
+    const createdWindows: FakeDesktopWindow[] = [];
+    const browserWindowCreator: DesktopBrowserWindowCreator = {
+      create(options) {
+        const browserWindow = new FakeDesktopWindow({ options });
+        createdWindows.push(browserWindow);
+        return browserWindow;
+      },
+    };
+    const factory = createDesktopWindowFactory({
+      browserWindowCreator,
+      createWindowStateKey() {
+        return "frameless-linux-window";
+      },
+      displayWorkAreas: [
+        {
+          height: 900,
+          width: 1440,
+          x: 0,
+          y: 0,
+        },
+      ],
+      icon: undefined,
+      isMac: false,
+      isLinuxTransparent: false,
+      isLinuxFrameless: true,
+      isQuitting() {
+        return false;
+      },
+      openExternalUrl() {},
+      preloadPath: "/tmp/preload.cjs",
+      userDataPath: tempDir.path,
+    });
+
+    await factory.createWindow({ initialUrl: null, stateKey: null });
+
+    expect(createdWindows[0]?.options.frame).toBe(false);
     expect(createdWindows[0]?.options).not.toHaveProperty("titleBarStyle");
     expect(createdWindows[0]?.options).not.toHaveProperty(
       "trafficLightPosition",

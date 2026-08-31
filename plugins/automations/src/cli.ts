@@ -9,12 +9,16 @@ import type { AutomationService } from "./service.js";
 import type {
   AgentEnvironment,
   AgentExecutionUpdate,
+  AutomationReadProblem,
+  AutomationReadResult,
   AutomationResponse,
   AutomationRunResponse,
   AutomationScriptInterpreter,
   CreateAutomationInput,
   PermissionMode,
+  ReasoningLevel,
   ResolvedCreateAutomationInput,
+  ServiceTier,
   UpdateAutomationInput,
 } from "./rpc-types.js";
 import {
@@ -155,6 +159,30 @@ function parsePermissionMode(
   throw new Error(
     "Invalid --permission-mode. Expected accept-edits, auto, or full.",
   );
+}
+
+function parseReasoningLevel(value: string): ReasoningLevel {
+  if (
+    value === "none" ||
+    value === "low" ||
+    value === "medium" ||
+    value === "high" ||
+    value === "xhigh" ||
+    value === "ultracode" ||
+    value === "max" ||
+    value === "ultra"
+  ) {
+    return value;
+  }
+  throw new Error(
+    "Invalid --reasoning. Expected none, low, medium, high, xhigh, ultracode, max, or ultra.",
+  );
+}
+
+function parseServiceTier(value: string): ServiceTier | null {
+  if (value === "default" || value === "fast") return value;
+  if (value === "none") return null;
+  throw new Error("Invalid --service-tier. Expected default, fast, or none.");
 }
 
 function validateAgentTargetOptions(args: ParsedArgs): void {
@@ -301,11 +329,6 @@ const threadEnvironmentHostSchema = z
   })
   .passthrough();
 
-/**
- * Picks the host whose filesystem `--script-file` is read from. `--host
- * <name-or-id>` wins; inside a thread the thread's environment host is used;
- * otherwise the server's primary host (`undefined` for `bb.sdk.files.read`).
- */
 async function resolveScriptFileHostId(
   bb: Pick<BbPluginApi, "sdk">,
   ctx: Pick<PluginCliContext, "threadId">,
@@ -348,18 +371,11 @@ async function resolveScriptFileHostId(
 }
 
 type ScriptFileSource = {
-  /** Absolute path on the source host. */
   path: string;
-  /** Host that owns `path`; `undefined` is the server's primary host. */
   hostId: string | undefined;
   content: string;
 };
 
-/**
- * The plugin CLI runs inside the server, so a local `readFile` would read the
- * server's filesystem. Read `--script-file` through the host file API on the
- * invoking host instead, resolving relative paths against the CLI's cwd.
- */
 async function loadScriptFileSource(
   bb: Pick<BbPluginApi, "sdk">,
   args: ParsedArgs,
@@ -397,7 +413,6 @@ async function loadScriptFileSource(
 
 type BuiltExecution = {
   execution: ResolvedCreateAutomationInput["execution"];
-  /** Set when `--script-file` supplied the script. */
   scriptSource?: ScriptFileSource;
 };
 
@@ -441,12 +456,21 @@ async function buildExecution(
     }
     validateAgentTargetOptions(args);
     const environment = await buildAgentEnvironment(bb, args);
+    const reasoning = flag(args, "reasoning");
+    const serviceTier = flag(args, "service-tier");
+    const parsedServiceTier =
+      serviceTier === undefined ? undefined : parseServiceTier(serviceTier);
     return {
       execution: {
         mode: "agent",
         prompt,
         providerId: provider,
         model,
+        reasoningLevel:
+          reasoning === undefined ? "medium" : parseReasoningLevel(reasoning),
+        ...(parsedServiceTier === null || parsedServiceTier === undefined
+          ? {}
+          : { serviceTier: parsedServiceTier }),
         permissionMode: await resolvePermissionMode(
           bb,
           provider,
@@ -463,6 +487,8 @@ async function buildExecution(
   if (
     args.flags.has("provider") ||
     args.flags.has("model") ||
+    args.flags.has("reasoning") ||
+    args.flags.has("service-tier") ||
     args.flags.has("permission-mode") ||
     args.flags.has("target-thread") ||
     args.flags.has("environment") ||
@@ -497,8 +523,6 @@ async function buildExecution(
 }
 
 const COMPLETE_EXECUTION_FLAG_NAMES = [
-  "provider",
-  "model",
   "script",
   "script-file",
   "interpreter",
@@ -512,6 +536,10 @@ async function buildAgentExecutionUpdate(
 ): Promise<AgentExecutionUpdate | undefined> {
   const agentOptionNames = [
     "prompt",
+    "provider",
+    "model",
+    "reasoning",
+    "service-tier",
     "permission-mode",
     "target-thread",
     "environment",
@@ -523,6 +551,16 @@ async function buildAgentExecutionUpdate(
   validateAgentTargetOptions(args);
   const update: AgentExecutionUpdate = {};
   if (args.flags.has("prompt")) update.prompt = requireFlag(args, "prompt");
+  if (args.flags.has("provider")) {
+    update.providerId = requireFlag(args, "provider");
+  }
+  if (args.flags.has("model")) update.model = requireFlag(args, "model");
+  if (args.flags.has("reasoning")) {
+    update.reasoningLevel = parseReasoningLevel(requireFlag(args, "reasoning"));
+  }
+  if (args.flags.has("service-tier")) {
+    update.serviceTier = parseServiceTier(requireFlag(args, "service-tier"));
+  }
   if (args.flags.has("permission-mode")) {
     update.permissionMode = parsePermissionMode(
       requireFlag(args, "permission-mode"),
@@ -568,7 +606,14 @@ async function buildUpdateRequest(
     request.trigger = buildTrigger(args);
   }
   let scriptSource: ScriptFileSource | undefined;
-  if (COMPLETE_EXECUTION_FLAG_NAMES.some((name) => args.flags.has(name))) {
+  const replacesAgentExecution =
+    args.flags.has("prompt") &&
+    args.flags.has("provider") &&
+    args.flags.has("model");
+  if (
+    replacesAgentExecution ||
+    COMPLETE_EXECUTION_FLAG_NAMES.some((name) => args.flags.has(name))
+  ) {
     const built = await buildExecution(bb, args, ctx);
     request.execution = built.execution;
     scriptSource = built.scriptSource;
@@ -602,11 +647,19 @@ function formatAutomationTrigger(automation: AutomationResponse): string {
   return `${automation.trigger.cron} (${automation.trigger.timezone})`;
 }
 
-function printAutomation(automation: AutomationResponse): string {
+type PrintableAutomation =
+  | AutomationResponse
+  | Extract<AutomationReadProblem, { problem: "missing-agent-prompt" }>;
+
+function printAutomation(
+  automation: PrintableAutomation,
+  status?: string,
+): string {
   const lines = [
     "",
     `  ID:        ${automation.id}`,
     `  Name:      ${automation.name}`,
+    ...(status === undefined ? [] : [`  Status:    ${status}`]),
     `  Enabled:   ${automation.enabled ? "yes" : "no"}`,
     `  Mode:      ${automation.execution.mode}`,
     `  Schedule:  ${formatAutomationTrigger(automation)}`,
@@ -621,23 +674,26 @@ function printAutomation(automation: AutomationResponse): string {
   ) {
     lines.push(`  Script:    ${automation.execution.storedScriptPath}`);
   }
+  if (automation.execution.mode === "agent") {
+    lines.push(
+      `  Provider:  ${automation.execution.providerId}`,
+      `  Model:     ${automation.execution.model}`,
+      `  Reasoning: ${automation.execution.reasoningLevel}`,
+      `  Tier:      ${automation.execution.serviceTier ?? "-"}`,
+      `  Permission: ${automation.execution.permissionMode}`,
+    );
+  }
   if (automation.lastError) lines.push(`  Error:     ${automation.lastError}`);
   lines.push("");
   return `${lines.join("\n")}\n`;
 }
 
-/** Quotes one argument for POSIX shells; plain tokens stay bare. */
 function shellQuote(value: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(value)
     ? value
     : `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-/**
- * The exact command that refreshes the stored copy from the source file.
- * `--script-file` replaces the whole execution, so the command repeats the
- * effective interpreter, timeout, env, and source host.
- */
 function refreshScriptFileCommand(
   automation: AutomationResponse,
   source: ScriptFileSource,
@@ -664,10 +720,6 @@ function refreshScriptFileCommand(
   return argv.map(shellQuote).join(" ");
 }
 
-/**
- * Explains that `--script-file` stored a snapshot copy, so edits to the source
- * path do not reach the automation until it is updated again.
- */
 function printScriptFileSnapshotNote(
   automation: AutomationResponse,
   source: ScriptFileSource | undefined,
@@ -701,18 +753,58 @@ function table(head: string[], rows: string[][]): string {
   return ["", format(head), ...rows.map(format), ""].join("\n") + "\n";
 }
 
-function printAutomationTable(automations: AutomationResponse[]): string {
+function printAutomationProblem(automation: AutomationReadProblem): string {
+  if (automation.problem === "missing-agent-prompt") {
+    return printAutomation(automation, "Prompt required");
+  }
+  return (
+    [
+      "",
+      `  ID:        ${automation.id}`,
+      `  Name:      ${automation.name}`,
+      "  Status:    Invalid data",
+      "",
+    ].join("\n") + "\n"
+  );
+}
+
+function printAutomationTable(automations: AutomationReadResult[]): string {
   return table(
-    ["ID", "Name", "On", "Schedule", "Next run", "Runs", "Origin"],
-    automations.map((automation) => [
-      automation.id,
-      automation.name,
-      automation.enabled ? "yes" : "no",
-      formatAutomationTrigger(automation),
-      formatTimestamp(automation.nextRunAt),
-      String(automation.runCount),
-      automation.origin,
-    ]),
+    ["ID", "Name", "Status", "On", "Schedule", "Next run", "Runs", "Origin"],
+    automations.map((automation) =>
+      "problem" in automation
+        ? automation.problem === "missing-agent-prompt"
+          ? [
+              automation.id,
+              automation.name,
+              "Prompt required",
+              automation.enabled ? "yes" : "no",
+              formatAutomationTrigger(automation),
+              formatTimestamp(automation.nextRunAt),
+              String(automation.runCount),
+              automation.origin,
+            ]
+          : [
+              automation.id,
+              automation.name,
+              "Invalid data",
+              "-",
+              "-",
+              "-",
+              "-",
+              "-",
+            ]
+        : [
+            automation.id,
+            automation.name,
+            "-",
+            automation.enabled ? "yes" : "no",
+            formatAutomationTrigger(automation),
+            formatTimestamp(automation.nextRunAt),
+            String(automation.runCount),
+            automation.origin,
+          ],
+    ),
   );
 }
 
@@ -733,9 +825,9 @@ function helpText(): string {
   return `Automation commands
 
 bb automation list --project <id>
-bb automation create --project <id> --name <name> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration>) (--prompt <text> --provider <id> --model <model> | --script <inline> | --script-file <path> [--host <name-or-id>])
+bb automation create --project <id> --name <name> (--cron <expr> --timezone <tz> | --at <datetime> | --in <duration>) (--prompt <text> --provider <id> --model <model> [--reasoning <level>] [--service-tier default|fast] | --script <inline> | --script-file <path> [--host <name-or-id>])
 bb automation show <automationId> --project <id>
-bb automation update <automationId> --project <id> [--name <name>] [schedule flags] [complete agent/script execution flags | partial agent update flags]
+bb automation update <automationId> --project <id> [--name <name>] [schedule flags] [complete agent/script execution flags | --provider <id> --model <model> --reasoning <level> --service-tier default|fast|none]
 bb automation pause <automationId> --project <id>
 bb automation resume <automationId> --project <id>
 bb automation run <automationId> --project <id> [--idempotency-key <key>]
@@ -857,7 +949,14 @@ export function registerAutomationCli(args: {
             automationId,
           });
           const json = optionalJson(parsed, found);
-          return { exitCode: 0, stdout: json ?? printAutomation(found) };
+          return {
+            exitCode: 0,
+            stdout:
+              json ??
+              ("problem" in found
+                ? printAutomationProblem(found)
+                : printAutomation(found)),
+          };
         }
         if (command === "update") {
           const { request, scriptSource } = await buildUpdateRequest(

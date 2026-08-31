@@ -149,9 +149,6 @@ function toRetryControlError(error: ServerResponseError): Error {
   return error.retryable ? error : new AbortError(error);
 }
 
-// The client only ever calls fetchFn(url, init); it never uses fetch.preconnect.
-// Typing the dependency as fetch's call signature (not `typeof fetch`) keeps it
-// precise and lets plain function / vi.fn mocks satisfy it.
 export type FetchFn = (
   ...args: Parameters<typeof fetch>
 ) => ReturnType<typeof fetch>;
@@ -162,7 +159,6 @@ interface CreateServerClientOptions {
   logger: HostDaemonLogger;
   machineCredential?: string;
   getSessionId: () => string;
-  /** Runs before each POST attempt so retryable ordering preconditions can be repaired. */
   beforeInteractiveRequestRegistrationAttempt?: () => Promise<void>;
   fetchFn?: FetchFn;
 }
@@ -174,6 +170,7 @@ interface OpenSessionArgs {
   hostType: HostDaemonSessionOpenRequest["hostType"];
   dataDir: string;
   instanceId: string;
+  localApiPort: number | null;
   activeThreads: HostDaemonActiveThread[] | Promise<HostDaemonActiveThread[]>;
   loadedEnvironments:
     | HostDaemonLoadedEnvironment[]
@@ -316,7 +313,6 @@ function validateHostArtifactPartialByteLength(
   }
 }
 
-/** A declared content-length that disagrees is refused before a byte is read. */
 function assertHostArtifactContentLength(
   response: Response,
   expectedByteLength: number,
@@ -339,15 +335,6 @@ function assertHostArtifactContentLength(
   }
 }
 
-/**
- * Read an executable artifact response — a plugin host bundle or a provider
- * bridge bundle — enforcing the declared length and the absolute ceiling as
- * the stream arrives, so a server that lies about either is cut off mid-body
- * instead of after the daemon has allocated it.
- *
- * `maxBytes` is an internal seam for exercising the limit without allocating
- * the production cap.
- */
 export async function readHostArtifactBytes(
   response: Response,
   expectedByteLength: number,
@@ -475,6 +462,7 @@ export function createServerClient(
           options.machineCredential.trim().length > 0,
         platform: resolveHostPlatform(),
         dataDir: args.dataDir,
+        localApiPort: args.localApiPort,
         protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
         activeThreads: await args.activeThreads,
         loadedEnvironments: await args.loadedEnvironments,
@@ -533,10 +521,6 @@ export function createServerClient(
     },
 
     async fetchSkillTree(treeHash: string): Promise<HostDaemonSkillTree> {
-      // Skill trees ride the same authenticated transport as the rest of the
-      // daemon protocol and are hash-verified after download. For a trusted-LAN
-      // setup, that declared network is the boundary even when it uses HTTP.
-      // Attachments and self-update intentionally retain stricter guards.
       const response = await fetchFn(
         buildInternalUrl(`/skills/tree/${encodeURIComponent(treeHash)}`),
         { method: "GET", headers: headers() },
@@ -566,7 +550,6 @@ export function createServerClient(
       return readHostArtifactBytes(response, args.expectedByteLength);
     },
 
-
     async postEvents(
       events: HostDaemonEventEnvelope[],
     ): Promise<EventPostResult> {
@@ -588,7 +571,6 @@ export function createServerClient(
       const parsed = hostDaemonEventBatchResponseSchema.parse(json);
       return {
         acceptedEvents: parsed.acceptedEvents,
-        kind: "accepted",
         rejectedEvents: parsed.rejectedEvents,
       };
     },

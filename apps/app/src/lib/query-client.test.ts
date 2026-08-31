@@ -117,6 +117,157 @@ describe("createAppQueryClient", () => {
     queryClient.clear();
   });
 
+  it("keeps the default focus refetch when no gate is configured", async () => {
+    const queryClient = createAppQueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+      showMutationErrorToasts: false,
+    });
+    queryClient.mount();
+
+    const queryFn = vi.fn(() => Promise.resolve("data"));
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ["focus-ungated"],
+      queryFn,
+      staleTime: 0,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    await vi.waitFor(() => {
+      expect(observer.getCurrentResult().data).toBe("data");
+    });
+
+    window.dispatchEvent(new Event("pageshow"));
+    await vi.waitFor(() => {
+      expect(queryFn).toHaveBeenCalledTimes(2);
+    });
+
+    unsubscribe();
+    queryClient.unmount();
+    queryClient.clear();
+  });
+
+  it("skips the default focus refetch while the gate reports realtime coverage", async () => {
+    let realtimeConnected = true;
+    const queryClient = createAppQueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+      shouldRefetchOnWindowFocus: () => !realtimeConnected,
+      showMutationErrorToasts: false,
+    });
+    queryClient.mount();
+
+    const queryFn = vi.fn(() => Promise.resolve("data"));
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ["focus-gated"],
+      queryFn,
+      staleTime: 0,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    await vi.waitFor(() => {
+      expect(observer.getCurrentResult().data).toBe("data");
+    });
+    expect(queryFn).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("pageshow"));
+    await Promise.resolve();
+    expect(queryFn).toHaveBeenCalledTimes(1);
+
+    realtimeConnected = false;
+    window.dispatchEvent(new Event("pageshow"));
+    await vi.waitFor(() => {
+      expect(queryFn).toHaveBeenCalledTimes(2);
+    });
+
+    unsubscribe();
+    queryClient.unmount();
+    queryClient.clear();
+  });
+
+  it("keeps the default reconnect refetch when no gate is configured", async () => {
+    const queryClient = createAppQueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+      showMutationErrorToasts: false,
+    });
+    queryClient.mount();
+
+    const queryFn = vi.fn(() => Promise.resolve("data"));
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ["reconnect-ungated"],
+      queryFn,
+      staleTime: 0,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    await vi.waitFor(() => {
+      expect(observer.getCurrentResult().data).toBe("data");
+    });
+
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => {
+      expect(queryFn).toHaveBeenCalledTimes(2);
+    });
+
+    unsubscribe();
+    queryClient.unmount();
+    queryClient.clear();
+  });
+
+  it("skips the default reconnect refetch while the gate reports realtime coverage", async () => {
+    let realtimeConnected = true;
+    const queryClient = createAppQueryClient({
+      defaultOptions: {
+        queries: {
+          retry: false,
+        },
+      },
+      shouldRefetchOnWindowFocus: () => !realtimeConnected,
+      showMutationErrorToasts: false,
+    });
+    queryClient.mount();
+
+    const queryFn = vi.fn(() => Promise.resolve("data"));
+    const observer = new QueryObserver(queryClient, {
+      queryKey: ["reconnect-gated"],
+      queryFn,
+      staleTime: 0,
+    });
+    const unsubscribe = observer.subscribe(() => {});
+
+    await vi.waitFor(() => {
+      expect(observer.getCurrentResult().data).toBe("data");
+    });
+    expect(queryFn).toHaveBeenCalledTimes(1);
+
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+    await Promise.resolve();
+    expect(queryFn).toHaveBeenCalledTimes(1);
+
+    realtimeConnected = false;
+    window.dispatchEvent(new Event("offline"));
+    window.dispatchEvent(new Event("online"));
+    await vi.waitFor(() => {
+      expect(queryFn).toHaveBeenCalledTimes(2);
+    });
+
+    unsubscribe();
+    queryClient.unmount();
+    queryClient.clear();
+  });
+
   it("resumes a suspend-cancelled fetch that no focus refetch would restart", async () => {
     const queryClient = createAppQueryClient({
       defaultOptions: {
@@ -143,8 +294,6 @@ describe("createAppQueryClient", () => {
           );
         }),
     );
-    // Realtime-owned policy: nothing but the realtime layer refetches it, and
-    // a healthy socket delivers no change for a first load that never landed.
     const observer = new QueryObserver(queryClient, {
       queryKey: ["realtime-owned-first-load"],
       queryFn,
@@ -152,7 +301,6 @@ describe("createAppQueryClient", () => {
       staleTime: 60_000,
     });
     const unsubscribe = observer.subscribe(() => {});
-    // A settled query is untouched by the resume.
     const settledFn = vi.fn(() => Promise.resolve("settled"));
     const settledObserver = new QueryObserver(queryClient, {
       queryKey: ["settled"],
@@ -191,7 +339,6 @@ describe("createAppQueryClient", () => {
     await vi.waitFor(() => {
       expect(observer.getCurrentResult().data).toBe("loaded");
     });
-    // A second resume (focus after visible) has nothing left to replay.
     window.dispatchEvent(new Event("focus"));
     await Promise.resolve();
     expect(queryFn).toHaveBeenCalledTimes(2);

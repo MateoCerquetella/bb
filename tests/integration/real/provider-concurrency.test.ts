@@ -1,4 +1,3 @@
-// Real provider cross-provider concurrency coverage.
 import { describe, expect, it } from "vitest";
 import {
   getThreadEvents,
@@ -26,9 +25,7 @@ describe("real provider concurrency integration", () => {
       await assertProviderPrerequisites("codex");
       await assertProviderPrerequisites("claude-code");
 
-      const harness = await createIntegrationHarness({
-        adapterFactory: undefined,
-      });
+      const harness = await createIntegrationHarness();
 
       try {
         const codexExecution = await resolveExecutionOptions({

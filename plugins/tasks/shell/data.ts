@@ -1,19 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRealtime, useRpc } from "@get-bb/plugin-sdk/app";
-import type { TasksRpcContract } from "../shared/contract.js";
+import type { z } from "zod";
+import { tasksRpcContract, type TasksRpcContract } from "../shared/contract.js";
 import type { Task, TaskPriority, TaskStatus } from "../shared/contract.js";
 import { TASKS_PAGE_MAX_LIMIT, type TaskSort } from "../shared/pagination.js";
 import type { MentionItem } from "../editor/extensions.js";
+import {
+  claimQuerySnapshotRevision,
+  readQuerySnapshot,
+  writeQuerySnapshot,
+} from "./query-snapshot.js";
 import { useTasksRefresh } from "./refresh.js";
 
-/** Typed RPC client bound to the tasks contract. */
 export function useTasksRpc() {
   return useRpc<TasksRpcContract>();
 }
 
 export type TasksRpc = ReturnType<typeof useTasksRpc>;
 
-export interface TaskListQuery {
+interface TaskListQuery {
   projectId?: string;
   statuses?: TaskStatus[];
   priorities?: TaskPriority[];
@@ -24,7 +29,6 @@ export interface TaskListQuery {
   sort?: TaskSort;
 }
 
-/** Traverse stable keyset pages while preserving the UI's complete-list views. */
 export async function listAllTasks(
   rpc: TasksRpc,
   input: TaskListQuery = {},
@@ -43,21 +47,16 @@ export async function listAllTasks(
   return tasks;
 }
 
-export const INVALIDATION_CHANNELS = [
+const INVALIDATION_CHANNELS = [
   "tasks:changed",
   "projects:changed",
   "comments:changed",
   "threads:changed",
 ] as const;
 
-export type InvalidationChannel = (typeof INVALIDATION_CHANNELS)[number];
+type InvalidationChannel = (typeof INVALIDATION_CHANNELS)[number];
 
-/**
- * Re-runs `onInvalidate` whenever the backend publishes on any of the given
- * realtime channels. The subscription set is fixed (one per known channel) so
- * callers may pass a fresh `channels` array every render.
- */
-export function useInvalidation(
+function useInvalidation(
   channels: readonly InvalidationChannel[],
   onInvalidate: () => void,
 ): void {
@@ -72,51 +71,68 @@ export function useInvalidation(
   useRealtime("threads:changed", () => fire("threads:changed"));
 }
 
-export interface TasksQuery<T> {
+interface TasksQuery<T> {
   data: T | undefined;
   error: string | null;
   isLoading: boolean;
   refresh: () => void;
 }
 
-/**
- * Fetch-and-subscribe primitive: runs `fetcher` on mount and again whenever
- * one of `channels` fires or `deps` change. Stale responses (superseded by a
- * newer refresh) are dropped.
- *
- * Generation bumps (manual refresh / reconnect) report begin/end to the shared
- * refresh provider so the header control can single-flight without a timer.
- * Invalidation- and deps-driven refetches do not mark the shared in-flight bit.
- */
+interface TasksQuerySnapshot<T> {
+  name: string;
+  schema: z.ZodType<T>;
+}
+
 export function useTasksQuery<T>(
   fetcher: (rpc: TasksRpc) => Promise<T>,
   channels: readonly InvalidationChannel[],
   deps: readonly unknown[] = [],
+  options: {
+    snapshot?: TasksQuerySnapshot<T>;
+  } = {},
 ): TasksQuery<T> {
   const rpc = useTasksRpc();
   const { generation, beginGenerationWork, endGenerationWork } =
     useTasksRefresh();
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
+  const snapshotRef = useRef(options.snapshot);
+  snapshotRef.current = options.snapshot;
   const [state, setState] = useState<{
     data: T | undefined;
     error: string | null;
     isLoading: boolean;
-  }>({ data: undefined, error: null, isLoading: true });
+  }>(() => ({
+    data:
+      options.snapshot === undefined
+        ? undefined
+        : readQuerySnapshot(options.snapshot.name, options.snapshot.schema),
+    error: null,
+    isLoading: true,
+  }));
   const seqRef = useRef(0);
   const previousGenerationRef = useRef(generation);
   const depsKey = JSON.stringify(deps);
+  const dataDepsKeyRef = useRef(depsKey);
   const refresh = useCallback(() => {
     const seq = ++seqRef.current;
+    const snapshot = snapshotRef.current;
+    const snapshotRevision =
+      snapshot === undefined ? 0 : claimQuerySnapshotRevision(snapshot.name);
     return fetcherRef.current(rpc).then(
       (data) => {
+        if (snapshot !== undefined) {
+          writeQuerySnapshot(snapshot.name, data, snapshotRevision);
+        }
         if (seq !== seqRef.current) return;
+        dataDepsKeyRef.current = depsKey;
         setState({ data, error: null, isLoading: false });
       },
       (error: unknown) => {
         if (seq !== seqRef.current) return;
+        const keepsData = dataDepsKeyRef.current === depsKey;
         setState((current) => ({
-          data: current.data,
+          data: keepsData ? current.data : undefined,
           error: error instanceof Error ? error.message : String(error),
           isLoading: false,
         }));
@@ -143,17 +159,31 @@ export function useTasksQuery<T>(
   return { ...state, refresh };
 }
 
+const foldersSnapshot = {
+  name: "folders",
+  schema: tasksRpcContract.listFolders.output.shape.folders,
+};
+
 export function useFolders() {
   return useTasksQuery(
     async (rpc) => (await rpc.call("listFolders")).folders,
     ["projects:changed"],
+    [],
+    { snapshot: foldersSnapshot },
   );
 }
+
+const projectsSnapshot = {
+  name: "projects",
+  schema: tasksRpcContract.listProjects.output.shape.projects,
+};
 
 export function useProjects() {
   return useTasksQuery(
     async (rpc) => (await rpc.call("listProjects", {})).projects,
     ["projects:changed"],
+    [],
+    { snapshot: projectsSnapshot },
   );
 }
 
@@ -164,19 +194,20 @@ export function usePresets() {
   );
 }
 
+const sidebarSummarySnapshot = {
+  name: "sidebar-summary",
+  schema: tasksRpcContract.sidebarSummary.output.shape.projects,
+};
+
 export function useSidebarSummary() {
   return useTasksQuery(
     async (rpc) => (await rpc.call("sidebarSummary")).projects,
     ["tasks:changed", "projects:changed", "threads:changed"],
+    [],
+    { snapshot: sidebarSummarySnapshot },
   );
 }
 
-/**
- * @-mention source for TasksEditor: tasks matched by key/title/description
- * via the server-side `listTasks` search, followed by bb threads from
- * `searchThreads`. A thread-search failure must not take task mentions down
- * with it, so it degrades to an empty section.
- */
 export function useMentionItems() {
   const rpc = useTasksRpc();
   return useCallback(
@@ -209,7 +240,6 @@ export function useMentionItems() {
   );
 }
 
-/** Tasks with agents currently working, for the Active view count. */
 export function useActiveTasks() {
   return useTasksQuery(
     async (rpc) => listAllTasks(rpc, { activeOnly: true }),

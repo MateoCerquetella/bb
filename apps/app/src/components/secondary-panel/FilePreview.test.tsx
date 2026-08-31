@@ -10,11 +10,11 @@ import {
 import { act, type ReactElement } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  FILE_PREVIEW_CODE_MAX_LINES,
   FilePreview,
   buildCsvPreviewData,
   getCsvTruncationNote,
 } from "./FilePreview";
+import { SOURCE_CODE_MAX_LINES } from "@/components/code/source-code-budget";
 import { SecondaryPanelFilePreview } from "./ThreadStorageFilePreview";
 import {
   PierreWorkerPoolGateContext,
@@ -130,9 +130,6 @@ vi.mock("@pierre/diffs/react", async () => {
               y: 700 + index * 18,
               toJSON: () => ({}),
             });
-            // Model the native behavior that caused the regression: asking a
-            // long line to scroll into view can also move Pierre's horizontal
-            // code scroller.
             line.scrollIntoView = () => {
               code.scrollLeft = 0;
             };
@@ -162,11 +159,6 @@ vi.mock("@pierre/diffs/react", async () => {
   };
 });
 
-/**
- * The code view reads the workspace pool from the worker-pool gate (see
- * ThreadDetailWorkerPoolProvider); tests that exercise pool-driven behavior
- * render inside a ready gate that publishes the mock pool.
- */
 function renderWithWorkerPool(ui: ReactElement) {
   const gate: PierreWorkerPoolGate = {
     ready: true,
@@ -179,6 +171,15 @@ function renderWithWorkerPool(ui: ReactElement) {
     <PierreWorkerPoolGateContext.Provider value={gate}>
       {ui}
     </PierreWorkerPoolGateContext.Provider>,
+  );
+}
+
+const CSV_TEST_ROW_HEIGHT_PX = 29;
+function mockCsvTableLayout() {
+  vi.spyOn(HTMLElement.prototype, "offsetHeight", "get").mockImplementation(
+    function (this: HTMLElement) {
+      return this.tagName === "TR" ? CSV_TEST_ROW_HEIGHT_PX : 400;
+    },
   );
 }
 
@@ -198,6 +199,7 @@ describe("FilePreview", () => {
   afterEach(() => {
     cleanup();
     vi.useRealTimers();
+    vi.restoreAllMocks();
   });
 
   it("offers a manual file refresh action", () => {
@@ -351,10 +353,8 @@ describe("FilePreview", () => {
     );
 
     const pierreFile = await screen.findByTestId("pierre-file");
-    // The code view scrolls its own virtualized viewport (which sits at the
-    // origin in jsdom), not the surrounding panel scroller.
     const codeViewport = scrollViewport.querySelector<HTMLElement>(
-      "[data-file-preview-code-viewport]",
+      "[data-bb-source-code-viewport]",
     );
     expect(codeViewport).not.toBeNull();
     await waitFor(() => {
@@ -368,7 +368,7 @@ describe("FilePreview", () => {
     expect(
       pierreFile.shadowRoot
         ?.querySelector('[data-line="2"]')
-        ?.hasAttribute("data-file-preview-target-line"),
+        ?.hasAttribute("data-bb-source-code-target-line"),
     ).toBe(true);
   });
 
@@ -404,8 +404,6 @@ describe("FilePreview", () => {
       );
     });
 
-    // Pierre repaints the highlighted AST in place; a React remount would
-    // throw away its DOM (and the user's scroll position) for nothing.
     await waitFor(() => {
       expect(
         Number(screen.getByTestId("pierre-file").dataset.renderCount),
@@ -417,7 +415,7 @@ describe("FilePreview", () => {
   });
 
   it("caps oversized code previews to a leading prefix until the full file is requested", async () => {
-    const totalLineCount = FILE_PREVIEW_CODE_MAX_LINES + 1_500;
+    const totalLineCount = SOURCE_CODE_MAX_LINES + 1_500;
     const contents = Array.from(
       { length: totalLineCount },
       (_, index) => `line ${index + 1}`,
@@ -442,15 +440,14 @@ describe("FilePreview", () => {
 
     await screen.findByTestId("pierre-file");
     expect(pierreMock.state.lastFile?.contents.split("\n")).toHaveLength(
-      FILE_PREVIEW_CODE_MAX_LINES,
+      SOURCE_CODE_MAX_LINES,
     );
-    // The capped prefix must not share the full file's highlight cache slot.
     expect(pierreMock.state.lastFile?.cacheKey).toBe(
       "file-preview:generated:head",
     );
     expect(
       screen.getByText(
-        `Showing the first ${FILE_PREVIEW_CODE_MAX_LINES.toLocaleString()} of ${totalLineCount.toLocaleString()} lines.`,
+        `Showing the first ${SOURCE_CODE_MAX_LINES.toLocaleString()} of ${totalLineCount.toLocaleString()} lines.`,
       ),
     ).toBeTruthy();
 
@@ -480,7 +477,6 @@ describe("FilePreview", () => {
       />,
     );
 
-    // 512 KB budget: two 200k-char lines fit, the third would exceed it.
     expect(pierreMock.state.lastFile?.contents).toBe(
       [longLine, longLine].join("\n"),
     );
@@ -488,7 +484,7 @@ describe("FilePreview", () => {
   });
 
   it("shows the whole file when a line link points past the capped prefix", async () => {
-    const totalLineCount = FILE_PREVIEW_CODE_MAX_LINES + 20;
+    const totalLineCount = SOURCE_CODE_MAX_LINES + 20;
     const contents = Array.from(
       { length: totalLineCount },
       (_, index) => `line ${index + 1}`,
@@ -502,8 +498,8 @@ describe("FilePreview", () => {
           kind: "ready",
           file: { name: "generated.ts", contents },
           lineRange: {
-            startLineNumber: FILE_PREVIEW_CODE_MAX_LINES + 10,
-            endLineNumber: FILE_PREVIEW_CODE_MAX_LINES + 10,
+            startLineNumber: SOURCE_CODE_MAX_LINES + 10,
+            endLineNumber: SOURCE_CODE_MAX_LINES + 10,
           },
           textPreviewKind: null,
         }}
@@ -513,6 +509,86 @@ describe("FilePreview", () => {
     await screen.findByTestId("pierre-file");
     expect(pierreMock.state.lastFile?.contents).toBe(contents);
     expect(screen.queryByRole("button", { name: "Load full file" })).toBeNull();
+  });
+
+  it("opens a rendered HTML preview in the external browser", () => {
+    const openSpy = vi.spyOn(window, "open").mockReturnValue(null);
+
+    render(
+      <FilePreview
+        path="docs/progress-vis.html"
+        state={{
+          kind: "html",
+          file: { name: "progress-vis.html", contents: "<p>chart</p>" },
+          iframe: {
+            sandbox: "allow-scripts",
+            title: "docs/progress-vis.html",
+            url: "/api/v1/threads/thr_1/worktree/files/docs/progress-vis.html",
+          },
+          lineRange: null,
+        }}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open in external browser" }),
+    );
+
+    expect(openSpy).toHaveBeenCalledWith(
+      `${window.location.origin}/api/v1/threads/thr_1/worktree/files/docs/progress-vis.html`,
+      "_blank",
+      "noopener,noreferrer",
+    );
+    openSpy.mockRestore();
+  });
+
+  it("hands the desktop shell an absolute preview url", () => {
+    const openExternalUrl = vi.fn();
+    (window as unknown as { bbDesktop: unknown }).bbDesktop = {
+      openExternalUrl,
+    };
+
+    try {
+      render(
+        <FilePreview
+          path="docs/progress-vis.html"
+          state={{
+            kind: "iframe",
+            sandbox: "allow-scripts",
+            title: "docs/progress-vis.html",
+            url: "/api/v1/threads/thr_1/worktree/files/docs/progress-vis.html",
+          }}
+        />,
+      );
+
+      fireEvent.click(
+        screen.getByRole("button", { name: "Open in external browser" }),
+      );
+
+      expect(openExternalUrl).toHaveBeenCalledWith(
+        `${window.location.origin}/api/v1/threads/thr_1/worktree/files/docs/progress-vis.html`,
+      );
+    } finally {
+      delete (window as unknown as { bbDesktop?: unknown }).bbDesktop;
+    }
+  });
+
+  it("offers no external browser action for a preview with no rendered page", () => {
+    render(
+      <FilePreview
+        path="README.md"
+        state={{
+          kind: "ready",
+          file: { name: "README.md", contents: "# Preview" },
+          lineRange: null,
+          textPreviewKind: "markdown",
+        }}
+      />,
+    );
+
+    expect(
+      screen.queryByRole("button", { name: "Open in external browser" }),
+    ).toBeNull();
   });
 
   it("toggles source line wrap from the header button", async () => {
@@ -579,6 +655,7 @@ describe("FilePreview", () => {
   });
 
   it("renders CSV previews as a table by default", () => {
+    mockCsvTableLayout();
     render(
       <FilePreview
         path="reports/customers.csv"
@@ -641,13 +718,11 @@ describe("FilePreview", () => {
 
     const preview = buildCsvPreviewData(lines.join("\n"));
 
-    // rows includes the header, so the cap keeps 500 data rows.
     expect(preview.rows.length).toBe(501);
     expect(preview.rows.at(-1)?.[0]).toBe("c1r500");
     expect(preview.columnCount).toBe(100);
     expect(preview.truncatedRows).toBe(true);
     expect(preview.truncatedColumns).toBe(true);
-    // The footnote counts data rows, not parsed rows.
     expect(getCsvTruncationNote(preview, preview.rows.length - 1)).toBe(
       "Showing the first 500 rows and 100 columns.",
     );
@@ -666,7 +741,51 @@ describe("FilePreview", () => {
     expect(getCsvTruncationNote(preview, preview.rows.length - 1)).toBeNull();
   });
 
+  it("mounts only the CSV rows near the viewport, not the whole 500x100 window", () => {
+    mockCsvTableLayout();
+    const columnCount = 120;
+    const header = Array.from({ length: columnCount }, (_, i) => `col_${i}`);
+    const lines = [header.join(",")];
+    for (let rowIndex = 0; rowIndex < 600; rowIndex += 1) {
+      lines.push(header.map((_, c) => `r${rowIndex}c${c}`).join(","));
+    }
+
+    render(
+      <FilePreview
+        path="data/big.csv"
+        state={{
+          kind: "ready",
+          file: { name: "big.csv", contents: lines.join("\n") },
+          lineRange: null,
+          textPreviewKind: "csv",
+        }}
+      />,
+    );
+
+    const table = screen.getByRole("table", { name: "big.csv CSV preview" });
+    expect(screen.getByText("r0c0")).not.toBeNull();
+    expect(table.querySelectorAll("td").length).toBeLessThan(6_000);
+    const mountedRows = table.querySelectorAll("tbody tr[data-index]");
+    expect(mountedRows.length).toBeGreaterThanOrEqual(14);
+    expect(mountedRows.length).toBeLessThan(60);
+    expect(screen.queryByText("r499c0")).toBeNull();
+
+    const scrollBox = table.parentElement;
+    if (!(scrollBox instanceof HTMLElement)) throw new Error("no scroll box");
+    scrollBox.scrollTop = 499 * CSV_TEST_ROW_HEIGHT_PX;
+    fireEvent.scroll(scrollBox);
+    expect(screen.getByText("r499c0")).not.toBeNull();
+    expect(screen.queryByText("r0c0")).toBeNull();
+    expect(table.querySelectorAll("tbody tr[data-index]").length).toBeLessThan(
+      60,
+    );
+    expect(
+      screen.getByText("Showing the first 500 rows and 100 columns."),
+    ).not.toBeNull();
+  });
+
   it("uses the CSV table preview for loaded CSV text files", () => {
+    mockCsvTableLayout();
     render(
       <SecondaryPanelFilePreview
         activePath="exports/scores.csv"

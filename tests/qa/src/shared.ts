@@ -16,7 +16,6 @@ import {
 } from "@bb/server-contract";
 import {
   hostDaemonEnrollKeyResponseSchema,
-  type HostDaemonEnrollKeyRequest,
   type HostDaemonEnrollKeyResponse,
 } from "@bb/host-daemon-contract";
 import { z } from "zod";
@@ -30,11 +29,6 @@ const STANDALONE_TMP_PREFIX = "bb-standalone-";
 const PROCESS_SCAN_MAX_BUFFER = 10 * 1024 * 1024;
 
 type EnvironmentMap = Record<string, string>;
-// Thread-context env the parent agent injects into every shell. A standalone
-// pair must not inherit it: BB_THREAD_STORAGE in particular points at the parent
-// thread's own storage subdirectory, which the daemon would otherwise adopt as
-// its storage root and diverge from the server's data-dir-derived path, breaking
-// thread.start with "Thread storage path escapes the storage root".
 const STANDALONE_THREAD_CONTEXT_ENV = [
   "BB_THREAD_ID",
   "BB_ENVIRONMENT_ID",
@@ -95,20 +89,14 @@ interface SpawnLoggedProcessOptions {
 
 interface StartQaServerArgs {
   dataDir: string;
-  /**
-   * Complete server process environment. This is not merged over process.env;
-   * callers that need inherited variables must include them explicitly.
-   */
   env?: NodeJS.ProcessEnv;
   logPath: string;
   port: number;
   publicUrl?: string;
-  reuseExisting?: boolean;
 }
 
 interface StartQaServerResult {
-  process: ChildProcess | null;
-  reusedExisting: boolean;
+  process: ChildProcess;
   serverUrl: string;
 }
 
@@ -150,12 +138,12 @@ interface LoadDotEnvResult {
   path: string | null;
 }
 
-export interface BuildStandaloneRuntimeEnvArgs {
+interface BuildStandaloneRuntimeEnvArgs {
   baseEnv: NodeJS.ProcessEnv;
   overrides: NodeJS.ProcessEnv;
 }
 
-export interface ResolveStandaloneParentPidArgs {
+interface ResolveStandaloneParentPidArgs {
   env: NodeJS.ProcessEnv;
   fallbackPid: number;
 }
@@ -226,7 +214,7 @@ export function shellQuote(value: string): string {
   return `'${String(value).replaceAll("'", `'\\''`)}'`;
 }
 
-export function buildShellExports(env: EnvironmentMap): string {
+function buildShellExports(env: EnvironmentMap): string {
   return Object.entries(env)
     .map(([key, value]) => `export ${key}=${shellQuote(String(value))}`)
     .join("\n");
@@ -239,12 +227,6 @@ export function buildStandaloneShellExports(env: EnvironmentMap): string {
   return [...unsetThreadContext, buildShellExports(env)].join("\n");
 }
 
-/**
- * Builds the standalone QA process environment. Isolates the pair from the
- * parent agent by stripping inherited thread context (see
- * STANDALONE_THREAD_CONTEXT_ENV) and applies provider-key policy: ambient
- * OPENAI_API_KEY is stripped unless BB_QA_OPENAI_API_KEY opts in.
- */
 export function buildStandaloneRuntimeEnv(
   args: BuildStandaloneRuntimeEnvArgs,
 ): NodeJS.ProcessEnv {
@@ -359,14 +341,13 @@ export async function createProject(
 
 export async function createHostEnrollKey(
   serverUrl: string,
-  body: HostDaemonEnrollKeyRequest = {},
 ): Promise<HostDaemonEnrollKeyResponse> {
   const response = await fetch(`${serverUrl}/internal/hosts/enroll-key`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify({}),
   });
   if (!response.ok) {
     throw new Error(
@@ -374,12 +355,6 @@ export async function createHostEnrollKey(
     );
   }
   return hostDaemonEnrollKeyResponseSchema.parse(await response.json());
-}
-
-export async function createStandaloneHostEnrollKey(
-  serverUrl: string,
-): Promise<HostDaemonEnrollKeyResponse> {
-  return createHostEnrollKey(serverUrl);
 }
 
 export async function killProcess(
@@ -470,11 +445,11 @@ export async function reservePort(): Promise<number> {
   });
 }
 
-export function buildLocalServerUrl(port: number): string {
+function buildLocalServerUrl(port: number): string {
   return `http://127.0.0.1:${port}`;
 }
 
-export async function runGit(cwd: string, args: string[]): Promise<void> {
+async function runGit(cwd: string, args: string[]): Promise<void> {
   await execFile("git", args, { cwd });
 }
 
@@ -485,8 +460,6 @@ export function spawnLoggedProcess(
   try {
     const child = spawn(options.command, options.args, {
       cwd: options.cwd,
-      // Standalone QA commands return after startup, so the child must leave the
-      // wrapper's process group or pnpm tears the stack down immediately.
       detached: true,
       env: options.env,
       stdio: ["ignore", logFd, logFd],
@@ -495,17 +468,6 @@ export function spawnLoggedProcess(
     return child;
   } finally {
     closeSync(logFd);
-  }
-}
-
-async function isServerReady(serverUrl: string): Promise<boolean> {
-  try {
-    const response = await fetch(`${serverUrl}/api/v1/system/config`, {
-      signal: AbortSignal.timeout(1_000),
-    });
-    return response.ok;
-  } catch {
-    return false;
   }
 }
 
@@ -525,14 +487,6 @@ export async function startQaServer(
   args: StartQaServerArgs,
 ): Promise<StartQaServerResult> {
   const serverUrl = buildLocalServerUrl(args.port);
-
-  if (args.reuseExisting && (await isServerReady(serverUrl))) {
-    return {
-      process: null,
-      reusedExisting: true,
-      serverUrl,
-    };
-  }
 
   const serverEnv: NodeJS.ProcessEnv = {
     ...(args.env ?? process.env),
@@ -569,7 +523,6 @@ export async function startQaServer(
 
   return {
     process: serverProcess,
-    reusedExisting: false,
     serverUrl,
   };
 }
@@ -877,7 +830,7 @@ export function buildDaemonRestartCommand(
   );
 }
 
-export async function waitFor<TResult>(
+async function waitFor<TResult>(
   check: () => Promise<TResult | null | false> | TResult | null | false,
   options: WaitForOptions,
 ): Promise<TResult> {
@@ -918,7 +871,7 @@ export async function waitForConnectedHost(serverUrl: string): Promise<Host> {
   );
 }
 
-export async function waitForServerReady(serverUrl: string): Promise<boolean> {
+async function waitForServerReady(serverUrl: string): Promise<boolean> {
   return waitFor(
     async () => {
       try {

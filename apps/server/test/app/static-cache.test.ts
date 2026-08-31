@@ -8,7 +8,7 @@ import { createApp } from "../../src/server.js";
 import { createTestAppHarness } from "../helpers/test-app.js";
 
 describe("production static cache headers", () => {
-  it("keeps index.html fresh while allowing immutable hashed assets", async () => {
+  it("revalidates index.html on every navigation while allowing immutable hashed assets", async () => {
     const staticDir = await mkdtemp(join(tmpdir(), "bb-server-static-"));
     await mkdir(join(staticDir, "assets"), { recursive: true });
     await writeFile(
@@ -38,13 +38,15 @@ describe("production static cache headers", () => {
     const harness = await createTestAppHarness();
     const serverApp = createApp(harness.deps, { staticDir });
     try {
-      // `no-cache` revalidates on every navigation but, unlike `no-store`,
-      // leaves the document eligible for the WebKit back/forward cache.
       const rootResponse = await serverApp.app.request("/");
       expect(rootResponse.headers.get("cache-control")).toBe("no-cache");
+      expect(rootResponse.headers.get("etag")).toMatch(/^W\/"[0-9a-f]{32}"$/u);
 
       const fallbackResponse = await serverApp.app.request("/threads/thr_123");
       expect(fallbackResponse.headers.get("cache-control")).toBe("no-cache");
+      expect(fallbackResponse.headers.get("etag")).toBe(
+        rootResponse.headers.get("etag"),
+      );
 
       const assetResponse = await serverApp.app.request(
         "/assets/index-test.js",
@@ -129,10 +131,6 @@ describe("production static cache headers", () => {
         code: "not_found",
       });
 
-      // A missing hashed asset is a stale reference, not a client route. The
-      // single-page-app fallback would answer it with index.html at status
-      // 200, and the browser would report a MIME type error for a script
-      // instead of the missing file.
       const assetMissResponse = await serverApp.app.request(
         "/assets/does-not-exist.js",
       );

@@ -11,6 +11,7 @@ import {
 } from "@bb/db";
 import type { Logger } from "@bb/logger";
 import { derivePluginId } from "@bb/domain";
+import { createAiServiceRegistry } from "../../../src/services/ai/ai-service-registry.js";
 import {
   createPluginService,
   type PluginService,
@@ -61,6 +62,7 @@ function createService(args: {
   bundled: BundledPluginRegistration[];
 }): PluginService {
   return createPluginService({
+    aiServices: createAiServiceRegistry(),
     telemetry: createNoopTelemetryService(),
     db: args.db,
     hub: {
@@ -92,11 +94,15 @@ describe("official plugin registry invariants", () => {
       automations: "Workflow management",
       connect: "Host access",
       "custom-instructions": "Context & knowledge",
+      "plugin-api-tester": "Developer tools",
       docs: "Context & knowledge",
       github: "Developer tools",
       "inline-vis": "Interface",
       "keep-awake": "Host access",
       memory: "Context & knowledge",
+      "monaco-editor": "Interface",
+      "pdf-preview": "Interface",
+      "plugin-api-docs": "Developer tools",
       "provider-acp": "Agent interaction",
       "provider-claude-code": "Agent interaction",
       "provider-codex": "Agent interaction",
@@ -180,7 +186,6 @@ describe("store-installed official plugins", () => {
       },
     );
 
-    // A restart reconciles the existing registration instead of dropping it.
     await service.stop();
     service = createService({
       db,
@@ -246,7 +251,6 @@ describe("store-installed official plugins", () => {
     await service.start();
     expect(service.list()).toEqual([]);
 
-    // Reinstalling from the store clears the tombstone.
     await expect(
       service.installOfficialPlugin("fixture"),
     ).resolves.toMatchObject({ id: "builtin-fixture", status: "running" });

@@ -2,28 +2,19 @@ import { useQuery } from "@tanstack/react-query";
 import {
   normalizePluginMentionTriggers,
   type PluginMentionTrigger,
-} from "@/lib/plugin-mention-triggers";
+} from "@bb/client-core";
 import { pluginContributionsQueryKey } from "./query-keys";
 
-/**
- * Host-rendered plugin contributions (plugin design §4.9), served by
- * GET /api/v1/plugins/contributions. Not in the typed server contract — the
- * plugin routes are server-policy glue — so fetched directly and typed
- * locally. One query covers every contribution kind; later kinds extend
- * {@link PluginContributions}.
- */
-/** One mention provider contributed by a plugin (design §4.9). */
-export interface PluginMentionProviderContribution {
+interface PluginMentionProviderContribution {
   pluginId: string;
   id: string;
   label: string;
   triggers: readonly PluginMentionTrigger[];
 }
 
-export interface PluginContributions {
+interface PluginContributions {
   mentionProviders: PluginMentionProviderContribution[];
 }
-
 
 const EMPTY_CONTRIBUTIONS: PluginContributions = {
   mentionProviders: [],
@@ -55,8 +46,6 @@ async function fetchPluginContributions(
   signal: AbortSignal,
 ): Promise<PluginContributions> {
   const response = await fetch("/api/v1/plugins/contributions", { signal });
-  // Nothing to surface rather than an error: an older server (no plugin
-  // routes) or a disabled experiment both mean "no contributions".
   if (!response.ok) return EMPTY_CONTRIBUTIONS;
   const body = (await response.json()) as {
     mentionProviders?: unknown;
@@ -73,10 +62,6 @@ async function fetchPluginContributions(
   };
 }
 
-/**
- * All host-rendered plugin contributions. Consumers read their kind from the
- * shared result so the app makes one contributions request total.
- */
 export function usePluginContributions() {
   return useQuery({
     queryKey: pluginContributionsQueryKey(),
@@ -84,15 +69,13 @@ export function usePluginContributions() {
     staleTime: 30_000,
   });
 }
-export interface PluginMentionSearchItem {
-  /** Opaque server-composed item reference; rides the mention resource. */
+interface PluginMentionSearchItem {
   itemId: string;
   title: string;
   subtitle: string | null;
   icon: string | null;
 }
 
-/** One provider's mention search results, grouped under its label. */
 export interface PluginMentionSearchGroup {
   pluginId: string;
   providerId: string;
@@ -125,7 +108,7 @@ function isMentionSearchGroup(
   );
 }
 
-export interface PluginMentionSearchArgs {
+interface PluginMentionSearchArgs {
   trigger: PluginMentionTrigger;
   query: string;
   projectId: string | null;
@@ -146,8 +129,6 @@ async function fetchPluginMentionSearch(
     `/api/v1/plugins/mentions/search?${params.toString()}`,
     { signal },
   );
-  // Nothing to surface rather than an error: a disabled experiment or an
-  // older server both mean "no plugin mention results".
   if (!response.ok) return [];
   const body = (await response.json()) as { groups?: unknown };
   return Array.isArray(body.groups)
@@ -155,11 +136,6 @@ async function fetchPluginMentionSearch(
     : [];
 }
 
-/**
- * Plugin mention-provider search for the composer's `@` menu (design §4.9).
- * Callers gate `enabled` on a non-empty (debounced) query plus at least one
- * registered mention provider so idle composers never poll the server.
- */
 export function usePluginMentionSearch(
   args: PluginMentionSearchArgs,
   options: { enabled: boolean },

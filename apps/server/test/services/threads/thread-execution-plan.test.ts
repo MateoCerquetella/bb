@@ -195,7 +195,6 @@ describe("machine permission ceiling", () => {
       });
 
       expect(plan.resolvedExecution.permissionMode).toBe("auto");
-      // The stored history said "full"; the ceiling wins for display too.
       expect(resolveExistingThreadPermissionMode(harness.deps, thread.id)).toBe(
         "auto",
       );
@@ -204,12 +203,10 @@ describe("machine permission ceiling", () => {
 
   it("falls back to the highest supported mode under the ceiling", async () => {
     await withTestHarness(async (harness) => {
-      // ACP supports accept-edits and full but not auto, so an "auto" ceiling
-      // has to resolve down to accept-edits rather than fail.
       const thread = await seedCappedThread(harness, {
         id: "host-ceiling-acp",
         maxPermissionMode: "auto",
-        providerId: "acp-gemini",
+        providerId: "acp-cursor",
       });
 
       const plan = await resolveExistingThreadExecutionPlan(harness.deps, {
@@ -224,8 +221,6 @@ describe("machine permission ceiling", () => {
 
   it("reads as no default execution options instead of failing the page", async () => {
     await withTestHarness(async (harness) => {
-      // A read path (thread data, execution options) must degrade the same way
-      // it does for any other provider capability mismatch.
       const thread = await seedCappedThread(harness, {
         id: "host-ceiling-pi-read",
         maxPermissionMode: "accept-edits",

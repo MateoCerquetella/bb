@@ -5,7 +5,7 @@ export interface AudioInputDeviceOption {
   label: string;
 }
 
-export interface RefreshAudioInputDevicesOptions {
+interface RefreshAudioInputDevicesOptions {
   requestPermission?: boolean;
 }
 
@@ -40,7 +40,7 @@ function resolveAudioInputDeviceErrorMessage(error: unknown): string {
   return "Microphone devices unavailable";
 }
 
-export function audioInputDeviceLabel(
+function audioInputDeviceLabel(
   device: Pick<MediaDeviceInfo, "label">,
   index: number,
 ): string {
@@ -88,7 +88,9 @@ export function useAudioInputDevices() {
   const [devices, setDevices] = useState<AudioInputDeviceOption[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isLoading, setIsLoading] = useState(false);
-  const [isSupported, setIsSupported] = useState(() => getMediaDevices() !== null);
+  const [isSupported, setIsSupported] = useState(
+    () => getMediaDevices() !== null,
+  );
 
   const refresh = useCallback(
     async (options: RefreshAudioInputDevicesOptions = {}) => {

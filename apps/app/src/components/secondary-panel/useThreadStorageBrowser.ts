@@ -1,14 +1,16 @@
-import {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { useFileTree, type UseFileTreeResult } from "@pierre/trees/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { WorkspaceFile } from "@bb/server-contract";
+import { createRetryingModuleLoader } from "@/lib/plugin-frontend-lazy";
+import type { ThreadStorageTreeModel } from "./ThreadStorageFileTree";
 
 const EMPTY_STORAGE_FILES: readonly WorkspaceFile[] = [];
+
+type ThreadStorageFileTreeModule = typeof import("./ThreadStorageFileTree");
+
+const loadThreadStorageFileTree =
+  createRetryingModuleLoader<ThreadStorageFileTreeModule>(
+    () => import("./ThreadStorageFileTree"),
+  );
 
 export type ThreadStoragePathSelectHandler = (path: string) => void;
 
@@ -23,7 +25,7 @@ export interface ThreadStorageBrowserController {
   filteredFiles: readonly WorkspaceFile[];
   isSearchOpen: boolean;
   loadedFiles: readonly WorkspaceFile[];
-  model: UseFileTreeResult["model"];
+  model: ThreadStorageTreeModel | null;
   openSearch: () => void;
   searchQuery: string;
   setSearchQuery: (query: string) => void;
@@ -45,17 +47,6 @@ function buildDirectoryPaths(paths: readonly string[]): string[] {
   return Array.from(directoryPaths);
 }
 
-/**
- * Owns the thread storage browser's tree model and related UI state.
- *
- * Pierre tree's `useFileTree` destroys its model on the owning component's
- * unmount (`model.cleanUp()` unsubscribes the selection listener and destroys
- * the controller — see packages/trees/src/react/useFileTree.ts and
- * render/FileTree.ts in pierrecomputer/pierre). The storage tab content
- * unmounts whenever a file tab covers it, so this hook must live in a parent
- * that survives that toggle (e.g., ThreadDetailView), with the model and
- * search state passed down to the presentational browser.
- */
 export function useThreadStorageBrowser({
   files,
   onSelectPath,
@@ -81,10 +72,6 @@ export function useThreadStorageBrowser({
   const filePathSet = useMemo(() => new Set(filePaths), [filePaths]);
   const filePathSetRef = useRef<ReadonlySet<string>>(filePathSet);
   const onSelectPathRef = useRef(onSelectPath);
-  // Pierre tree's item.select() is additive (selectPath, not selectOnlyPath),
-  // so reconciling React state into the tree requires deselect+select pairs
-  // that re-emit onSelectionChange. Suppress those echoes here so they don't
-  // bounce back through onSelectPath and revert the caller's state.
   const isApplyingSelectionRef = useRef(false);
 
   useEffect(() => {
@@ -107,13 +94,31 @@ export function useThreadStorageBrowser({
     [],
   );
 
-  const { model } = useFileTree({
-    density: "compact",
-    initialExpansion: "closed",
-    onSelectionChange: handleTreeSelectionChange,
-    paths: [],
-    search: false,
-  });
+  const [model, setModel] = useState<ThreadStorageTreeModel | null>(null);
+  const shouldLoadTree = loadedFiles.length > 0;
+  useEffect(() => {
+    if (!shouldLoadTree) return;
+    let cancelled = false;
+    let createdModel: ThreadStorageTreeModel | null = null;
+    void loadThreadStorageFileTree().then(
+      ({ createThreadStorageTreeModel }) => {
+        if (cancelled) return;
+        createdModel = createThreadStorageTreeModel(handleTreeSelectionChange);
+        setModel(createdModel);
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        console.warn(
+          `thread storage tree load failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      },
+    );
+    return () => {
+      cancelled = true;
+      createdModel?.cleanUp();
+      setModel(null);
+    };
+  }, [handleTreeSelectionChange, shouldLoadTree]);
 
   const isSearching = searchQuery.trim().length > 0;
   const expandedDirectoryPaths = useMemo(
@@ -121,21 +126,22 @@ export function useThreadStorageBrowser({
     [isSearching, filePaths],
   );
   useEffect(() => {
+    if (model === null) return;
     model.resetPaths(filePaths, {
       initialExpandedPaths: expandedDirectoryPaths,
     });
   }, [expandedDirectoryPaths, filePaths, model]);
 
   useEffect(() => {
+    if (model === null) return;
     const currentSelectedPaths = model.getSelectedPaths();
     const selectedPathIsVisible =
       selectedPath !== null && filePathSet.has(selectedPath);
 
-    const alreadyMatches =
-      selectedPathIsVisible
-        ? currentSelectedPaths.length === 1 &&
-          currentSelectedPaths[0] === selectedPath
-        : currentSelectedPaths.length === 0;
+    const alreadyMatches = selectedPathIsVisible
+      ? currentSelectedPaths.length === 1 &&
+        currentSelectedPaths[0] === selectedPath
+      : currentSelectedPaths.length === 0;
     if (alreadyMatches) return;
 
     isApplyingSelectionRef.current = true;

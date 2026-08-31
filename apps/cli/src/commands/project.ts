@@ -6,7 +6,6 @@ import type {
   ProjectResponse,
   UpdateProjectSourceRequest,
 } from "@bb/server-contract";
-import mimeTypes from "mime-types";
 import { action } from "../action.js";
 import { createCliBbSdk } from "../client.js";
 import { resolveLocalHostId } from "../daemon.js";
@@ -54,6 +53,7 @@ interface ProjectDiscoveryCommandOptions {
   limit?: string;
   provider?: string;
   query?: string;
+  refresh?: boolean;
 }
 
 function addProjectWorkspaceRoutingOptions(command: Command): Command {
@@ -224,11 +224,11 @@ function printProjectSource(source: ProjectSource): void {
   console.log(`${source.id}  ${source.type}  ${source.path}${defaultMarker}`);
 }
 
-function attachmentMimeType(
+async function attachmentMimeType(
   clientPath: string,
   filename: string,
   explicitMimeType: string | undefined,
-): string {
+): Promise<string> {
   if (explicitMimeType !== undefined) {
     const normalized = explicitMimeType.trim();
     if (normalized.length === 0) {
@@ -236,6 +236,7 @@ function attachmentMimeType(
     }
     return normalized;
   }
+  const { default: mimeTypes } = await import("mime-types");
   const inferred = mimeTypes.lookup(filename) || mimeTypes.lookup(clientPath);
   return typeof inferred === "string" ? inferred : "application/octet-stream";
 }
@@ -280,7 +281,7 @@ export function registerProjectCommands(
           ).projects.attachments.upload({
             clientFile: bytes,
             filename,
-            mimeType: attachmentMimeType(
+            mimeType: await attachmentMimeType(
               opts.clientFile,
               filename,
               opts.mimeType,
@@ -390,6 +391,7 @@ export function registerProjectCommands(
     .requiredOption("--host <id>", "Source machine ID")
     .option("--query <query>", "Branch-name filter")
     .option("--limit <count>", "Maximum branches")
+    .option("--refresh", "Wait for remote refs before listing")
     .option("--json", "Print machine-readable JSON output")
     .action(
       action(async (id: string, opts: ProjectDiscoveryCommandOptions) => {
@@ -398,6 +400,7 @@ export function registerProjectCommands(
           hostId: opts.host ?? "",
           ...(opts.query ? { query: opts.query } : {}),
           ...(opts.limit ? { limit: opts.limit } : {}),
+          ...(opts.refresh ? { refresh: "blocking" as const } : {}),
         });
         if (outputJson(opts, result)) return;
         console.log(JSON.stringify(result, null, 2));

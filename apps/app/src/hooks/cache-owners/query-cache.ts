@@ -1,5 +1,10 @@
 import type { QueryClient, QueryKey } from "@tanstack/react-query";
-import type { Thread, ThreadListEntry, ThreadWithRuntime } from "@bb/domain";
+import type {
+  Thread,
+  ThreadListEntry,
+  ThreadStatusChangeMetadata,
+  ThreadWithRuntime,
+} from "@bb/domain";
 import {
   applyToCachedThreadLists,
   getCachedThreadLists,
@@ -23,6 +28,7 @@ import {
   environmentQueryKey,
   environmentWorkStatusQueryKey,
   environmentWorkStatusQueryKeyPrefix,
+  SIDEBAR_NAVIGATION_QUERY_KEY,
   sidebarNavigationQueryKey,
   THREADS_QUERY_KEY,
   threadQueryKey,
@@ -46,25 +52,25 @@ interface UpdateCachedTimelineRowsArgs {
   updater: TimelineRowsUpdater;
 }
 
-export interface EnvironmentInvalidationParams {
+interface EnvironmentInvalidationParams {
   environmentId: string;
 }
 
-export interface EnvironmentDiffPatchRemovalParams {
+interface EnvironmentDiffPatchRemovalParams {
   environmentId: string;
   queryClient: QueryClient;
 }
 
-export interface ProjectThreadListInvalidationParams {
+interface ProjectThreadListInvalidationParams {
   projectId: string;
   queryClient: QueryClient;
 }
 
-export interface CachedGlobalThreadListInvalidationParams {
+interface CachedGlobalThreadListInvalidationParams {
   queryClient: QueryClient;
 }
 
-export interface RootOrderThreadListInvalidationParams {
+interface RootOrderThreadListInvalidationParams {
   projectId?: string;
   queryClient: QueryClient;
 }
@@ -175,7 +181,6 @@ function isArchivedThreadsListFilters(
     return false;
   }
 
-  // An empty filter object is the global archived list.
   return true;
 }
 
@@ -201,11 +206,6 @@ export function isArchivedThreadListQueryKey(queryKey: QueryKey): boolean {
   return getArchivedThreadListFiltersFromQueryKey(queryKey) !== undefined;
 }
 
-/**
- * Every cached thread-list key (active and archived, all projects). Used by
- * handlers that must treat archived lists differently from active ones and so
- * cannot rely on a bare `threadsQueryKey()` prefix invalidation.
- */
 export function getCachedThreadListQueryKeys(
   queryClient: QueryClient,
 ): QueryKey[] {
@@ -344,11 +344,6 @@ export function applyToCachedThreadListsAndSidebarNavigation(
   });
 }
 
-/**
- * Every thread row the sidebar bootstrap carries, across every project plus
- * the personal project. The bootstrap lists all visible, unarchived threads
- * (children included), so this is the complete live thread set.
- */
 export function listSidebarNavigationThreads(
   navigation: SidebarBootstrapResponse,
 ): ThreadListEntry[] {
@@ -391,16 +386,6 @@ export function getEnvironmentRecordInvalidationQueryKeys({
   return [environmentQueryKey(environmentId)];
 }
 
-/**
- * Invalidation targets for an environment's workspace-derived views. The
- * per-file diff PATCH cache is deliberately absent: it is an observer-less
- * imperative cache (written with `setQueryData`, read with `getQueryData`, no
- * `useQuery`/`queryFn`), so `invalidateQueries` only marks it stale and never
- * evicts or refetches — `getQueryData` would keep returning the stale patch.
- * Callers must evict patches via {@link removeEnvironmentDiffPatchQueries}
- * instead; the diff TOC ({@link environmentDiffFilesQueryKeyPrefix}) has a real
- * observer and refetches on invalidation.
- */
 export function getEnvironmentWorkspaceStateInvalidationQueryKeys({
   environmentId,
 }: EnvironmentInvalidationParams): QueryKey[] {
@@ -412,19 +397,6 @@ export function getEnvironmentWorkspaceStateInvalidationQueryKeys({
   ];
 }
 
-/**
- * Evict every cached per-file diff PATCH for an environment. The patch cache is
- * observer-less (see {@link getEnvironmentWorkspaceStateInvalidationQueryKeys}),
- * so it must be removed — not invalidated — for a content-only file edit to
- * surface fresh patches: eviction makes `readDiffPatchEntry` return undefined,
- * which the panel re-requests once the TOC refetch fires.
- *
- * The eviction generation is bumped synchronously here, before the async TOC
- * refetch fires. A patch fetch that started before this eviction observes the
- * stale generation when it resolves and drops its (pre-edit) write rather than
- * re-seeding the just-cleared cache — otherwise a fetch in flight at edit time
- * could leave a stale patch that nothing re-requests.
- */
 export function removeEnvironmentDiffPatchQueries({
   environmentId,
   queryClient,
@@ -476,11 +448,6 @@ export function getCachedEnvironmentRefWorkspaceStateInvalidationQueryKeys(
     }
   }
 
-  // A moved merge base affects the ref-derived (`all`/`branch_committed`) diff
-  // targets, so invalidate the diff TOC cache by prefix. Mirrors the bulk
-  // workspace-state path; the per-target keys are not enumerated here. The
-  // observer-less patch cache is evicted separately via
-  // removeEnvironmentDiffPatchQueries — invalidation is a no-op for it.
   queryKeys.push(environmentDiffFilesQueryKeyPrefix(environmentId));
 
   return queryKeys;
@@ -574,9 +541,6 @@ function threadMatchesListFilters(
   ) {
     return false;
   }
-  // Mirror the server default: hidden threads stay out of list caches —
-  // otherwise realtime inserts leak them into surfaces (sidebar, recents)
-  // whose fetches exclude them.
   if (thread.visibility === "hidden") {
     return false;
   }
@@ -588,9 +552,6 @@ export function optimisticallyInsertThread(
   queryClient: QueryClient,
   thread: ThreadWithRuntime,
 ): void {
-  // Only inserts into flat-array list caches (`useThreads`). The paginated
-  // archived view uses `InfiniteData` and only displays threads with an
-  // archivedAt — newly created threads can't belong to it.
   for (const { queryKey, data } of getCachedThreadLists(queryClient, {
     queryKey: threadsQueryKey(),
   })) {
@@ -703,4 +664,34 @@ export function updateCachedThreadListPendingInteractionState(
       thread.id === threadId ? { ...thread, hasPendingInteraction } : thread,
     );
   });
+}
+
+export function updateCachedThreadListStatusState(
+  queryClient: QueryClient,
+  threadId: string,
+  statusChange: ThreadStatusChangeMetadata,
+): void {
+  applyToCachedThreadListsAndSidebarNavigation(queryClient, (list) => {
+    if (!list.some((thread) => thread.id === threadId)) {
+      return list;
+    }
+    return list.map((thread) =>
+      thread.id === threadId ? { ...thread, ...statusChange } : thread,
+    );
+  });
+}
+
+export function getFetchingThreadListQueryKeys(
+  queryClient: QueryClient,
+): QueryKey[] {
+  return queryClient
+    .getQueryCache()
+    .findAll({ fetchStatus: "fetching" })
+    .map((query) => query.queryKey)
+    .filter(
+      (queryKey) =>
+        queryKey[0] === SIDEBAR_NAVIGATION_QUERY_KEY ||
+        getThreadListFiltersFromQueryKey(queryKey) !== undefined ||
+        getArchivedThreadListFiltersFromQueryKey(queryKey) !== undefined,
+    );
 }

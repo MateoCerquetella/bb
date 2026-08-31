@@ -5,30 +5,22 @@ import {
 import {
   createFilePreviewLineRange,
   type FilePreviewLineRange,
-} from "@/lib/file-preview";
+} from "@bb/client-core";
 
 export interface MarkdownPreviewLocalFileLink {
   lineRange: FilePreviewLineRange | null;
-  /**
-   * Absolute local path. Callers own workspace containment checks so
-   * MarkdownPreview can stay reusable.
-   */
   path: string;
 }
 
-/**
- * Return `true` when the link was handled and anchor navigation should be
- * prevented. Return `false` to leave the link as a normal anchor.
- */
 export type MarkdownPreviewLocalFileLinkHandler = (
   link: MarkdownPreviewLocalFileLink,
 ) => boolean;
 
-export interface MarkdownTrustedAbsoluteLocalFileLinkRouting {
+interface MarkdownTrustedAbsoluteLocalFileLinkRouting {
   kind: "trusted-host";
 }
 
-export interface MarkdownContainedAbsoluteLocalFileLinkRouting {
+interface MarkdownContainedAbsoluteLocalFileLinkRouting {
   kind: "contained";
   rootPath: string;
 }
@@ -38,15 +30,7 @@ export type MarkdownAbsoluteLocalFileLinkRouting =
   | MarkdownContainedAbsoluteLocalFileLinkRouting;
 
 export interface MarkdownRelativeLocalFileLinkRouting {
-  /**
-   * Absolute directory of the previewed markdown file. Relative links resolve
-   * against this directory before root containment is checked.
-   */
   baseDir: string;
-  /**
-   * Absolute containing root for preview-relative links. Targets outside this
-   * root are left as ordinary markdown links.
-   */
   rootPath: string;
 }
 
@@ -65,12 +49,11 @@ interface ParseLineRangeArgs {
   startValue: string;
 }
 
-export interface ResolveRelativeLocalFileHrefArgs
-  extends MarkdownRelativeLocalFileLinkRouting {
+interface ResolveRelativeLocalFileHrefArgs extends MarkdownRelativeLocalFileLinkRouting {
   href: string | undefined;
 }
 
-export interface ParseLocalFileHrefArgs {
+interface ParseLocalFileHrefArgs {
   absoluteLinks: MarkdownAbsoluteLocalFileLinkRouting;
   href: string | undefined;
 }
@@ -269,26 +252,14 @@ function parseAbsoluteLocalFileHref(
   return parsed;
 }
 
-// Apply scheme detection after file line suffix parsing so references such as
-// `Cargo.lock:14:33` and `foo.md:5` remain relative file links.
 const URI_SCHEME_PATTERN = /^[a-zA-Z][a-zA-Z0-9+.-]*:/u;
 
-// Shell-style home paths (`~`, `~/…`, `~user/…`) are neither absolute nor
-// workspace-relative; the renderer has no home directory to expand them
-// against. Names that merely start with `~` (`~notes.md`) stay relative.
 const HOME_RELATIVE_PATH_PATTERN = /^~(?:[^/]*\/|$)/u;
 
 function isHomeRelativePath(path: string): boolean {
   return HOME_RELATIVE_PATH_PATTERN.test(path);
 }
 
-/**
- * Resolves a relative markdown link against the previewed file's directory so
- * links authored relative to a file on disk become absolute paths the local
- * file link machinery understands. Returns `null` for links that are not
- * relative file references (absolute paths, schemes, in-document fragments,
- * queries), leaving them to default anchor handling.
- */
 export function resolveRelativeLocalFileHref({
   baseDir,
   href,
@@ -372,8 +343,7 @@ function isLinkContainedInRoot({
 export function parseLocalFileHref({
   absoluteLinks,
   href,
-}: ParseLocalFileHrefArgs,
-): MarkdownPreviewLocalFileLink | null {
+}: ParseLocalFileHrefArgs): MarkdownPreviewLocalFileLink | null {
   if (!href) {
     return null;
   }

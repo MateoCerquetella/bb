@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { getAppSettings, setAppSettings } from "@bb/db";
 import {
   hostDaemonServerWsMessageSchema,
   type HostDaemonOnlineRpcRequestMessage,
@@ -7,6 +8,7 @@ import {
   appendCustomModels,
   listSystemProviderInfos,
   resolveSystemExecutionOptions,
+  resolveSystemProviderModels,
 } from "../../src/services/system/execution-options.js";
 import { ApiError } from "../../src/errors.js";
 import { availableModelFixture } from "../helpers/available-models.js";
@@ -24,10 +26,35 @@ import { withTestHarness, type TestAppHarness } from "../helpers/test-app.js";
 import {
   createTestProviderRegistry,
   registerFirstPartyProviders,
+  configuredAcpProvider,
 } from "../helpers/provider-registry.js";
 import { createProviderRegistryService } from "../../src/services/providers/provider-registry.js";
 
 const registry = await createTestProviderRegistry();
+
+function providerDiscoveryHealth(installed: boolean) {
+  return {
+    supported: true as const,
+    health: {
+      status: installed ? ("ready" as const) : ("not_installed" as const),
+      statusMessage: null,
+      accountEmail: null,
+      planLabel: null,
+      installedVersion: null,
+      minimumSupportedVersion: null,
+      canInstall: false,
+      canUpdate: false,
+      loginCommand: null,
+    },
+  };
+}
+
+const EXAMPLE_AGENT_SETTING = {
+  id: "example-agent",
+  displayName: "Example Agent",
+  command: "example-agent",
+  args: ["acp"],
+};
 
 describe("appendCustomModels", () => {
   it("appends custom models for the requested provider after the catalog", () => {
@@ -128,8 +155,6 @@ describe("appendCustomModels", () => {
       defaultReasoningEffort: "medium",
       isDefault: false,
     });
-    // Dynamic ACP ids resolve to the shared ACP policy ladder, the same one
-    // that validates reasoning overrides for these providers.
     expect(
       models[0].supportedReasoningEfforts.map(
         (effort) => effort.reasoningEffort,
@@ -189,8 +214,6 @@ describe("appendCustomModels", () => {
       selectedOnlyModels: [retiredModel],
     });
 
-    // The catalog's accurate metadata wins over the synthesized entry, and the
-    // promoted model leaves the selected-only pool so it never appears twice.
     expect(models).toEqual([retiredModel]);
     expect(selectedOnlyModels).toEqual([]);
   });
@@ -267,7 +290,7 @@ describe("resolveSystemExecutionOptions", () => {
     );
   });
 
-  it("includes installed known ACP agents and sends their launch spec when loading models", async () => {
+  it("includes installed plugin providers and sends their launch spec when loading models", async () => {
     await withTestHarness({}, async (harness) => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-execution-options-known-acp-installed",
@@ -279,19 +302,12 @@ describe("resolveSystemExecutionOptions", () => {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
-          if (request.command.type === "known_acp_agents.status") {
+          if (request.command.type === "provider.health") {
             return {
               ok: true,
-              result: {
-                agents: request.command.agents.map((agent) => ({
-                  ...agent,
-                  installed: agent.id === "acp-opencode",
-                  executablePath:
-                    agent.id === "acp-opencode"
-                      ? "/opt/homebrew/bin/opencode"
-                      : null,
-                })),
-              },
+              result: providerDiscoveryHealth(
+                request.command.providerId === "acp-opencode",
+              ),
             };
           }
           if (request.command.type === "provider.list_models") {
@@ -322,23 +338,32 @@ describe("resolveSystemExecutionOptions", () => {
         ]),
       );
       expect(response.models).toEqual([catalogModel]);
-      expect(responder.requests.map((request) => request.command.type)).toEqual(
-        ["known_acp_agents.status", "provider.list_models"],
+      expect(
+        responder.requests.filter(
+          (request) => request.command.type === "provider.health",
+        ),
+      ).toHaveLength(4);
+      const modelRequest = responder.requests.find(
+        (request) => request.command.type === "provider.list_models",
       );
-      expect(responder.requests[1].command).toMatchObject({
+      expect(modelRequest?.command).toMatchObject({
         type: "provider.list_models",
         providerId: "acp-opencode",
-        acpLaunchSpec: {
-          displayName: "opencode",
-          command: "opencode",
-          args: ["acp"],
-          env: {},
+        bridgeLaunch: {
+          providerOptions: {
+            acpLaunchSpec: {
+              displayName: "opencode",
+              command: "opencode",
+              args: ["acp"],
+              env: {},
+            },
+          },
         },
       });
     });
   });
 
-  it("includes installed Grok Build ACP and sends its launch spec when loading models", async () => {
+  it("includes installed Grok Build and sends its plugin launch spec when loading models", async () => {
     await withTestHarness({}, async (harness) => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-execution-options-known-grok-installed",
@@ -350,19 +375,12 @@ describe("resolveSystemExecutionOptions", () => {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
-          if (request.command.type === "known_acp_agents.status") {
+          if (request.command.type === "provider.health") {
             return {
               ok: true,
-              result: {
-                agents: request.command.agents.map((agent) => ({
-                  ...agent,
-                  installed: agent.id === "acp-grok",
-                  executablePath:
-                    agent.id === "acp-grok"
-                      ? "/Users/example/.grok/bin/grok"
-                      : null,
-                })),
-              },
+              result: providerDiscoveryHealth(
+                request.command.providerId === "acp-grok",
+              ),
             };
           }
           if (request.command.type === "provider.list_models") {
@@ -393,43 +411,47 @@ describe("resolveSystemExecutionOptions", () => {
         ]),
       );
       expect(response.models).toEqual([catalogModel]);
-      expect(responder.requests.map((request) => request.command.type)).toEqual(
-        ["known_acp_agents.status", "provider.list_models"],
+      const grokModelRequest = responder.requests.find(
+        (request) => request.command.type === "provider.list_models",
       );
-      expect(responder.requests[1].command).toMatchObject({
+      expect(grokModelRequest?.command).toMatchObject({
         type: "provider.list_models",
         providerId: "acp-grok",
-        acpLaunchSpec: {
-          displayName: "Grok Build",
-          command: "grok",
-          args: ["agent", "stdio"],
-          env: {},
-          modelCli: {
-            listArgs: ["models"],
-            selectFlag: "--model",
-            primaryModels: ["grok-4.5", "grok-composer-2.5-fast"],
-          },
-          permissionCli: {
-            full: ["--always-approve"],
-            insertAfterArgs: 1,
-          },
-          reasoningCli: {
-            flag: "--reasoning-effort",
-            supportedLevels: ["low", "medium", "high"],
-            levelValues: {
-              none: "low",
-              xhigh: "high",
-              ultracode: "high",
-              max: "high",
+        bridgeLaunch: {
+          providerOptions: {
+            acpLaunchSpec: {
+              displayName: "Grok Build",
+              command: "grok",
+              args: ["agent", "stdio"],
+              env: {},
+              modelCli: {
+                listArgs: ["models"],
+                selectFlag: "--model",
+                primaryModels: ["grok-4.5", "grok-composer-2.5-fast"],
+              },
+              permissionCli: {
+                full: ["--always-approve"],
+                insertAfterArgs: 1,
+              },
+              reasoningCli: {
+                flag: "--reasoning-effort",
+                supportedLevels: ["low", "medium", "high"],
+                levelValues: {
+                  none: "low",
+                  xhigh: "high",
+                  ultracode: "high",
+                  max: "high",
+                },
+                defaultLevel: "high",
+              },
             },
-            defaultLevel: "high",
           },
         },
       });
     });
   });
 
-  it("includes installed Hermes Agent ACP and sends its launch spec when loading models", async () => {
+  it("includes installed Hermes Agent and sends its plugin launch spec when loading models", async () => {
     await withTestHarness({}, async (harness) => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-execution-options-known-hermes-installed",
@@ -441,19 +463,12 @@ describe("resolveSystemExecutionOptions", () => {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
-          if (request.command.type === "known_acp_agents.status") {
+          if (request.command.type === "provider.health") {
             return {
               ok: true,
-              result: {
-                agents: request.command.agents.map((agent) => ({
-                  ...agent,
-                  installed: agent.id === "acp-hermes-agent",
-                  executablePath:
-                    agent.id === "acp-hermes-agent"
-                      ? "/Users/example/.local/bin/hermes"
-                      : null,
-                })),
-              },
+              result: providerDiscoveryHealth(
+                request.command.providerId === "acp-hermes-agent",
+              ),
             };
           }
           if (request.command.type === "provider.list_models") {
@@ -484,28 +499,39 @@ describe("resolveSystemExecutionOptions", () => {
         ]),
       );
       expect(response.models).toEqual([catalogModel]);
-      expect(responder.requests.map((request) => request.command.type)).toEqual(
-        ["known_acp_agents.status", "provider.list_models"],
+      const hermesModelRequest = responder.requests.find(
+        (request) => request.command.type === "provider.list_models",
       );
-      expect(responder.requests[1].command).toMatchObject({
+      expect(hermesModelRequest?.command).toMatchObject({
         type: "provider.list_models",
         providerId: "acp-hermes-agent",
-        acpLaunchSpec: {
-          displayName: "Hermes Agent",
-          command: "hermes",
-          args: ["acp"],
-          env: {},
-          nativeReasoning: {
-            configId: "reasoning_effort",
-            supportedLevels: ["none", "low", "medium", "high", "xhigh", "max"],
-            defaultLevel: "medium",
+        bridgeLaunch: {
+          providerOptions: {
+            acpLaunchSpec: {
+              displayName: "Hermes Agent",
+              command: "hermes",
+              args: ["acp"],
+              env: {},
+              nativeReasoning: {
+                configId: "reasoning_effort",
+                supportedLevels: [
+                  "none",
+                  "low",
+                  "medium",
+                  "high",
+                  "xhigh",
+                  "max",
+                ],
+                defaultLevel: "medium",
+              },
+            },
           },
         },
       });
     });
   });
 
-  it("omits known ACP agents that the host reports missing", async () => {
+  it("omits installed-only providers that their bridge reports missing", async () => {
     await withTestHarness({}, async (harness) => {
       const { host, session } = seedHostSession(harness.deps, {
         id: "host-execution-options-known-acp-missing",
@@ -514,18 +540,12 @@ describe("resolveSystemExecutionOptions", () => {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
-          if (request.command.type !== "known_acp_agents.status") {
+          if (request.command.type !== "provider.health") {
             throw new Error(`Unexpected RPC command ${request.command.type}`);
           }
           return {
             ok: true,
-            result: {
-              agents: request.command.agents.map((agent) => ({
-                ...agent,
-                installed: false,
-                executablePath: null,
-              })),
-            },
+            result: providerDiscoveryHealth(false),
           };
         },
       });
@@ -540,6 +560,45 @@ describe("resolveSystemExecutionOptions", () => {
     });
   });
 
+  it("spends one command timeout across installed-only provider discovery", async () => {
+    vi.useFakeTimers();
+    try {
+      await withTestHarness({}, async (harness) => {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-execution-options-provider-discovery-budget",
+        });
+        const responder = registerHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          handle: () => new Promise(() => undefined),
+        });
+
+        let settled = false;
+        const pendingProviders = listSystemProviderInfos(harness.deps, {
+          hostId: host.id,
+        }).then((providers) => {
+          settled = true;
+          return providers;
+        });
+
+        await vi.advanceTimersByTimeAsync(0);
+        expect(responder.requests).toHaveLength(3);
+        await vi.advanceTimersByTimeAsync(29_999);
+        expect(settled).toBe(false);
+
+        await vi.advanceTimersByTimeAsync(1);
+        const providers = await pendingProviders;
+        expect(settled).toBe(true);
+        expect(responder.requests).toHaveLength(6);
+        expect(providers.map((provider) => provider.id)).not.toContain(
+          "acp-opencode",
+        );
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     {
       name: "status returns 502",
@@ -550,20 +609,11 @@ describe("resolveSystemExecutionOptions", () => {
       failStatusRequest: true,
     },
   ])(
-    "keeps built-in and custom providers when known ACP agent $name",
+    "keeps always-visible and custom providers when installed-only provider $name",
     async ({ failStatusRequest }) => {
       await withTestHarness(
         {
-          customAcpAgents: [
-            {
-              id: "example-agent",
-              displayName: "Example Agent",
-              command: "example-agent",
-              args: ["acp"],
-              env: {},
-              supportsManualCompaction: false,
-            },
-          ],
+          extraProviders: [await configuredAcpProvider(EXAMPLE_AGENT_SETTING)],
         },
         async (harness) => {
           const warn = vi.fn();
@@ -576,7 +626,7 @@ describe("resolveSystemExecutionOptions", () => {
             hostId: host.id,
             sessionId: session.id,
             handle: (request) => {
-              if (request.command.type === "known_acp_agents.status") {
+              if (request.command.type === "provider.health") {
                 return {
                   ok: false,
                   errorCode: "host_unavailable",
@@ -601,7 +651,7 @@ describe("resolveSystemExecutionOptions", () => {
             );
             vi.spyOn(harness.hub, "requestHostOnlineRpc").mockImplementation(
               async (args) => {
-                if (args.message.command.type === "known_acp_agents.status") {
+                if (args.message.command.type === "provider.health") {
                   throw new ApiError(
                     504,
                     "command_timeout",
@@ -630,15 +680,19 @@ describe("resolveSystemExecutionOptions", () => {
           expect(response.models).toEqual([catalogModel]);
           expect(response.modelLoadError).toBeNull();
           expect(
-            responder.requests.map((request) => request.command.type),
-          ).toEqual(
-            failStatusRequest
-              ? ["provider.list_models"]
-              : ["known_acp_agents.status", "provider.list_models"],
-          );
+            responder.requests.filter(
+              (request) => request.command.type === "provider.health",
+            ),
+          ).toHaveLength(failStatusRequest ? 0 : 4);
+          expect(
+            responder.requests.filter(
+              (request) => request.command.type === "provider.list_models",
+            ),
+          ).toHaveLength(1);
           const statusWarning = warn.mock.calls.find(
-            ([, message]) =>
-              message === "Failed to resolve known ACP agent status",
+            ([fields, message]) =>
+              message === "Failed to resolve installed-only provider status" &&
+              fields.providerId === "acp-opencode",
           );
           expect(statusWarning).toBeDefined();
           expect(statusWarning?.[0]).toMatchObject({
@@ -660,16 +714,7 @@ describe("resolveSystemExecutionOptions", () => {
   it("keeps configured providers and custom models when no host can be resolved", async () => {
     await withTestHarness(
       {
-        customAcpAgents: [
-          {
-            id: "example-agent",
-            displayName: "Example Agent",
-            command: "example-agent",
-            args: ["acp"],
-            env: {},
-            supportsManualCompaction: false,
-          },
-        ],
+        extraProviders: [await configuredAcpProvider(EXAMPLE_AGENT_SETTING)],
         customModels: [
           {
             providerId: "codex",
@@ -706,7 +751,7 @@ describe("resolveSystemExecutionOptions", () => {
         });
         const hostLookupWarning = warn.mock.calls.find(
           ([, message]) =>
-            message === "Failed to resolve host for known ACP agent status",
+            message === "Failed to resolve host for provider discovery",
         );
         expect(hostLookupWarning).toBeDefined();
         expect(hostLookupWarning?.[0]).toMatchObject({
@@ -715,71 +760,6 @@ describe("resolveSystemExecutionOptions", () => {
           errorStatus: 502,
         });
         expect(hostLookupWarning?.[0]).not.toHaveProperty("err");
-      },
-    );
-  });
-
-  it("uses the custom ACP config when it collides with a known ACP agent", async () => {
-    await withTestHarness(
-      {
-        customAcpAgents: [
-          {
-            id: "opencode",
-            displayName: "Custom opencode",
-            command: "custom-opencode",
-            args: ["serve"],
-            env: { CUSTOM_OPENCODE: "1" },
-            supportsManualCompaction: false,
-          },
-        ],
-      },
-      async (harness) => {
-        const { host, session } = seedHostSession(harness.deps, {
-          id: "host-execution-options-known-acp-override",
-        });
-        const responder = registerHostRpcResponder(harness, {
-          hostId: host.id,
-          sessionId: session.id,
-          handle: (request) => {
-            if (request.command.type === "known_acp_agents.status") {
-              // acp-omp, acp-grok, and acp-hermes-agent are known agents that
-              // are not overridden by custom config here, so the server probes
-              // host install status for them.
-              return { ok: true, result: { agents: [] } };
-            }
-            if (request.command.type === "provider.list_models") {
-              return {
-                ok: true,
-                result: { models: [], selectedOnlyModels: [] },
-              };
-            }
-            throw new Error(`Unexpected RPC command ${request.command.type}`);
-          },
-        });
-
-        const response = await resolveSystemExecutionOptions(harness.deps, {
-          hostId: host.id,
-          providerId: "acp-opencode",
-        });
-
-        const opencodeProviders = response.providers.filter(
-          (provider) => provider.id === "acp-opencode",
-        );
-        expect(opencodeProviders).toHaveLength(1);
-        expect(opencodeProviders[0].displayName).toBe("Custom opencode");
-        expect(
-          responder.requests.map((request) => request.command.type),
-        ).toEqual(["known_acp_agents.status", "provider.list_models"]);
-        expect(responder.requests[1].command).toMatchObject({
-          type: "provider.list_models",
-          providerId: "acp-opencode",
-          acpLaunchSpec: {
-            displayName: "Custom opencode",
-            command: "custom-opencode",
-            args: ["serve"],
-            env: { CUSTOM_OPENCODE: "1" },
-          },
-        });
       },
     );
   });
@@ -819,8 +799,6 @@ describe("resolveSystemExecutionOptions", () => {
           providerId: "claude-code",
           code: "failed",
         });
-        // A transient failure serves the provisional alias catalog, and custom
-        // models stay appended after it.
         expect(response.models.map((model) => model.model)).toEqual([
           "claude-fable-5",
           "claude-opus-5[1m]",
@@ -830,6 +808,100 @@ describe("resolveSystemExecutionOptions", () => {
           "claude-example-preview",
         ]);
         expect(response.selectedOnlyModels).toEqual([]);
+      },
+    );
+  });
+
+  it("hides custom models while streamer mode is on and restores them when it is off", async () => {
+    await withTestHarness(
+      {
+        customModels: [
+          {
+            providerId: "claude-code",
+            model: "claude-example-preview",
+            displayName: "Example Preview",
+          },
+        ],
+      },
+      async (harness) => {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-execution-options-streamer-mode",
+        });
+        const catalogModel = availableModelFixture({ model: "claude-opus-5" });
+        const responder = registerProviderHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          modelsByProviderId: {
+            "claude-code": { models: [catalogModel], selectedOnlyModels: [] },
+          },
+        });
+        const listModelIds = async () =>
+          (
+            await resolveSystemExecutionOptions(harness.deps, {
+              hostId: host.id,
+              providerId: "claude-code",
+            })
+          ).models.map((model) => model.model);
+
+        expect(await listModelIds()).toEqual([
+          "claude-opus-5",
+          "claude-example-preview",
+        ]);
+
+        setAppSettings(harness.db, {
+          ...getAppSettings(harness.db),
+          streamerMode: true,
+        });
+        expect(await listModelIds()).toEqual(["claude-opus-5"]);
+
+        setAppSettings(harness.db, {
+          ...getAppSettings(harness.db),
+          streamerMode: false,
+        });
+        expect(await listModelIds()).toEqual([
+          "claude-opus-5",
+          "claude-example-preview",
+        ]);
+        expect(
+          responder.requests.filter(
+            (request) => request.command.type === "provider.list_models",
+          ),
+        ).toHaveLength(1);
+      },
+    );
+  });
+
+  it("keeps custom models in the thread-create default catalog while streamer mode is on", async () => {
+    await withTestHarness(
+      {
+        customModels: [
+          { providerId: "claude-code", model: "claude-example-preview" },
+        ],
+      },
+      async (harness) => {
+        const { host, session } = seedHostSession(harness.deps, {
+          id: "host-provider-models-streamer-mode",
+        });
+        registerProviderHostRpcResponder(harness, {
+          hostId: host.id,
+          sessionId: session.id,
+          modelsByProviderId: {
+            "claude-code": { models: [], selectedOnlyModels: [] },
+          },
+        });
+        setAppSettings(harness.db, {
+          ...getAppSettings(harness.db),
+          streamerMode: true,
+        });
+
+        const catalog = await resolveSystemProviderModels(harness.deps, {
+          hostId: host.id,
+          providerId: "claude-code",
+        });
+
+        expect(catalog.models.map((model) => model.model)).toEqual([
+          "claude-example-preview",
+        ]);
       },
     );
   });
@@ -855,8 +927,6 @@ describe("resolveSystemExecutionOptions", () => {
         providerId: "claude-code",
       });
 
-      // The catalog is provisional, so the error must still be reported:
-      // callers gate thread model recovery on `modelLoadError` being null.
       expect(response.modelLoadError).toEqual({
         providerId: "claude-code",
         code: "timeout",
@@ -902,8 +972,6 @@ describe("resolveSystemExecutionOptions", () => {
           providerId: "claude-code",
         });
 
-        // These are actionable setup states the app routes to an install/auth
-        // prompt. Offering models would only defer the failure to submit time.
         expect(response.modelLoadError).toEqual({
           providerId: "claude-code",
           code: errorCode,
@@ -952,24 +1020,23 @@ describe("resolveSystemExecutionOptions", () => {
     });
   });
 
-  it("includes custom ACP agents and sends their launch spec when loading models", async () => {
+  it("lists a configured ACP agent and sends its launch spec when loading models", async () => {
     await withTestHarness(
       {
-        customAcpAgents: [
-          {
+        extraProviders: [
+          await configuredAcpProvider({
             id: "example-agent",
             displayName: "Example Agent",
             command: "example-agent",
             args: ["acp", "--stdio"],
             env: { EXAMPLE_TOKEN: "test-token" },
-            supportsManualCompaction: false,
             cwd: "/tmp/example-agent",
             modelCli: {
               listArgs: ["models", "--json"],
               selectFlag: "--model",
               primaryModels: ["example/default"],
             },
-          },
+          }),
         ],
       },
       async (harness) => {
@@ -1003,7 +1070,7 @@ describe("resolveSystemExecutionOptions", () => {
               available: true,
               composerActions: [{ kind: "skills", trigger: "/" }],
               capabilities: expect.objectContaining({
-                supportsFork: true,
+                supportsFork: false,
                 supportsServiceTier: true,
                 permissionModes: ["accept-edits", "full"],
               }),
@@ -1014,21 +1081,30 @@ describe("resolveSystemExecutionOptions", () => {
         expect(response.selectedOnlyModels).toEqual([]);
         expect(response.modelLoadError).toBeNull();
         expect(
-          responder.requests.map((request) => request.command.type),
-        ).toEqual(["known_acp_agents.status", "provider.list_models"]);
-        expect(responder.requests[1].command).toMatchObject({
+          responder.requests.filter(
+            (request) => request.command.type === "provider.health",
+          ),
+        ).toHaveLength(4);
+        const modelRequest = responder.requests.find(
+          (request) => request.command.type === "provider.list_models",
+        );
+        expect(modelRequest?.command).toMatchObject({
           type: "provider.list_models",
           providerId: "acp-example-agent",
-          acpLaunchSpec: {
-            displayName: "Example Agent",
-            command: "example-agent",
-            args: ["acp", "--stdio"],
-            env: { EXAMPLE_TOKEN: "test-token" },
-            cwd: "/tmp/example-agent",
-            modelCli: {
-              listArgs: ["models", "--json"],
-              selectFlag: "--model",
-              primaryModels: ["example/default"],
+          bridgeLaunch: {
+            providerOptions: {
+              acpLaunchSpec: {
+                displayName: "Example Agent",
+                command: "example-agent",
+                args: ["acp", "--stdio"],
+                env: { EXAMPLE_TOKEN: "test-token" },
+                cwd: "/tmp/example-agent",
+                modelCli: {
+                  listArgs: ["models", "--json"],
+                  selectFlag: "--model",
+                  primaryModels: ["example/default"],
+                },
+              },
             },
           },
         });
@@ -1036,9 +1112,6 @@ describe("resolveSystemExecutionOptions", () => {
     );
   });
 
-  // The HTTP listener deliberately starts serving before plugins load, and
-  // providers now exist only while their plugin is loaded, so a request that
-  // lands in that window must wait instead of reporting no providers at all.
   it("waits for plugin provider registrations before answering with an empty registry", async () => {
     await withTestHarness(
       { seedFirstPartyProviders: false },
@@ -1056,7 +1129,6 @@ describe("resolveSystemExecutionOptions", () => {
         });
 
         const providersPromise = listSystemProviderInfos(harness.deps, {});
-        // Plugin startup lands after the request already began.
         await registerFirstPartyProviders(registry);
         registry.markRegistrationsSettled();
 
@@ -1093,6 +1165,7 @@ describe("resolveSystemExecutionOptions", () => {
             "provider-claude-code",
             "provider-codex",
           ],
+          artifacts: harness.deps.pluginHostArtifacts,
         });
 
         const response = await optionsPromise;
@@ -1101,57 +1174,7 @@ describe("resolveSystemExecutionOptions", () => {
         ]);
         expect(response.modelLoadError).toBeNull();
 
-        // Full plugin startup is intentionally still outstanding. It may
-        // complete later and invalidate this partial boot-time roster.
         registry.markRegistrationsSettled();
-      },
-    );
-  });
-
-  // Dynamic ACP ids run on the ACP plugin's bridge and are never registered
-  // themselves, so with that plugin disabled they have no bridge anywhere:
-  // listing them would offer agents whose first turn fails on the daemon.
-  it("omits custom and known ACP agents when no ACP provider plugin is registered", async () => {
-    await withTestHarness(
-      {
-        seedFirstPartyProviders: false,
-        customAcpAgents: [
-          {
-            id: "example-agent",
-            displayName: "Example Agent",
-            command: "example-agent",
-            args: ["acp", "--stdio"],
-            env: {},
-            supportsManualCompaction: false,
-          },
-        ],
-      },
-      async (harness) => {
-        await registerFirstPartyProviders(harness.deps.providerRegistry, {
-          excludePluginIds: ["provider-acp"],
-        });
-        const { host, session } = seedHostSession(harness.deps, {
-          id: "host-execution-options-no-acp-plugin",
-        });
-        const responder = registerProviderHostRpcResponder(harness, {
-          hostId: host.id,
-          sessionId: session.id,
-        });
-
-        const providers = await listSystemProviderInfos(harness.deps, {
-          hostId: host.id,
-        });
-
-        expect(providers.map((provider) => provider.id)).toEqual([
-          "codex",
-          "claude-code",
-          "pi",
-        ]);
-        // Nothing ACP to offer, so the host is never probed for installed
-        // known agents either.
-        expect(
-          responder.requests.map((request) => request.command.type),
-        ).toEqual([]);
       },
     );
   });
@@ -1181,10 +1204,15 @@ describe("resolveSystemExecutionOptions", () => {
         providerId: "acp-cursor",
         code: "auth_required",
       });
-      expect(responder.requests.map((request) => request.command.type)).toEqual(
-        ["known_acp_agents.status", "provider.list_models"],
+      expect(
+        responder.requests.filter(
+          (request) => request.command.type === "provider.health",
+        ),
+      ).toHaveLength(4);
+      const modelRequest = responder.requests.find(
+        (request) => request.command.type === "provider.list_models",
       );
-      expect(responder.requests[1].command).toMatchObject({
+      expect(modelRequest?.command).toMatchObject({
         type: "provider.list_models",
         providerId: "acp-cursor",
       });
@@ -1198,19 +1226,16 @@ describe("resolveSystemExecutionOptions", () => {
     ["auth required", "auth_required", "auth_required"],
     ["launch failure", "command_failed", "failed"],
   ] as const)(
-    "surfaces dynamic ACP model-load %s errors with the custom provider identity",
+    "surfaces a configured ACP agent's model-load %s error under its own identity",
     async (_name, hostErrorCode, expectedCode) => {
       await withTestHarness(
         {
-          customAcpAgents: [
-            {
+          extraProviders: [
+            await configuredAcpProvider({
               id: "broken-agent",
               displayName: "Broken Agent",
               command: "broken-agent",
-              args: [],
-              env: {},
-              supportsManualCompaction: false,
-            },
+            }),
           ],
         },
         async (harness) => {
@@ -1251,10 +1276,6 @@ describe("resolveSystemExecutionOptions", () => {
   );
 });
 
-/**
- * A daemon socket that holds every `provider.list_models` request until the
- * test releases it, so two callers can be observed sharing one probe.
- */
 function registerHeldModelListResponder(
   harness: TestAppHarness,
   args: { hostId: string; sessionId: string; modelId: string },
@@ -1270,7 +1291,7 @@ function registerHeldModelListResponder(
       if (message.type !== "host-rpc.request") {
         throw new Error(`Unexpected daemon websocket message ${message.type}`);
       }
-      if (message.command.type === "known_acp_agents.status") {
+      if (message.command.type === "provider.health") {
         harness.hub.recordHostOnlineRpcResponse({
           sessionId: args.sessionId,
           message: {
@@ -1278,13 +1299,7 @@ function registerHeldModelListResponder(
             requestId: message.requestId,
             commandType: message.command.type,
             ok: true,
-            result: {
-              agents: message.command.agents.map((agent) => ({
-                ...agent,
-                installed: false,
-                executablePath: null,
-              })),
-            },
+            result: providerDiscoveryHealth(false),
           },
         });
         return;
@@ -1470,16 +1485,10 @@ describe("resolveSystemExecutionOptions model probe memo", () => {
         hostId: host.id,
         sessionId: session.id,
         handle: (request) => {
-          if (request.command.type === "known_acp_agents.status") {
+          if (request.command.type === "provider.health") {
             return {
               ok: true,
-              result: {
-                agents: request.command.agents.map((agent) => ({
-                  ...agent,
-                  installed: false,
-                  executablePath: null,
-                })),
-              },
+              result: providerDiscoveryHealth(false),
             };
           }
           if (request.command.type !== "provider.list_models") {
@@ -1520,8 +1529,6 @@ describe("resolveSystemExecutionOptions model probe memo", () => {
         ),
       ).toHaveLength(2);
 
-      // A reconnected daemon may run a different CLI or account: its first
-      // probe must not be answered from the previous session's memo.
       harness.hub.unregisterDaemon(session.id);
       const nextSession = seedSession(harness.deps, host.id);
       const nextResponder = registerProviderHostRpcResponder(harness, {

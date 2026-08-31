@@ -133,6 +133,7 @@ interface FakeFindInPageCall {
 }
 
 interface FakeWebContentsEventMap {
+  focus: FakeVoidWebContentsListener;
   "before-input-event": FakeBeforeInputListener;
   "will-frame-navigate": FakeWillFrameNavigateListener;
   "will-navigate": FakeWillNavigateListener;
@@ -260,6 +261,7 @@ const electronMock = vi.hoisted(() => {
       (image: FakeNativeImage) => void
     > = [];
     private readonly listeners: FakeWebContentsListeners = {
+      focus: [],
       "before-input-event": [],
       "will-frame-navigate": [],
       "will-navigate": [],
@@ -310,6 +312,7 @@ const electronMock = vi.hoisted(() => {
 
     focus(): void {
       this.focusCalls += 1;
+      this.emitFocus();
     }
 
     findInPage(
@@ -379,6 +382,10 @@ const electronMock = vi.hoisted(() => {
           args.isMainFrame,
         );
       }
+    }
+
+    emitFocus(): void {
+      for (const listener of this.listeners.focus) listener();
     }
 
     emitRenderProcessGone(details: FakeRenderProcessGoneDetails): void {
@@ -546,6 +553,7 @@ interface FakeHostWindowArgs {
 class FakeHostWebContents implements DesktopBrowserHostWebContents {
   public destroyed = false;
   public readonly sentPayloads: DesktopBrowserHostWebContentsPayload[] = [];
+  public readonly sentChannels: string[] = [];
   public readonly id: number;
 
   constructor(id: number) {
@@ -556,7 +564,8 @@ class FakeHostWebContents implements DesktopBrowserHostWebContents {
     return this.destroyed;
   }
 
-  send(_channel: string, payload: DesktopBrowserHostWebContentsPayload): void {
+  send(channel: string, payload: DesktopBrowserHostWebContentsPayload): void {
+    this.sentChannels.push(channel);
     this.sentPayloads.push(payload);
   }
 }
@@ -600,10 +609,6 @@ beforeEach(() => {
   electronMock.fakeViews.length = 0;
 });
 
-/**
- * Resolve every pending capturePage() on the view and let the snapshot
- * pipeline (push the bitmap, then hide the view) drain.
- */
 async function settlePendingCaptures(
   view: (typeof electronMock.fakeViews)[number],
 ): Promise<void> {
@@ -816,7 +821,6 @@ describe("DesktopBrowserViewManager", () => {
         newSession: false,
       },
     });
-    // Unknown tab: no view, nothing to drive.
     manager.findInPage({
       hostWindow,
       request: {
@@ -831,7 +835,6 @@ describe("DesktopBrowserViewManager", () => {
       request: { tabId: "browser:a", action: "clearSelection" },
     });
 
-    // Electron's `findNext` carries the "start a new session" meaning.
     expect(webContents.findInPageCalls).toEqual([
       { text: "needle", options: { forward: true, findNext: true } },
       { text: "needle", options: { forward: false, findNext: false } },
@@ -845,8 +848,6 @@ describe("DesktopBrowserViewManager", () => {
       finalUpdate: true,
       selectionArea: { x: 0, y: 0, width: 10, height: 10 },
     });
-    // The session was stopped, so even a result for the latest request id is
-    // stale and must not revive a cleared count.
     expect(findResultPushesOf(hostWindow)).toEqual([]);
   });
 
@@ -873,13 +874,11 @@ describe("DesktopBrowserViewManager", () => {
     };
     const resultArea = { x: 0, y: 0, width: 10, height: 10 };
 
-    // Fake findInPage returns 1, 2, 3, … as request ids.
     manager.findInPage({ hostWindow, request: findRequest });
     manager.findInPage({
       hostWindow,
       request: { ...findRequest, text: "nee" },
     });
-    // Late result for the first (superseded) request: dropped.
     webContents.emitFoundInPage({
       requestId: 1,
       activeMatchOrdinal: 1,
@@ -894,8 +893,6 @@ describe("DesktopBrowserViewManager", () => {
       finalUpdate: false,
       selectionArea: resultArea,
     });
-    // The relay carries the tab id and drops the selection rect, which the
-    // renderer cannot use (the native view overlays its DOM).
     expect(findResultPushesOf(hostWindow)).toEqual([
       {
         tabId: "browser:a",
@@ -937,8 +934,6 @@ describe("DesktopBrowserViewManager", () => {
     });
     const view = requireFakeView(0);
 
-    // The native popup is always denied; an allowed http(s) URL becomes a tab.
-    // A local dev app opening its own admin page on another port is ordinary.
     expect(view.webContents.emitWindowOpen("http://localhost:38886/")).toEqual({
       action: "deny",
     });
@@ -1011,9 +1006,6 @@ describe("DesktopBrowserViewManager", () => {
     });
     expect(view.visible).toBe(true);
 
-    // Mid-drag the chrome and the native view cannot stay glued; the view is
-    // captured (so the renderer can paint a stand-in) and then hidden for the
-    // burst instead of tracking anything.
     manager.beginWindowResize(hostWindow);
     await settlePendingCaptures(view);
     expect(view.visible).toBe(false);
@@ -1024,9 +1016,6 @@ describe("DesktopBrowserViewManager", () => {
       },
     ]);
 
-    // The reveal applies bounds before visibility, intersected with the live
-    // window so a shrunken window never shows a spilling view; the null push
-    // then clears the renderer's stand-in.
     hostWindow.contentBounds = { width: 400, height: 300 };
     manager.endWindowResize(hostWindow);
 
@@ -1042,8 +1031,6 @@ describe("DesktopBrowserViewManager", () => {
       dataUrl: null,
     });
 
-    // The clamp is non-destructive: growing back re-applies the full
-    // renderer-desired rect, not the clamped remnant.
     manager.beginWindowResize(hostWindow);
     await settlePendingCaptures(view);
     hostWindow.contentBounds = { width: 700, height: 450 };
@@ -1083,9 +1070,6 @@ describe("DesktopBrowserViewManager", () => {
       throw new Error("Expected the browser view to be created.");
     }
 
-    // A tap-resize can end the burst before the capture resolves. The live
-    // view is visible again by then; a late bitmap push would linger under it
-    // into the next burst.
     manager.beginWindowResize(hostWindow);
     manager.endWindowResize(hostWindow);
     await settlePendingCaptures(view);
@@ -1122,9 +1106,6 @@ describe("DesktopBrowserViewManager", () => {
       throw new Error("Expected the browser view to be created.");
     }
 
-    // Extrapolating the view to the new window size would visibly break it
-    // out of its panel; it must hold the renderer-measured rect until the
-    // renderer pushes a fresh one.
     manager.beginWindowResize(hostWindow);
     await settlePendingCaptures(view);
     hostWindow.contentBounds = { width: 900, height: 640 };
@@ -1175,8 +1156,6 @@ describe("DesktopBrowserViewManager", () => {
     });
     manager.endWindowResize(hostWindow);
 
-    // The reveal intersects the latest renderer rect (not the attach-time one)
-    // with the live window.
     expect(view.boundsCalls.at(-1)).toEqual({
       x: 200,
       y: 90,
@@ -1212,8 +1191,6 @@ describe("DesktopBrowserViewManager", () => {
     }
 
     manager.beginWindowResize(hostWindow);
-    // A tab switch mid-drag declares the view visible; it must stay hidden
-    // until the resize settles.
     manager.setVisible({
       hostWindow,
       request: { tabId: "browser:a", visible: true },
@@ -1278,6 +1255,43 @@ describe("DesktopBrowserViewManager", () => {
 
     const view = requireFakeView(0);
     expect(view.webContents.focusCalls).toBe(1);
+  });
+
+  it("reports user focus but suppresses programmatic focus used for restoration", () => {
+    const manager = createDesktopBrowserViewManager({
+      partition: "persist:test",
+    });
+    const hostWindow = new FakeHostWindow({
+      contentBounds: { width: 700, height: 450 },
+      webContentsId: 79,
+    });
+
+    manager.attach({
+      hostWindow,
+      request: {
+        tabId: "browser:a",
+        url: "https://example.com",
+        bounds: { x: 100, y: 50, width: 500, height: 350 },
+        visible: true,
+      },
+    });
+    const view = requireFakeView(0);
+    expect(hostWindow.webContents.sentChannels).not.toContain(
+      "bb-desktop:browser:focused",
+    );
+
+    manager.focus({ hostWindow, tabId: "browser:a" });
+    expect(hostWindow.webContents.sentChannels).not.toContain(
+      "bb-desktop:browser:focused",
+    );
+
+    view.webContents.emitFocus();
+    expect(hostWindow.webContents.sentChannels).toContain(
+      "bb-desktop:browser:focused",
+    );
+    expect(hostWindow.webContents.sentPayloads.at(-1)).toEqual({
+      tabId: "browser:a",
+    });
   });
 
   it("defers hidden memory-eviction recovery until the panel shows the current page", () => {
@@ -1428,7 +1442,6 @@ describe("DesktopBrowserViewManager", () => {
     });
     expect(view.webContents.focusCalls).toBe(1);
 
-    // A redundant re-show must not yank focus back from the address bar.
     manager.setVisible({
       hostWindow,
       request: { tabId: "browser:a", visible: true },
@@ -1471,16 +1484,170 @@ describe("DesktopBrowserViewManager", () => {
     expect(view.webContents.focusCalls).toBe(2);
   });
 
+  it("does not let an unfocused split view steal focus on mount or restore", () => {
+    const manager = createDesktopBrowserViewManager({
+      partition: "persist:test",
+    });
+    const hostWindow = new FakeHostWindow({
+      contentBounds: { width: 900, height: 600 },
+      webContentsId: 80,
+    });
+
+    for (const [tabId, x] of [
+      ["browser:focused", 0],
+      ["browser:sibling", 450],
+    ] as const) {
+      manager.attach({
+        hostWindow,
+        request: {
+          tabId,
+          url: `https://example.com/${tabId}`,
+          bounds: { x, y: 0, width: 450, height: 600 },
+          visible: true,
+        },
+      });
+    }
+    const focusedView = requireFakeView(0);
+    const siblingView = requireFakeView(1);
+    expect(focusedView.webContents.focusCalls).toBe(1);
+    expect(siblingView.webContents.focusCalls).toBe(0);
+
+    manager.setVisible({
+      hostWindow,
+      request: { tabId: "browser:sibling", visible: false },
+    });
+    manager.setVisible({
+      hostWindow,
+      request: { tabId: "browser:sibling", visible: true },
+    });
+
+    expect(focusedView.webContents.focusCalls).toBe(1);
+    expect(siblingView.webContents.focusCalls).toBe(0);
+  });
+
+  it("shows a browser beside a focused non-browser pane without stealing focus", () => {
+    const manager = createDesktopBrowserViewManager({
+      partition: "persist:test",
+    });
+    const hostWindow = new FakeHostWindow({
+      contentBounds: { width: 900, height: 600 },
+      webContentsId: 82,
+    });
+
+    manager.attach({
+      hostWindow,
+      request: {
+        tabId: "browser:sibling",
+        url: "https://example.com/browser",
+        bounds: { x: 450, y: 0, width: 450, height: 600 },
+        visible: false,
+      },
+    });
+    const browserView = requireFakeView(0);
+
+    manager.setVisibleWithoutFocus({
+      hostWindow,
+      request: { tabId: "browser:sibling", visible: true },
+    });
+    expect(browserView.visible).toBe(true);
+    expect(browserView.webContents.focusCalls).toBe(0);
+
+    manager.setVisibleWithoutFocus({
+      hostWindow,
+      request: { tabId: "browser:sibling", visible: false },
+    });
+    manager.setVisibleWithoutFocus({
+      hostWindow,
+      request: { tabId: "browser:sibling", visible: true },
+    });
+    expect(browserView.visible).toBe(true);
+    expect(browserView.webContents.focusCalls).toBe(0);
+  });
+
+  it("lets logical focus override first-visible mount order", () => {
+    const manager = createDesktopBrowserViewManager({
+      partition: "persist:test",
+    });
+    const hostWindow = new FakeHostWindow({
+      contentBounds: { width: 900, height: 600 },
+      webContentsId: 81,
+    });
+
+    for (const [tabId, x] of [
+      ["browser:sibling", 0],
+      ["browser:focused", 450],
+    ] as const) {
+      manager.attach({
+        hostWindow,
+        request: {
+          tabId,
+          url: `https://example.com/${tabId}`,
+          bounds: { x, y: 0, width: 450, height: 600 },
+          visible: true,
+        },
+      });
+    }
+    const siblingView = requireFakeView(0);
+    const focusedView = requireFakeView(1);
+    expect(siblingView.webContents.focusCalls).toBe(1);
+    expect(focusedView.webContents.focusCalls).toBe(0);
+
+    manager.focus({ hostWindow, tabId: "browser:focused" });
+
+    expect(focusedView.webContents.focusCalls).toBe(1);
+  });
+
+  it("hides only the reloading window's browser views until they reattach", () => {
+    const manager = createDesktopBrowserViewManager({
+      partition: "persist:test",
+    });
+    const reloadingWindow = new FakeHostWindow({
+      contentBounds: { width: 900, height: 600 },
+      webContentsId: 83,
+    });
+    const otherWindow = new FakeHostWindow({
+      contentBounds: { width: 900, height: 600 },
+      webContentsId: 84,
+    });
+    attachBrowserTab({
+      manager,
+      hostWindow: reloadingWindow,
+      tabId: "browser:reloading",
+      url: "https://example.com/reloading",
+    });
+    attachBrowserTab({
+      manager,
+      hostWindow: otherWindow,
+      tabId: "browser:other",
+      url: "https://example.com/other",
+    });
+    const reloadingView = requireFakeView(0);
+    const otherView = requireFakeView(1);
+
+    manager.prepareWindowReload(reloadingWindow);
+
+    expect(reloadingView.visible).toBe(false);
+    expect(otherView.visible).toBe(true);
+    manager.attach({
+      hostWindow: reloadingWindow,
+      request: {
+        tabId: "browser:reloading",
+        url: "https://example.com/reloading",
+        bounds: { x: 100, y: 50, width: 500, height: 350 },
+        visible: true,
+      },
+    });
+    expect(electronMock.fakeViews).toHaveLength(2);
+    expect(reloadingView.visible).toBe(true);
+  });
+
   it("allows clipboard-sanitized-write but denies clipboard-read and device permissions", () => {
-    // Write-only clipboard lets in-page copy buttons work; read and every
-    // device/capability permission stay denied.
     expect(isAllowedBrowserPermission("clipboard-sanitized-write")).toBe(true);
     expect(isAllowedBrowserPermission("clipboard-read")).toBe(false);
     expect(isAllowedBrowserPermission("media")).toBe(false);
     expect(isAllowedBrowserPermission("notifications")).toBe(false);
     expect(isAllowedBrowserPermission("geolocation")).toBe(false);
 
-    // The same decision flows through the handlers the session registers.
     const manager = createDesktopBrowserViewManager({
       partition: "persist:test",
     });

@@ -22,14 +22,12 @@ import type {
 import { useAppThemeEpoch } from "@/hooks/useAppTheme";
 import { usePreferredTheme } from "@/hooks/useTheme";
 import type { MarkdownPreviewLinkHandler } from "@/components/ui/markdown-link";
-import {
-  openUrlInExternalBrowser,
-  useOpenUrlByPreference,
-} from "@/lib/url-open-routing";
+import { openUrlInExternalBrowser } from "@/lib/url-open-routing";
+import { useAppNavigationHost } from "@/lib/app-navigation-host";
 import type { MessageProseSelection } from "@/components/thread/timeline/SelectableMessageProse.js";
 import { TimelineSelectionMenu } from "@/components/thread/timeline/TimelineSelectionMenu.js";
 import { buildTerminalWebSocketUrl } from "./terminal-websocket-url";
-import { TerminalWebSocketTransport } from "./terminal-websocket-transport";
+import { TerminalWebSocketTransport } from "@bb/client-core";
 
 export const TERMINAL_FONT_FAMILY =
   '"JetBrainsMono Nerd Font Mono", "MesloLGS NF", "Symbols Nerd Font Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
@@ -383,10 +381,6 @@ export function forwardTerminalData({
   replayWriteState,
   sessionStatus,
 }: ForwardTerminalDataArgs): void {
-  // xterm emits terminal protocol replies (for example, cursor-position
-  // reports) through onData alongside user input. Replaying historical output
-  // can generate those replies again, so never forward onData while a replay
-  // write is still being parsed.
   if (
     replayWriteState.suppressedWriteCount > 0 ||
     sessionStatus !== "running"
@@ -630,13 +624,11 @@ export function ThreadTerminalView({
   const lastStatusNoticeRef = useRef<TerminalSessionStatusNotice | null>(null);
   const scheduleFitRef = useRef<TerminalFitScheduler | null>(null);
   const preferredTheme = usePreferredTheme();
-  // The xterm canvas bakes its palette, so re-apply the theme on app-palette
-  // changes too, not just light/dark toggles.
   const appThemeEpoch = useAppThemeEpoch();
-  const openUrlByPreference = useOpenUrlByPreference();
+  const appNavigation = useAppNavigationHost();
   const handleOpenLinkByPreference = useCallback<MarkdownPreviewLinkHandler>(
-    ({ href }) => openUrlByPreference(href),
-    [openUrlByPreference],
+    ({ href }) => appNavigation.openUrl({ url: href }),
+    [appNavigation],
   );
   const effectiveOnOpenLink = onOpenLink ?? handleOpenLinkByPreference;
   const onOpenLinkRef = useRef<MarkdownPreviewLinkHandler>(effectiveOnOpenLink);
@@ -740,8 +732,6 @@ export function ThreadTerminalView({
     (event: ReactTouchEvent<HTMLDivElement>) => {
       const gesture = touchFocusGestureRef.current;
       touchFocusGestureRef.current = null;
-      // xterm cancels the synthetic mouse event on touch devices.
-      // Focus during the touch event so iOS can open its software keyboard.
       focusTerminalFromTouchRelease({
         changedTouches: terminalTouchPoints(event.changedTouches),
         focus: () => terminalRef.current?.focus(),
@@ -829,9 +819,6 @@ export function ThreadTerminalView({
           });
         }),
       );
-      // The DOM renderer measures every newly encountered glyph with
-      // synchronous layout reads. Register WebGL before opening xterm so the
-      // DOM renderer is never created when WebGL is available.
       if (webglAddonModule !== null) {
         loadTerminalWebglRenderer(
           terminal,
@@ -866,10 +853,6 @@ export function ThreadTerminalView({
       fitTerminal();
       scheduleFitRef.current = scheduleFit;
       const currentActiveElement = document.activeElement;
-      // A terminal can mount after either an explicit terminal action or a
-      // passive panel swap during navigation. Only the explicit action may
-      // replace an existing focus owner, and neither path may override focus
-      // that moved elsewhere while xterm's modules were loading.
       if (
         shouldFocusTerminalAfterAsyncMount({
           currentFocusIsAvailable:

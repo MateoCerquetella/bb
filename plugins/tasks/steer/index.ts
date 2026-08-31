@@ -2,19 +2,19 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 import type { TasksStore } from "../db";
 import { isSideChatShapedThread } from "../shared/side-chat";
 
-export interface DeliverCommentInput {
+interface DeliverCommentInput {
   taskId: string;
   commentId: string;
   body: string;
   authorName: string;
 }
 
-export type CommentDeliveryOutcome =
+type CommentDeliveryOutcome =
   | { threadId: string; status: "delivered" }
   | { threadId: string | null; status: "skipped"; reason: string }
   | { threadId: string; status: "failed"; reason: string };
 
-export interface CommentDeliveryResult {
+interface CommentDeliveryResult {
   notifiedCount: number;
   outcomes: CommentDeliveryOutcome[];
 }
@@ -43,8 +43,6 @@ export async function deliverCommentToLatestAgent(
   const task = store.getTask(input.taskId);
   if (!task) throw new Error(`Task not found: ${input.taskId}`);
 
-  // The CLI can explicitly notify while preserving an agent-authored comment.
-  // Exclude the comment being delivered so it cannot select its own thread.
   const latestReply = store.getLatestAgentComment(
     input.taskId,
     input.commentId,

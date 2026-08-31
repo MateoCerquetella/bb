@@ -4,13 +4,13 @@ import type { ResolvedWorkflowExecutionSelection } from "./cache.js";
 import type { JsonValue, WorkflowAgentOptions } from "./types.js";
 
 export type Db = Database.Database;
-export type WorkflowRunStatus =
+type WorkflowRunStatus =
   | "queued"
   | "running"
   | "succeeded"
   | "failed"
   | "cancelled";
-export type WorkflowCallStatus =
+type WorkflowCallStatus =
   | "queued"
   | "running"
   | "succeeded"
@@ -37,7 +37,6 @@ export interface WorkflowRunRow {
   error: string | null;
   phase: string | null;
   replaySafetyVersion: number;
-  /** Legacy durable field retained for stored-row compatibility; always null. */
   replayBarrierIndex: number | null;
   notificationSent: boolean;
   notificationOutcome: "pending" | "delivered" | "abandoned";
@@ -83,7 +82,7 @@ export interface WorkflowCallCounts {
   cancelled: number;
 }
 
-export type StoreStructuredResultOutcome =
+type StoreStructuredResultOutcome =
   | "accepted"
   | "idempotent"
   | "conflict"
@@ -547,14 +546,6 @@ export function listTimedOutRuns(
     .map(runRow);
 }
 
-export function getResumeCall(
-  db: Db,
-  resumedFromRunId: string,
-  callIndex: number,
-): WorkflowCallRow | null {
-  return getCall(db, resumedFromRunId, callIndex);
-}
-
 export function startCall(
   db: Db,
   args: {
@@ -806,14 +797,7 @@ export function listPendingNotificationRuns(
     .map(runRow);
 }
 
-export function deleteExpiredTerminalRuns(
-  db: Db,
-  now: number,
-  limit: number,
-): number {
-  return db
-    .prepare(
-      `WITH RECURSIVE retained(id, resumed_from_run_id) AS (
+const EXPIRED_TERMINAL_RUN_IDS_SQL = `WITH RECURSIVE retained(id, resumed_from_run_id) AS (
          SELECT id, resumed_from_run_id FROM workflow_runs
          WHERE status IN ('queued', 'running')
            OR finished_at + json_extract(settings_json, '$.retentionDays') * 86400000 > ?
@@ -844,7 +828,40 @@ export function deleteExpiredTerminalRuns(
          ORDER BY MAX(depth), id
          LIMIT ?
        )
-       DELETE FROM workflow_runs WHERE id IN (SELECT id FROM expired)`,
-    )
-    .run(now, now, limit).changes;
+       SELECT id FROM expired`;
+
+export interface ExpiredTerminalRuns {
+  runIds: string[];
+  childThreadIds: string[];
+}
+
+export function listExpiredTerminalRuns(
+  db: Db,
+  now: number,
+  limit: number,
+): ExpiredTerminalRuns {
+  const runIds = (
+    db.prepare(EXPIRED_TERMINAL_RUN_IDS_SQL).all(now, now, limit) as Array<{
+      id: string;
+    }>
+  ).map((row) => row.id);
+  if (runIds.length === 0) return { runIds: [], childThreadIds: [] };
+  const placeholders = runIds.map(() => "?").join(", ");
+  const childThreadIds = (
+    db
+      .prepare(
+        `SELECT DISTINCT child_thread_id AS childThreadId FROM workflow_calls
+         WHERE run_id IN (${placeholders}) AND child_thread_id IS NOT NULL`,
+      )
+      .all(...runIds) as Array<{ childThreadId: string }>
+  ).map((row) => row.childThreadId);
+  return { runIds, childThreadIds };
+}
+
+export function deleteTerminalRuns(db: Db, runIds: readonly string[]): number {
+  if (runIds.length === 0) return 0;
+  const placeholders = runIds.map(() => "?").join(", ");
+  return db
+    .prepare(`DELETE FROM workflow_runs WHERE id IN (${placeholders})`)
+    .run(...runIds).changes;
 }

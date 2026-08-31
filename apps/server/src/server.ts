@@ -1,4 +1,5 @@
 import { createNodeWebSocket } from "@hono/node-ws";
+import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { performance } from "node:perf_hooks";
 import { extname, join, resolve } from "node:path";
@@ -7,11 +8,7 @@ import { Hono } from "hono";
 import { terminalWebSocketQuerySchema } from "@bb/server-contract";
 import { compress } from "hono/compress";
 import { cors } from "hono/cors";
-import {
-  buildLocalAppOrigins,
-  type BuildLocalAppOriginsArgs,
-} from "@bb/config/local-app-origins";
-import type { AppDeps, ServerAppDeps } from "./types.js";
+import type { ServerAppDeps } from "./types.js";
 import { ApiError, errorToResponse } from "./errors.js";
 import { registerEnvironmentRoutes } from "./routes/environments.js";
 import { registerFileRoutes } from "./routes/files.js";
@@ -30,6 +27,7 @@ import {
 } from "./services/plugins/plugin-service.js";
 import { setPluginAgentContributions } from "./services/plugins/plugin-agent-contributions.js";
 import { setPluginThreadEventEmitter } from "./services/plugins/plugin-thread-events.js";
+import { requestDeferredThreadMessageFlush } from "./services/threads/thread-send-request.js";
 import { registerInternalEventRoutes } from "./internal/events.js";
 import { registerInternalHostRoutes } from "./internal/hosts.js";
 import { registerInternalInteractiveRequestRoutes } from "./internal/interactive-requests.js";
@@ -73,33 +71,30 @@ import {
   createPluginCatalogService,
   type PluginCatalogService,
 } from "./services/plugin-catalog/plugin-catalog-service.js";
-import type { ProviderRegistryService } from "./services/providers/provider-registry.js";
 import { callHostRetryableOnlineRpc } from "./services/hosts/online-rpc.js";
-import { browserRequestProblem } from "./browser-request-guard.js";
+import {
+  allowedAppOrigins,
+  browserRequestProblem,
+} from "./browser-request-guard.js";
 import {
   callPluginHostRpc,
   disposePluginHostWorkers,
 } from "./services/plugins/plugin-host-rpc.js";
 
-/**
- * `/api/v1/plugins/<id>/http/...` — the plugin-owned wire, whose auth mode is
- * declared per route by the plugin itself.
- */
 const PLUGIN_WIRE_HTTP_PATH = /^\/api\/v1\/plugins\/[^/]+\/http(?:\/|$)/u;
 import { rankAcceptedAssetEncodings } from "./asset-content-encoding.js";
 import { apiJsonCompression } from "./api-response-compression.js";
 
-export type CloseWebSockets = () => Promise<void>;
+type CloseWebSockets = () => Promise<void>;
 type NodeWebSocketServer = ReturnType<typeof createNodeWebSocket>["wss"];
 type WebSocketCloseError = Error | undefined;
 
-export interface ServerApp {
+interface ServerApp {
   app: Hono;
   closeWebSockets: CloseWebSockets;
   injectWebSocket: ReturnType<typeof createNodeWebSocket>["injectWebSocket"];
   pluginService: PluginService;
   pluginCatalogService: PluginCatalogService;
-  providerRegistry: ProviderRegistryService;
 }
 
 interface CloseWebSocketServerArgs {
@@ -135,17 +130,12 @@ interface StaticResponseHeadersArgs {
   contentEncoding?: string;
   contentLength?: number;
   contentType: string;
+  etag?: string;
   urlPath: string;
 }
 
-// `no-cache` (not `no-store`): the document is revalidated on every
-// navigation, so a new build is picked up immediately, but WebKit may still
-// keep the page in the back/forward cache and restore it without a reload.
 const STATIC_INDEX_CACHE_CONTROL = "no-cache";
 const STATIC_ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable";
-// Icons and manifests under public/ are not content-hashed but change only
-// with a release; a day of caching keeps favicon/badge flips and PWA
-// relaunches from refetching them.
 const STATIC_PUBLIC_FILE_CACHE_CONTROL = "public, max-age=86400";
 const WEB_SOCKET_SHUTDOWN_CODE = 1001;
 const WEB_SOCKET_SHUTDOWN_FORCE_CLOSE_MS = 1_000;
@@ -190,6 +180,9 @@ function createStaticResponseHeaders(args: StaticResponseHeadersArgs): Headers {
   const headers = new Headers();
   headers.set("content-type", args.contentType);
   headers.set("cache-control", staticCacheControlForPath(args.urlPath));
+  if (args.etag !== undefined) {
+    headers.set("etag", args.etag);
+  }
   if (args.contentEncoding !== undefined) {
     headers.set("content-encoding", args.contentEncoding);
     headers.set("vary", "Accept-Encoding");
@@ -198,6 +191,147 @@ function createStaticResponseHeaders(args: StaticResponseHeadersArgs): Headers {
     headers.set("content-length", String(args.contentLength));
   }
   return headers;
+}
+
+const shellEtagCache = new Map<
+  string,
+  { etag: string; mtimeMs: number; size: number }
+>();
+
+async function shellEtag(filePath: string): Promise<string | undefined> {
+  try {
+    const fileStat = await stat(filePath);
+    const cached = shellEtagCache.get(filePath);
+    if (
+      cached !== undefined &&
+      cached.size === fileStat.size &&
+      cached.mtimeMs === fileStat.mtimeMs
+    ) {
+      return cached.etag;
+    }
+    const digest = createHash("sha256")
+      .update(await readFile(filePath))
+      .digest("hex");
+    const etag = `W/"${digest.slice(0, 32)}"`;
+    shellEtagCache.set(filePath, {
+      etag,
+      mtimeMs: fileStat.mtimeMs,
+      size: fileStat.size,
+    });
+    return etag;
+  } catch {
+    return undefined;
+  }
+}
+
+export function ifNoneMatchSatisfied(
+  ifNoneMatchHeader: string,
+  etag: string,
+): boolean {
+  if (ifNoneMatchHeader.trim() === "*") return true;
+  const opaque = (tag: string): string => tag.trim().replace(/^W\//u, "");
+  const target = opaque(etag);
+  return ifNoneMatchHeader
+    .split(",")
+    .some((candidate) => opaque(candidate) === target);
+}
+
+const STATIC_MIME_TYPES: Record<string, string> = {
+  ".html": "text/html",
+  ".js": "application/javascript",
+  ".css": "text/css",
+  ".json": "application/json",
+  ".webmanifest": "application/manifest+json",
+  ".png": "image/png",
+  ".svg": "image/svg+xml",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".webp": "image/webp",
+  ".map": "application/json",
+};
+
+export function registerStaticAppRoutes(app: Hono, staticDir: string): void {
+  const root = resolve(staticDir);
+
+  const serveStaticAppFile = async (args: {
+    acceptEncodingHeader: string | undefined;
+    contentType: string;
+    filePath: string;
+    ifNoneMatchHeader: string | undefined;
+    urlPath: string;
+  }): Promise<Response> => {
+    const etag =
+      args.contentType === "text/html"
+        ? await shellEtag(args.filePath)
+        : undefined;
+    if (
+      etag !== undefined &&
+      args.ifNoneMatchHeader !== undefined &&
+      ifNoneMatchSatisfied(args.ifNoneMatchHeader, etag)
+    ) {
+      const headers = new Headers();
+      headers.set("cache-control", staticCacheControlForPath(args.urlPath));
+      headers.set("etag", etag);
+      return new Response(null, { status: 304, headers });
+    }
+    const precompressedFile = await findPrecompressedStaticFile({
+      acceptEncodingHeader: args.acceptEncodingHeader,
+      contentType: args.contentType,
+      filePath: args.filePath,
+    });
+    if (precompressedFile !== null) {
+      const content = await readFile(precompressedFile.filePath);
+      return new Response(content, {
+        headers: createStaticResponseHeaders({
+          contentEncoding: precompressedFile.encoding,
+          contentLength: precompressedFile.contentLength,
+          contentType: args.contentType,
+          etag,
+          urlPath: args.urlPath,
+        }),
+      });
+    }
+    const content = await readFile(args.filePath);
+    return new Response(content, {
+      headers: createStaticResponseHeaders({
+        contentType: args.contentType,
+        etag,
+        urlPath: args.urlPath,
+      }),
+    });
+  };
+
+  app.get("*", async (context) => {
+    const urlPath = context.req.path === "/" ? "/index.html" : context.req.path;
+    const filePath = join(root, urlPath);
+    if (!filePath.startsWith(root)) {
+      return context.notFound();
+    }
+    try {
+      const fileStat = await stat(filePath);
+      if (fileStat.isFile()) {
+        return await serveStaticAppFile({
+          acceptEncodingHeader: context.req.header("accept-encoding"),
+          contentType:
+            STATIC_MIME_TYPES[extname(filePath)] ?? "application/octet-stream",
+          filePath,
+          ifNoneMatchHeader: context.req.header("if-none-match"),
+          urlPath,
+        });
+      }
+    } catch {}
+    if (urlPath.startsWith("/assets/")) {
+      return context.notFound();
+    }
+    return serveStaticAppFile({
+      acceptEncodingHeader: context.req.header("accept-encoding"),
+      contentType: "text/html",
+      filePath: join(root, "index.html"),
+      ifNoneMatchHeader: context.req.header("if-none-match"),
+      urlPath: "/index.html",
+    });
+  });
 }
 
 function canServePrecompressedStaticFile(contentType: string): boolean {
@@ -239,26 +373,10 @@ async function findPrecompressedStaticFile(args: {
           filePath: encodedFilePath,
         };
       }
-    } catch {
-      // Sidecar missing — try the next acceptable encoding.
-    }
+    } catch {}
   }
 
   return null;
-}
-
-function buildAllowedCorsOrigins(deps: AppDeps): Set<string> {
-  const originArgs: BuildLocalAppOriginsArgs = {
-    serverPort: deps.config.serverPort,
-  };
-  if (deps.config.appUrl !== undefined) {
-    originArgs.appUrl = deps.config.appUrl;
-  }
-  if (deps.config.devAppPort !== undefined) {
-    originArgs.devAppPort = deps.config.devAppPort;
-  }
-
-  return new Set<string>(buildLocalAppOrigins(originArgs));
 }
 
 function closeWebSocketServer(args: CloseWebSocketServerArgs): Promise<void> {
@@ -304,11 +422,7 @@ export function createApp(
 
   app.use("*", async (context, next) => {
     captureTrustedRemoteAddress(context);
-    const appSurface = resolveRequestAppSurface(
-      context,
-      deps.config.appSurface,
-    );
-    return runWithTelemetryAppSurface(appSurface, next);
+    return runWithTelemetryAppSurface(resolveRequestAppSurface(context), next);
   });
   app.use("*", async (context, next) => {
     const path = context.req.path;
@@ -321,7 +435,7 @@ export function createApp(
     "*",
     cors({
       origin: (origin, context) => {
-        const allowedCorsOrigins = buildAllowedCorsOrigins(deps);
+        const allowedCorsOrigins = allowedAppOrigins(deps);
         const requestOrigin = new URL(context.req.url).origin;
         if (origin === requestOrigin || allowedCorsOrigins.has(origin)) {
           return origin;
@@ -333,21 +447,21 @@ export function createApp(
   const compressResponse = compress();
   const compressApiJson = apiJsonCompression();
   app.use("*", (context, next) => {
-    // Plugin JS/CSS negotiates Brotli and gzip itself and caches immutable
-    // variants. Letting this outer middleware transform an identity fallback
-    // would also ignore explicit q=0 values in Hono's current parser.
     if (PLUGIN_APP_ASSET_PATH_PATTERN.test(context.req.path)) {
       return next();
     }
-    // Core API JSON is buffered and Brotli-encoded (gzip fallback) with an
-    // exact Content-Length by the inner middleware; the streaming gzip
-    // fallback then only touches what the inner one leaves untransformed.
     return compressResponse(context, async () => {
       await compressApiJson(context, next);
     });
   });
   app.onError((error) => errorToResponse(error, deps.logger));
-  app.get("/health", (context) => context.json({ ok: true }));
+  app.get("/health", (context) =>
+    context.json(
+      deps.config.launchId === undefined
+        ? { ok: true }
+        : { ok: true, launchId: deps.config.launchId },
+    ),
+  );
   app.get("/install.sh", async (context) => {
     const script = await readFile(INSTALL_MACHINE_SCRIPT_PATH);
     return new Response(script, {
@@ -363,9 +477,6 @@ export function createApp(
       protocolVersion: HOST_DAEMON_PROTOCOL_VERSION,
     });
   });
-  // bb-app is public on npm. A paired tunnel can expose an unpublished build
-  // slightly before release; serving the exact server build is an accepted
-  // tradeoff so remote daemons cannot be stranded by protocol skew.
   app.get("/install/bb-app.tgz", async (context) => {
     const tarball = await readFile(await bbAppArtifactService.getTarballPath());
     return new Response(tarball, {
@@ -437,6 +548,7 @@ export function createApp(
     sharedPorts: deps.sharedPorts,
     providerRegistry: deps.providerRegistry,
     pluginHostArtifacts: deps.pluginHostArtifacts,
+    aiServices: deps.aiServices,
     ensureSharedPortTunnel: (hostId) =>
       deps.sharedPorts.ensureTunnelIdentity(hostId, () =>
         callHostRetryableOnlineRpc(deps, {
@@ -447,30 +559,18 @@ export function createApp(
       ),
     callPluginHost: (args) => callPluginHostRpc(deps, args),
     disposePluginHost: (args) => disposePluginHostWorkers(deps, args),
+    onSettingsChanged: (pluginId) =>
+      deps.providerNativeRoots.invalidate(pluginId),
     watchBuiltinPluginSources:
       process.env.BB_MANAGED_DEV_BUILTIN_PLUGIN_HOT_RELOAD === "1",
   });
-  // Bridge the thread lifecycle seams to this service's plugins (§4.5).
+  deps.pendingInteractions.setThreadInteractionSettledListener((threadId) => {
+    requestDeferredThreadMessageFlush(deps, threadId);
+  });
   setPluginThreadEventEmitter(pluginService.events);
-  // Bridge runtime-config assembly to plugin skills + context (§4.4).
   setPluginAgentContributions(pluginService);
   const publicApi = new Hono();
-  // CORS decides whether a browser may *read* a response; it does not stop the
-  // request being sent and acted on. A `no-cors` POST with a simple content
-  // type skips the preflight entirely, and the typed route parser reads the
-  // body with `c.req.json()` regardless of content type — so a page on any
-  // origin could drive this API blind. Reject a foreign browser origin here
-  // instead. `requireJsonForMutation` is deliberately NOT set: it answers 415
-  // to any mutation without `application/json`, which would break every
-  // existing `curl -d` caller. The origin check alone stops browser CSRF,
-  // because a browser always sends `Origin` on a cross-origin mutation.
-  // Non-browser callers (curl, the `bb` CLI, the SDK) send no `Origin` and pass
-  // through untouched.
   publicApi.use("*", async (context, next) => {
-    // A plugin's own HTTP routes declare their auth mode (`local` | `token` |
-    // `none`). `none` is deliberately reachable from any origin, and `token`
-    // authenticates with a secret rather than an origin, so this blanket check
-    // must not pre-empt the per-route one `registerPluginRoutes` applies.
     if (PLUGIN_WIRE_HTTP_PATH.test(context.req.path)) {
       return next();
     }
@@ -486,8 +586,6 @@ export function createApp(
     marketplaceUrl: deps.config.marketplaceUrl,
     dataDir: deps.config.dataDir,
     plugins: pluginService,
-    // The store's installed/compatible flags ride the plugin-list broadcast,
-    // so a refreshed catalog reaches open windows without polling.
     notifyCatalogChanged: () => deps.hub.notifySystem(["plugins-changed"]),
     warn: (message) => deps.logger.warn(message),
   });
@@ -620,75 +718,7 @@ export function createApp(
   }
 
   if (options?.staticDir) {
-    const shippedRoot = resolve(options.staticDir);
-    const MIME: Record<string, string> = {
-      ".html": "text/html",
-      ".js": "application/javascript",
-      ".css": "text/css",
-      ".json": "application/json",
-      ".webmanifest": "application/manifest+json",
-      ".png": "image/png",
-      ".svg": "image/svg+xml",
-      ".ico": "image/x-icon",
-      ".woff": "font/woff",
-      ".woff2": "font/woff2",
-      ".webp": "image/webp",
-      ".map": "application/json",
-    };
-
-    app.get("*", async (context) => {
-      const root = shippedRoot;
-      const urlPath =
-        context.req.path === "/" ? "/index.html" : context.req.path;
-      const filePath = join(root, urlPath);
-      if (!filePath.startsWith(root)) {
-        return context.notFound();
-      }
-      try {
-        const fileStat = await stat(filePath);
-        if (fileStat.isFile()) {
-          const contentType =
-            MIME[extname(filePath)] ?? "application/octet-stream";
-          const precompressedFile = await findPrecompressedStaticFile({
-            acceptEncodingHeader: context.req.header("accept-encoding"),
-            contentType,
-            filePath,
-          });
-          if (precompressedFile !== null) {
-            const content = await readFile(precompressedFile.filePath);
-            return new Response(content, {
-              headers: createStaticResponseHeaders({
-                contentEncoding: precompressedFile.encoding,
-                contentLength: precompressedFile.contentLength,
-                contentType,
-                urlPath,
-              }),
-            });
-          }
-          const content = await readFile(filePath);
-          return new Response(content, {
-            headers: createStaticResponseHeaders({ contentType, urlPath }),
-          });
-        }
-      } catch {
-        // File not found — fall through to SPA fallback
-      }
-      // /assets/ holds content-hashed build output, never a client route, so
-      // a miss there is a stale reference rather than a page to render. The
-      // single-page-app fallback would answer it with index.html at status
-      // 200, and the browser would report a confusing MIME type error for a
-      // script instead of a plain 404. Mirrors the /api/v1/* guard above.
-      if (urlPath.startsWith("/assets/")) {
-        return context.notFound();
-      }
-      const indexHtml = await readFile(join(root, "index.html"), "utf8");
-      return new Response(indexHtml, {
-        headers: createStaticResponseHeaders({
-          contentType: "text/html",
-          urlPath: "/index.html",
-        }),
-      });
-    });
+    registerStaticAppRoutes(app, options.staticDir);
   }
 
   return {
@@ -702,6 +732,5 @@ export function createApp(
     injectWebSocket,
     pluginService,
     pluginCatalogService,
-    providerRegistry: deps.providerRegistry,
   };
 }

@@ -16,7 +16,7 @@ export interface LocalNetworkPermissionQuery {
 }
 
 interface ResolveLocalHostDaemonAccessArgs {
-  configuredPort: number | null;
+  configuredPorts: readonly number[];
   hostname: string | null;
   isDesktop: boolean;
   permissions: LocalNetworkPermissionQuery | null;
@@ -37,9 +37,6 @@ export function getBrowserLocalNetworkPermissionQuery(): LocalNetworkPermissionQ
     return null;
   }
 
-  // Local Network Access permission names are newer than the DOM typings used
-  // by some supported browsers. Narrow this browser boundary once, then keep
-  // the rest of the app on the explicit local contract above.
   return navigator.permissions as unknown as LocalNetworkPermissionQuery;
 }
 
@@ -54,24 +51,20 @@ async function queryLoopbackPermissionState(
     try {
       const result = await permissions.query({ name });
       return result.state;
-    } catch {
-      // Chrome 142–144 only knows the original permission name. Chrome 145+
-      // supports the loopback-specific name and retains the old name as an
-      // alias, so only fall back when the newer query is unsupported.
-    }
+    } catch {}
   }
 
   return "unsupported";
 }
 
 export async function resolveLocalHostDaemonAccess({
-  configuredPort,
+  configuredPorts,
   hostname,
   isDesktop,
   permissions,
   sessionAccessGranted,
 }: ResolveLocalHostDaemonAccessArgs): Promise<LocalHostDaemonAccessState> {
-  if (configuredPort === null) {
+  if (configuredPorts.length === 0) {
     return "unavailable";
   }
 
@@ -96,9 +89,9 @@ export async function resolveLocalHostDaemonAccess({
   }
 }
 
-export function resolveLocalHostDaemonProbePort(
-  configuredPort: number | null,
+export function resolveLocalHostDaemonProbePorts(
+  configuredPorts: readonly number[],
   accessState: LocalHostDaemonAccessState,
-): number | null {
-  return accessState === "available" ? configuredPort : null;
+): readonly number[] {
+  return accessState === "available" ? configuredPorts : [];
 }

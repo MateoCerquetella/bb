@@ -1,6 +1,7 @@
 import { z } from "zod";
 import {
   approvalPendingInteractionResolutionSchema,
+  interactionLifecycleSchema,
   pendingInteractionPermissionGrantApprovalSubjectSchema,
   pendingInteractionStatusSchema,
   userQuestionPendingInteractionPayloadSchema,
@@ -19,29 +20,21 @@ export const systemEventTypeValues = [
   "client/turn/rejected",
   "client/turn/start",
   "system/error",
-  // Legacy persisted user-visible system event from a removed runtime path.
-  // Retained for read/decode/render compatibility only.
   "system/manager/user_message",
   "system/thread/interrupted",
   "system/operation",
+  "system/interaction/lifecycle",
   "system/permissionGrant/lifecycle",
   "system/userQuestion/lifecycle",
   "system/thread-provisioning",
-  // Legacy persisted watchdog diagnostic; retained for read/decode/render
-  // only, with no current producer.
   "system/provider-turn-watchdog",
 ] as const;
-export const systemEventTypeSchema = z.enum(systemEventTypeValues);
-export type SystemEventType = z.infer<typeof systemEventTypeSchema>;
 
-export const threadTurnInitiatorValues = ["user", "agent", "system"] as const;
+const threadTurnInitiatorValues = ["user", "agent", "system"] as const;
 export const threadTurnInitiatorSchema = z.enum(threadTurnInitiatorValues);
 export type ThreadTurnInitiator = z.infer<typeof threadTurnInitiatorSchema>;
 
-// One value per Family-B system-message action, plus an explicit `unlabeled`
-// for legacy/pre-taxonomy messages (rendered generically). `unlabeled` beats a
-// nullable field: its meaning is self-documenting and avoids `null`-as-default.
-export const systemMessageKindValues = [
+const systemMessageKindValues = [
   "ownership-assigned",
   "ownership-removed",
   "child-needs-attention",
@@ -54,12 +47,6 @@ export const systemMessageKindValues = [
 export const systemMessageKindSchema = z.enum(systemMessageKindValues);
 export type SystemMessageKind = z.infer<typeof systemMessageKindSchema>;
 
-// The subject a system message concerns: a single thread or a batch of threads
-// (count only). Stamped at emit time because `senderThreadId` is null for
-// `initiator: "system"` messages, so the subject is otherwise unrecoverable
-// downstream. This schema is just the union of subject shapes; the
-// required-but-nullable read-model contract is documented on the row field in
-// `@bb/server-contract`'s `thread-timeline.ts`.
 export const systemMessageSubjectSchema = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("thread"),
@@ -73,32 +60,7 @@ export const systemMessageSubjectSchema = z.discriminatedUnion("kind", [
 ]);
 export type SystemMessageSubject = z.infer<typeof systemMessageSubjectSchema>;
 
-export const threadProvisioningReasonValues = [
-  "thread-created",
-  "boot-created-thread",
-  "tell-after-provisioning-failure",
-  "tell-after-missing-environment-attachment",
-  "resume-missing-provider-thread",
-] as const;
-
-export const threadEnvironmentStartReasonValues = [
-  ...threadProvisioningReasonValues,
-  "boot-active-resume",
-  "resume-existing-provider-session",
-] as const;
-export const threadEnvironmentStartReasonSchema = z.enum(
-  threadEnvironmentStartReasonValues,
-);
-export type ThreadEnvironmentStartReason = z.infer<
-  typeof threadEnvironmentStartReasonSchema
->;
-
-/**
- * Execution values are historical facts once recorded in the event stream.
- * The stored-event boundary therefore accepts the two retired modes without
- * treating either as a current public preset.
- */
-export const turnRequestOptionsSchema = recordedThreadExecutionOptionsSchema;
+const turnRequestOptionsSchema = recordedThreadExecutionOptionsSchema;
 
 export const turnRequestTargetSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("thread-start") }),
@@ -130,18 +92,10 @@ export type ClientTurnLifecycleEventData = z.infer<
 export const turnRequestEventDataSchema = z.object({
   direction: z.literal("outbound"),
   requestId: clientTurnRequestIdSchema,
-  /** Failed request resumed by a guarded system continuation, when present. */
   continuationOfRequestId: clientTurnRequestIdSchema.optional(),
   source: z.enum(["spawn", "tell"]),
   initiator: threadTurnInitiatorSchema,
-  // Non-null only when initiator === "agent". The invariant is enforced by
-  // writer typings rather than a schema refine so legacy persisted events
-  // (initiator: "agent", senderThreadId: null from before the field
-  // existed) still parse — the stored variant defaults both fields.
   senderThreadId: z.string().nullable(),
-  // Family-B system-message taxonomy fields. Optional at the persisted-event
-  // level: legacy events (pre-taxonomy) lack them and must still parse. The
-  // projection defaults absent values to `unlabeled` / `null`.
   systemMessageKind: systemMessageKindSchema.optional(),
   systemMessageSubject: systemMessageSubjectSchema.nullable().optional(),
   input: z.array(promptInputSchema),
@@ -160,9 +114,6 @@ export const turnRequestRejectedEventDataSchema = z.object({
   reason: z.string().min(1),
   message: z.string().min(1),
 });
-export type TurnRequestRejectedEventData = z.infer<
-  typeof turnRequestRejectedEventDataSchema
->;
 
 export const systemErrorEventDataSchema = z
   .object({
@@ -198,12 +149,12 @@ export const systemErrorEventDataSchema = z
   });
 export type SystemErrorEventData = z.infer<typeof systemErrorEventDataSchema>;
 
-export const ownershipChangeOperationActionValues = [
+const ownershipChangeOperationActionValues = [
   "assign",
   "release",
   "transfer",
 ] as const;
-export const ownershipChangeOperationActionSchema = z.enum(
+const ownershipChangeOperationActionSchema = z.enum(
   ownershipChangeOperationActionValues,
 );
 export type OwnershipChangeOperationAction = z.infer<
@@ -228,9 +179,10 @@ export const systemOperationEventDataSchema = z.object({
   operationId: z.string(),
   metadata: z.record(z.string(), jsonValueSchema).optional(),
 });
-export type SystemOperationEventData = z.infer<
-  typeof systemOperationEventDataSchema
->;
+
+export const systemInteractionLifecycleEventDataSchema = z.object({
+  interaction: interactionLifecycleSchema,
+});
 
 export const systemPermissionGrantLifecycleEventDataSchema = z.object({
   interactionId: z.string(),
@@ -243,9 +195,6 @@ export const systemPermissionGrantLifecycleEventDataSchema = z.object({
   statusReason: z.string().nullable().default(null),
   subject: pendingInteractionPermissionGrantApprovalSubjectSchema,
 });
-export type SystemPermissionGrantLifecycleEventData = z.infer<
-  typeof systemPermissionGrantLifecycleEventDataSchema
->;
 
 export const systemUserQuestionLifecycleEventDataSchema = z.object({
   interactionId: z.string(),
@@ -258,15 +207,10 @@ export const systemUserQuestionLifecycleEventDataSchema = z.object({
   statusReason: z.string().nullable().default(null),
   payload: userQuestionPendingInteractionPayloadSchema,
 });
-export type SystemUserQuestionLifecycleEventData = z.infer<
-  typeof systemUserQuestionLifecycleEventDataSchema
->;
 
-export const systemThreadInterruptedReasonValues = [
+const systemThreadInterruptedReasonValues = [
   "manual-stop",
   "host-daemon-restarted",
-  // Legacy persisted watchdog interruption; retained for read/replay only,
-  // with no current producer.
   "provider-turn-idle",
 ] as const;
 export const systemThreadInterruptedReasonSchema = z.enum(
@@ -278,10 +222,8 @@ export type SystemThreadInterruptedReason = z.infer<
 
 export const systemThreadInterruptedEventDataSchema = z.object({
   reason: systemThreadInterruptedReasonSchema,
+  cause: z.literal("host-connection-lost").optional(),
 });
-export type SystemThreadInterruptedEventData = z.infer<
-  typeof systemThreadInterruptedEventDataSchema
->;
 
 export const provisioningTranscriptEntrySchema = z.object({
   type: z.enum(["step", "output"]),
@@ -295,13 +237,13 @@ export type ProvisioningTranscriptEntry = z.infer<
   typeof provisioningTranscriptEntrySchema
 >;
 
-export const systemThreadProvisioningStatusValues = [
+const systemThreadProvisioningStatusValues = [
   "active",
   "completed",
   "failed",
   "cancelled",
 ] as const;
-export const systemThreadProvisioningStatusSchema = z.enum(
+const systemThreadProvisioningStatusSchema = z.enum(
   systemThreadProvisioningStatusValues,
 );
 export type SystemThreadProvisioningStatus = z.infer<
@@ -314,18 +256,12 @@ export const systemThreadProvisioningEventDataSchema = z.object({
   environmentId: z.string(),
   entries: z.array(provisioningTranscriptEntrySchema),
 });
-export type SystemThreadProvisioningEventData = z.infer<
-  typeof systemThreadProvisioningEventDataSchema
->;
 
 export const systemLegacyUserMessageEventDataSchema = z.object({
   text: z.string(),
   toolCallId: z.string().optional(),
   turnId: z.string().optional(),
 });
-export type SystemLegacyUserMessageEventData = z.infer<
-  typeof systemLegacyUserMessageEventDataSchema
->;
 
 export const systemProviderTurnWatchdogEventDataSchema = z.object({
   reason: z.literal("provider-turn-idle"),
@@ -334,32 +270,9 @@ export const systemProviderTurnWatchdogEventDataSchema = z.object({
   activeTurnId: z.string().min(1),
   activeTurnStartedAt: z.number().int().nonnegative(),
   lastActivityEventSequence: z.number().int().positive(),
-  /**
-   * Diagnostic label only (the UI interpolates it verbatim). A plain string —
-   * not the activity enum — so editing event classifications never makes
-   * previously persisted watchdog events unparseable.
-   */
   lastActivityEventType: z.string().min(1),
   lastActivityEventAt: z.number().int().nonnegative(),
   providerId: z.string().min(1),
   providerThreadId: z.string().min(1).nullable(),
   firedAt: z.number().int().nonnegative(),
 });
-export type SystemProviderTurnWatchdogEventData = z.infer<
-  typeof systemProviderTurnWatchdogEventDataSchema
->;
-
-export type ThreadEventDataByType = {
-  "client/thread/start": ClientTurnLifecycleEventData;
-  "client/turn/requested": TurnRequestEventData;
-  "client/turn/rejected": TurnRequestRejectedEventData;
-  "client/turn/start": ClientTurnLifecycleEventData;
-  "system/error": SystemErrorEventData;
-  "system/manager/user_message": SystemLegacyUserMessageEventData;
-  "system/thread/interrupted": SystemThreadInterruptedEventData;
-  "system/operation": SystemOperationEventData;
-  "system/permissionGrant/lifecycle": SystemPermissionGrantLifecycleEventData;
-  "system/userQuestion/lifecycle": SystemUserQuestionLifecycleEventData;
-  "system/thread-provisioning": SystemThreadProvisioningEventData;
-  "system/provider-turn-watchdog": SystemProviderTurnWatchdogEventData;
-};

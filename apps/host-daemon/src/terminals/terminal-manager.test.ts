@@ -4,7 +4,11 @@ import path from "node:path";
 import type { AgentRuntime } from "@bb/agent-runtime";
 import type { HostDaemonDaemonWsMessage } from "@bb/host-daemon-contract";
 import type { HostWorkspace } from "@bb/host-workspace";
-import { makeWorkspaceMergeBase, makeWorkspaceStatus } from "@bb/test-helpers";
+import {
+  createDeferredPromise,
+  makeWorkspaceMergeBase,
+  makeWorkspaceStatus,
+} from "@bb/test-helpers";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostDaemonLogger } from "../logger.js";
 import { RuntimeManager } from "../runtime-manager.js";
@@ -47,11 +51,6 @@ interface WaitForOutputArgs {
   text: string;
 }
 
-interface Deferred<T> {
-  promise: Promise<T>;
-  resolve: (value: T) => void;
-}
-
 type TerminalMessageObserver = (message: HostDaemonDaemonWsMessage) => void;
 
 interface CreateHarnessOptions {
@@ -77,19 +76,6 @@ async function writeEmptyFile(filePath: string): Promise<void> {
   await fs.writeFile(filePath, "");
 }
 
-function createDeferred<T>(): Deferred<T> {
-  let resolveDeferred: (value: T) => void = () => {
-    throw new Error("Deferred resolver was not set");
-  };
-  const promise = new Promise<T>((resolve) => {
-    resolveDeferred = resolve;
-  });
-  return {
-    promise,
-    resolve: resolveDeferred,
-  };
-}
-
 function createFakeLogger(): HostDaemonLogger {
   return {
     debug: vi.fn(),
@@ -108,6 +94,7 @@ async function cleanupTempDirs(): Promise<void> {
 }
 
 class FakeTerminalPty implements TerminalPtyProcess {
+  disposeCount: number;
   readonly killCalls: (string | null)[];
   readonly resizeCalls: ResizeCall[];
   readonly writeCalls: (Buffer | string)[];
@@ -119,6 +106,7 @@ class FakeTerminalPty implements TerminalPtyProcess {
   ) => void)[];
 
   constructor() {
+    this.disposeCount = 0;
     this.killCalls = [];
     this.resizeCalls = [];
     this.writeCalls = [];
@@ -126,6 +114,10 @@ class FakeTerminalPty implements TerminalPtyProcess {
     this.exitListeners = [];
     this.registeredDataListeners = [];
     this.registeredExitListeners = [];
+  }
+
+  dispose(): void {
+    this.disposeCount += 1;
   }
 
   kill(signal?: string): void {
@@ -227,6 +219,14 @@ function createFakeRuntime(): AgentRuntime {
     archiveThread: vi.fn(async () => undefined),
     unarchiveThread: vi.fn(async () => undefined),
     listModels: vi.fn(async () => ({ models: [], selectedOnlyModels: [] })),
+    providerHealth: vi.fn(async () => ({ supported: false as const })),
+    providerUsage: vi.fn(async () => ({ supported: false as const })),
+    providerInstallationStatus: vi.fn(async () => {
+      throw new Error("Unexpected provider installation status call");
+    }),
+    providerInstallationRun: vi.fn(async () => {
+      throw new Error("Unexpected provider installation run call");
+    }),
     listRunningProviders: vi.fn(() => []),
     getActiveTurnId: vi.fn(() => null),
     waitForActiveTurn: vi.fn(async () => null),
@@ -271,14 +271,12 @@ function createFakeWorkspace(path: string): HostWorkspace {
     })),
     diffPatch: vi.fn(async () => []),
     getPullRequest: vi.fn(async () => ({ outcome: "none" as const })),
-    listBranches: vi.fn(async () => ["main"]),
     listFiles: vi.fn(async () => []),
     commit: vi.fn(async () => ({
       commitSha: "commit-1",
       commitSubject: "commit",
     })),
     reset: vi.fn(async () => undefined),
-    fetch: vi.fn(async () => undefined),
     squashMerge: vi.fn(async () => ({
       commitSha: "commit-1",
       commitSubject: "commit",
@@ -540,7 +538,7 @@ describe("TerminalManager", () => {
   });
 
   it("closes a terminal after an in-progress open finishes", async () => {
-    const shell = createDeferred<string>();
+    const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
     const harness = createHarnessWithShell({
       resolveShell: () => {
@@ -603,7 +601,7 @@ describe("TerminalManager", () => {
   });
 
   it("closes environment terminals after in-progress opens finish", async () => {
-    const shell = createDeferred<string>();
+    const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
     const harness = createHarnessWithShell({
       resolveShell: () => {
@@ -662,7 +660,7 @@ describe("TerminalManager", () => {
   });
 
   it("shuts down terminals after in-progress opens finish", async () => {
-    const shell = createDeferred<string>();
+    const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
     const harness = createHarnessWithShell({
       resolveShell: () => {
@@ -712,7 +710,7 @@ describe("TerminalManager", () => {
   });
 
   it("rejects duplicate opens queued behind an in-progress open", async () => {
-    const shell = createDeferred<string>();
+    const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
     const harness = createHarnessWithShell({
       resolveShell: () => {
@@ -773,7 +771,7 @@ describe("TerminalManager", () => {
   });
 
   it("serializes PTY exits behind already queued terminal messages", async () => {
-    const shell = createDeferred<string>();
+    const shell = createDeferredPromise<string>();
     let resolveShellCalls = 0;
     let exitOnOpened = false;
     let harness: TerminalManagerHarness | null = null;
@@ -1323,6 +1321,7 @@ describe("TerminalManager", () => {
     await vi.advanceTimersByTimeAsync(10);
 
     expect(pty.killCalls).toEqual([null, "SIGKILL"]);
+    expect(pty.disposeCount).toBe(1);
     expect(
       harness.messages.filter((message) => message.type === "terminal.exited"),
     ).toEqual([

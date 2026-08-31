@@ -1,12 +1,6 @@
-import type { ReasoningLevel } from "@bb/domain";
+import type { ProviderInfo, ReasoningLevel } from "@bb/domain";
 
-/**
- * Short, user-facing labels for each reasoning level. Shared by the
- * thread-creation options hook (committed model) and the model/reasoning
- * picker (previewed provider) so the two never drift — adding a level forces
- * an entry here once.
- */
-export const REASONING_LABELS: Record<ReasoningLevel, string> = {
+const FALLBACK_REASONING_LABELS: Record<ReasoningLevel, string> = {
   none: "None",
   low: "Low",
   medium: "Medium",
@@ -16,3 +10,26 @@ export const REASONING_LABELS: Record<ReasoningLevel, string> = {
   max: "Max",
   ultra: "Ultra",
 };
+
+export type ReasoningLabelSource = Pick<ProviderInfo, "reasoningLevels">;
+
+export function reasoningLevelLabel(
+  level: ReasoningLevel,
+  provider: ReasoningLabelSource | undefined,
+): string {
+  const declared = provider?.reasoningLevels?.find(
+    (option) => option.id === level,
+  );
+  return declared?.label ?? FALLBACK_REASONING_LABELS[level] ?? level;
+}
+
+const FAST_SERVICE_TIER_ID = "fast";
+
+export function fastServiceTierLabel(
+  provider: Pick<ProviderInfo, "serviceTiers"> | undefined,
+): string {
+  return (
+    provider?.serviceTiers?.find((tier) => tier.id === FAST_SERVICE_TIER_ID)
+      ?.label ?? "Fast"
+  );
+}

@@ -4,20 +4,13 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import type { ThreadEvent } from "@bb/domain";
-import { threadEventNotificationSchema } from "@bb/provider-bridge-protocol";
-import { createBridgeJsonRpcTestHarness } from "@bb/provider-bridge-protocol/testing";
-import type { BridgeJsonRpcTestHarness } from "@bb/provider-bridge-protocol/testing";
-import { handleLine } from "./bridge.js";
+import {
+  experimental_assembleCapturedThreadEvents as assembleCapturedThreadEvents,
+  experimental_createBridgeJsonRpcTestHarness as createBridgeJsonRpcTestHarness,
+} from "@get-bb/plugin-sdk/provider-bridge/testing";
+import type { BridgeJsonRpcTestHarness } from "@get-bb/plugin-sdk/provider-bridge/testing";
 
-/**
- * The bridge settles a prompt the app-server accepts and finishes without
- * opening a turn — and only that. Settlement is owned by the queued turn-start
- * correlation, so a real `turn/started` that arrives AFTER the `turn/start`
- * response (the inverted order the fake's `/late-start` prompt produces) must
- * claim the dispatch first and leave exactly one real turn behind. Fabricating
- * a turn from a late signal is the ACP bug 0c2f4cc9a: a phantom active turn
- * blocks every later send.
- */
+import { handleLine } from "./bridge.js";
 
 const THREAD_ID = "thr_zero_work_1";
 
@@ -36,15 +29,7 @@ let harness: BridgeJsonRpcTestHarness;
 let workspaceDir: string;
 
 function threadEvents(): ThreadEvent[] {
-  const events: ThreadEvent[] = [];
-  for (const message of harness.messages) {
-    if (message.method !== "thread/event") continue;
-    const parsed = threadEventNotificationSchema.safeParse(message.params);
-    if (parsed.success && parsed.data.threadId === THREAD_ID) {
-      events.push(parsed.data.event);
-    }
-  }
-  return events;
+  return assembleCapturedThreadEvents(harness.messages, "codex");
 }
 
 async function waitForEvents(
@@ -125,9 +110,7 @@ it("settles a prompt the app-server accepts without any turn activity", async ()
     status: "completed",
     scope: { kind: "turn", turnId },
   });
-  // A synthetic turn is not a codex fork point.
   expect(completed[0]).not.toHaveProperty("providerCheckpointId");
-  // The accepted input is acknowledged against the turn that settles it.
   expect(
     events.filter((event) => event.type === "turn/input/accepted"),
   ).toEqual([
@@ -136,6 +119,43 @@ it("settles a prompt the app-server accepts without any turn activity", async ()
       scope: { kind: "turn", turnId },
     }),
   ]);
+}, 30_000);
+
+it("preserves the native checkpoint when thread/stop interrupts a turn", async () => {
+  const providerThreadId = await startSession();
+  harness.sendRequest(2, "turn/start", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    input: [{ type: "text", text: "/wait-for-interrupt", mentions: [] }],
+    clientRequestId: "creq_a2b3c4d5e6",
+    options: { ...sessionOptions },
+  });
+  await harness.waitForResponse(2);
+  await waitForEvents((events) =>
+    events.some((event) => event.type === "turn/started"),
+  );
+
+  harness.sendRequest(3, "thread/stop", {
+    threadId: THREAD_ID,
+    providerThreadId,
+    intent: "interrupt",
+    activeTurnId: "turn-fx-1",
+  });
+  await harness.waitForResponse(3);
+
+  const events = await waitForEvents((all) =>
+    all.some(
+      (event) =>
+        event.type === "turn/completed" && event.status === "interrupted",
+    ),
+  );
+  expect(events).toContainEqual(
+    expect.objectContaining({
+      type: "turn/completed",
+      status: "interrupted",
+      providerCheckpointId: "turn-fx-1",
+    }),
+  );
 }, 30_000);
 
 it("lets a turn/started that lands after the turn/start response win the race", async () => {
@@ -152,7 +172,6 @@ it("lets a turn/started that lands after the turn/start response win the race", 
   const events = await waitForEvents((all) =>
     all.some((event) => event.type === "turn/completed"),
   );
-  // Settle past the settlement grace window so a synthetic turn would show up.
   await new Promise((resolve) => setTimeout(resolve, 500));
   const settledEvents = threadEvents();
 
@@ -162,7 +181,6 @@ it("lets a turn/started that lands after the turn/start response win the race", 
   expect(
     settledEvents.filter((event) => event.type === "turn/completed"),
   ).toHaveLength(1);
-  // The one turn is the provider's real turn: it carries the agent message.
   expect(
     settledEvents.some((event) => event.type === "item/agentMessage/delta"),
   ).toBe(true);

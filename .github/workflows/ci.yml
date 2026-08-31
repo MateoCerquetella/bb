@@ -43,8 +43,12 @@ jobs:
           pnpm-version: ${{ env.PNPM_VERSION }}
           cache-prefix: checks
 
+      # Four tasks for four vCPUs: TypeScript 7 and esbuild are multi-threaded,
+      # so turbo's default of ten concurrent tasks only adds contention here.
+      # Measured pinned to 4 CPUs, two rounds each: 96 s / 110 s at the
+      # default vs 90 s / 58 s at four.
       - name: Build, typecheck, and lint
-        run: pnpm exec turbo run build typecheck lint --cache-dir=.turbo/cache --output-logs=new-only
+        run: pnpm exec turbo run build typecheck lint --cache-dir=.turbo/cache --output-logs=new-only --concurrency=4
 
       # Runs after build and typecheck, so the guard's own turbo build is a
       # cache hit and the package it packs is the one this commit really ships.
@@ -71,6 +75,14 @@ jobs:
       # re-exports, which typecheck and lint cannot see.
       - name: Check app bundle budgets
         run: node apps/app/scripts/check-bundle-budget.mjs
+
+      # Provider-literal ratchet (G1 of the provider-plugin migration):
+      # core must never gain a new provider-id carve-out; the per-file
+      # baseline may only shrink. See docs/provider-plugin-api.md.
+      - name: Check provider-literal ratchet
+        run: |
+          git fetch --depth=1 origin "${{ github.base_ref || github.event.repository.default_branch }}" || true
+          node scripts/check-provider-literal-ratchet.mjs --base "origin/${{ github.base_ref || github.event.repository.default_branch }}"
 
       # Exceeding the Actions cache quota is silent: GitHub evicts entries
       # without failing or warning anything, so the only symptom is caches
@@ -127,7 +139,7 @@ jobs:
           cache-prefix: test-${{ matrix.shard }}
 
       - name: Test
-        run: pnpm exec turbo run test ${{ matrix.filter }} --cache-dir=.turbo/cache --output-logs=new-only ${{ matrix.args }}
+        run: pnpm exec turbo run test ${{ matrix.filter }} --cache-dir=.turbo/cache --output-logs=new-only --concurrency=4 ${{ matrix.args }}
 
   # The macOS legs run without the Turbo cache. Blacksmith's transparent cache
   # only backs their Linux runners, so on macOS the cache moves over GitHub's
@@ -139,7 +151,7 @@ jobs:
   package-smoke:
     name: Package Smoke (${{ matrix.os }}, Node ${{ matrix.node-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     strategy:
       fail-fast: false
@@ -166,6 +178,20 @@ jobs:
 
       - name: Smoke bb-app tarball
         run: pnpm exec turbo run smoke:tarball --filter=bb-app --cache-dir=.turbo/cache --output-logs=new-only
+
+      - name: Install AppImage FUSE runtime
+        if: ${{ runner.os == 'Linux' }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes libfuse2t64
+
+      - name: Package Linux AppImage
+        if: ${{ runner.os == 'Linux' }}
+        run: pnpm exec turbo run desktop:build:linux --filter=@bb/desktop --cache-dir=.turbo/cache --output-logs=new-only
+
+      - name: Smoke Linux AppImage mount lifecycle
+        if: ${{ runner.os == 'Linux' }}
+        run: xvfb-run -a pnpm exec turbo run smoke:appimage-lifecycle --filter=@bb/desktop --force --cache-dir=.turbo/cache --output-logs=new-only
 
   node-compat-smoke:
     name: Node Compatibility Smoke (${{ matrix.os }}, Node ${{ matrix.node-version }})

@@ -23,9 +23,10 @@ import { runtimeErrorLogFields } from "../lib/error-log-fields.js";
 import { throwEnvironmentNotReady } from "../lib/lifecycle-api-errors.js";
 import { buildExecutionOptions } from "./thread-commands.js";
 import {
-  getLastProviderThreadId,
-  getProviderThreadIdAtOrBeforeSequence,
-} from "./thread-events.js";
+  copyForkSourceHistory,
+  resolveThreadForkPoint,
+  type ThreadForkPoint,
+} from "./thread-fork-history.js";
 import {
   rememberProjectExecutionDefaultsForCreate,
   resolveProjectExecutionDefaultsForCreate,
@@ -58,7 +59,6 @@ import {
   requestThreadProvision,
 } from "./thread-provisioning.js";
 import type {
-  ThreadForkDescriptor,
   ThreadProvisionContext,
   ThreadProvisionEnvironmentIntent,
 } from "./thread-provisioning-context.js";
@@ -87,29 +87,23 @@ interface CreateProvisioningThreadArgs {
   executionDefaults: Parameters<
     typeof buildExecutionOptions
   >[2]["projectDefaults"];
-  fork: ThreadForkDescriptor | null;
+  fork: ThreadForkPoint | null;
   request: ThreadCreateServiceRequest;
   providerInput?: ThreadCreateServiceRequestInput["input"];
 }
 
-interface ResolveForkDescriptorArgs {
-  childHostId: string | null;
+interface ResolveForkPointArgs {
+  childHostId: string;
   originKind: ThreadOriginKind | null;
   providerId: string;
   sourceSeqEnd: number | undefined;
   sourceThread: Thread | null;
 }
 
-interface DeriveThreadCreateTitleFallbackArgs {
-  input: ThreadCreateServiceRequestInput["input"];
-  originKind: ThreadOriginKind | null;
-  sourceThread: Thread | null;
-}
-
 interface ResolveCatalogExecutionDefaultsArgs {
   cwd?: string;
   executionDefaults: ProjectExecutionDefaults | null;
-  hostId: string | null;
+  hostId: string;
   providerId: string;
   requestedModel: string | null;
 }
@@ -120,14 +114,6 @@ async function resolveCatalogExecutionDefaults(
 ): Promise<ProjectExecutionDefaults | null> {
   if (args.executionDefaults !== null || args.requestedModel !== null) {
     return args.executionDefaults;
-  }
-  if (args.hostId === null) {
-    throw new ApiError(
-      502,
-      "host_unavailable",
-      `Cannot resolve the default ${args.providerId} model without an execution host`,
-      true,
-    );
   }
 
   const catalog = await resolveSystemProviderModels(deps, {
@@ -162,46 +148,21 @@ async function resolveCatalogExecutionDefaults(
   });
 }
 
-/**
- * Resolve the native-fork descriptor for a source-derived thread, or null when
- * it cannot be provisioned as a fork. Both forks and side chats are native
- * forks: they clone the source thread's provider session at its branch point so
- * the new thread carries the full conversation history (a fork then waits idle;
- * a side chat runs its question turn). Forking requires: a live source thread
- * (any non-null originKind), a provider that supports native fork, a source that
- * already has a provider session, and a new workspace on the same host as the
- * source (a cross-host clone of a provider session is not possible).
- * Returns null when the request has no source provenance or the source session
- * cannot be cloned; the consumer treats a null descriptor for a source-derived
- * thread as an unforkable error rather than a silent fresh start.
- */
-function resolveForkDescriptor(
+function resolveForkPoint(
   deps: Pick<ThreadCreateDeps, "db" | "providerRegistry">,
-  args: ResolveForkDescriptorArgs,
-): ThreadForkDescriptor | null {
+  args: ResolveForkPointArgs,
+): ThreadForkPoint | null {
   if (args.originKind === null || args.sourceThread === null) {
     return null;
   }
   if (!deps.providerRegistry.supportsFork(args.providerId)) {
     return null;
   }
-  // A provider session ID is opaque to every other provider, so a fork is
-  // possible only when the source and the child use the same provider.
   if (args.sourceThread.providerId !== args.providerId) {
     return null;
   }
-  const sourceProviderThreadId =
-    args.sourceSeqEnd === undefined
-      ? getLastProviderThreadId(deps, args.sourceThread.id)
-      : getProviderThreadIdAtOrBeforeSequence(deps, {
-          sequence: args.sourceSeqEnd,
-          threadId: args.sourceThread.id,
-        });
-  if (sourceProviderThreadId === null) {
-    return null;
-  }
   const sourceEnvironmentId = args.sourceThread.environmentId;
-  if (sourceEnvironmentId === null || args.childHostId === null) {
+  if (sourceEnvironmentId === null) {
     return null;
   }
   const sourceEnvironment = getEnvironment(deps.db, sourceEnvironmentId);
@@ -211,12 +172,15 @@ function resolveForkDescriptor(
   ) {
     return null;
   }
-  return { sourceProviderThreadId };
+  return resolveThreadForkPoint(deps, {
+    sourceSeqEnd: args.sourceSeqEnd,
+    sourceThread: args.sourceThread,
+  });
 }
 
 function childHostIdForResolvedEnvironment(
   resolvedEnvironment: ResolvedStableThreadRequestEnvironment,
-): string | null {
+): string {
   switch (resolvedEnvironment.type) {
     case "reuse":
       return resolvedEnvironment.environment.hostId;
@@ -244,23 +208,7 @@ function modelCatalogCwdForResolvedEnvironment(
   }
 }
 
-function deriveThreadCreateTitleFallback({
-  input,
-  originKind,
-  sourceThread,
-}: DeriveThreadCreateTitleFallbackArgs): string | null {
-  const inputFallback = deriveTitleFallback(input);
-  if (inputFallback !== null) {
-    return inputFallback;
-  }
-  return null;
-}
-
-interface EnsureCreateHostOnlineArgs {
-  resolvedEnvironment: ResolvedStableThreadRequestEnvironment;
-}
-
-interface ResolveManagedDefaultBaseBranchForCreateArgs {
+interface ResolveManagedBaseBranchForCreateArgs {
   baseBranch: BaseBranchSpec;
   hostId: string;
   sourcePath: string;
@@ -360,25 +308,9 @@ function requireLiveSourceThread(
   return sourceThread;
 }
 
-/** Returns the host session's data directory, or null when there is no host. */
-async function ensureCreateHostOnline(
+async function resolveManagedBaseBranchForCreate(
   deps: ThreadCreateDeps,
-  args: EnsureCreateHostOnlineArgs,
-): Promise<string | null> {
-  const hostId =
-    args.resolvedEnvironment.type === "reuse"
-      ? args.resolvedEnvironment.environment.hostId
-      : args.resolvedEnvironment.hostId;
-  if (hostId === null) {
-    return null;
-  }
-  const session = await ensureHostSessionReadyForWork(deps, { hostId });
-  return session.dataDir;
-}
-
-async function resolveManagedDefaultBaseBranchForCreate(
-  deps: ThreadCreateDeps,
-  args: ResolveManagedDefaultBaseBranchForCreateArgs,
+  args: ResolveManagedBaseBranchForCreateArgs,
 ): Promise<BaseBranchSpec> {
   if (args.baseBranch.kind === "named") {
     return args.baseBranch;
@@ -389,9 +321,9 @@ async function resolveManagedDefaultBaseBranchForCreate(
       hostId: args.hostId,
       timeoutMs: COMMAND_TIMEOUT_MS,
       command: {
-        type: "host.list_branches",
+        type: "host.inspect_git_source",
         path: args.sourcePath,
-        limit: 1,
+        remoteRefresh: "background",
       },
     });
     return resolveManagedDefaultBaseBranchSpec(result);
@@ -402,7 +334,7 @@ async function resolveManagedDefaultBaseBranchForCreate(
         sourcePath: args.sourcePath,
         ...runtimeErrorLogFields(deps.config, error),
       },
-      "Failed to resolve smart worktree base branch; using source default",
+      "Failed to resolve smart worktree base branch; using requested base",
     );
     return args.baseBranch;
   }
@@ -410,18 +342,12 @@ async function resolveManagedDefaultBaseBranchForCreate(
 
 interface AssertUnmanagedHostPathIsAttachableArgs {
   branch: UnmanagedBranchSpec | undefined;
-  dataDir: string | null;
+  dataDir: string;
   hostId: string;
   path: string;
   projectId: string;
 }
 
-/**
- * The environment claim on a path is project-scoped, but the directory is
- * physical and shared. Guard the two things that scoping cannot: attaching in
- * place to another project's bb-managed worktree, and rewriting the working
- * tree while another project works in the same folder.
- */
 function assertUnmanagedHostPathIsAttachable(
   deps: ThreadCreateDeps,
   args: AssertUnmanagedHostPathIsAttachableArgs,
@@ -490,7 +416,6 @@ function existingUnmanagedEnvironmentIntentByHostPath(
   };
 }
 
-/** Machine a provisioning intent lands on, for the permission ceiling. */
 function intentHostId(
   deps: ThreadCreateDeps,
   intent: ThreadProvisionEnvironmentIntent,
@@ -510,30 +435,33 @@ async function createProvisioningThread(
   const thread = createThreadRecord(deps, {
     request: args.request,
     environmentId: args.environmentId,
-    status: "starting",
   });
   let execution: Awaited<ReturnType<typeof buildExecutionOptions>>;
   let context: ThreadProvisionContext;
   try {
-    execution = await buildExecutionOptions(
-      deps,
-      args.request,
-      {
-        ...(args.executionDefaults
-          ? { projectDefaults: args.executionDefaults }
-          : {}),
-        // The environment usually does not exist yet, so the machine's
-        // permission ceiling comes from the provisioning intent.
-        hostId: intentHostId(deps, args.environmentIntent),
-        threadId: thread.id,
-      },
-      "client/turn/requested",
-    );
+    if (
+      args.fork !== null &&
+      args.fork.historyEndSequence !== null &&
+      args.request.visibility === "visible"
+    ) {
+      copyForkSourceHistory(deps, {
+        fork: thread,
+        historyEndSequence: args.fork.historyEndSequence,
+        sourceThreadId: args.fork.sourceThreadId,
+      });
+    }
+    execution = await buildExecutionOptions(deps, args.request, {
+      ...(args.executionDefaults
+        ? { projectDefaults: args.executionDefaults }
+        : {}),
+      hostId: intentHostId(deps, args.environmentIntent),
+      threadId: thread.id,
+    });
     context = requestThreadProvision(deps, {
       thread,
       environmentIntent: args.environmentIntent,
       execution,
-      fork: args.fork,
+      fork: args.fork?.descriptor ?? null,
       input: args.request.input,
       ...(args.providerInput !== undefined
         ? { providerInput: args.providerInput }
@@ -566,17 +494,10 @@ async function createProvisioningThread(
 }
 
 interface ResolveCreateThreadVisibilityArgs {
-  /** Resolved hierarchy parent; null for roots and forks. */
   parentThread: Pick<Thread, "visibility"> | null;
   requestedVisibility: ThreadVisibility | undefined;
 }
 
-/**
- * Visibility default for a new thread. An explicit request always wins. A
- * hierarchy child otherwise inherits its parent, so sub-agents delegated by a
- * hidden thread stay out of navigation with it. A side chat is forked with an
- * explicit `hidden` by the plugin that owns it.
- */
 function resolveCreateThreadVisibility(
   args: ResolveCreateThreadVisibilityArgs,
 ): ThreadVisibility {
@@ -590,9 +511,7 @@ export async function createThreadFromRequest(
   deps: ThreadCreateDeps,
   rawRequestInput: ThreadCreateServiceRequestInput,
   options: {
-    /** Provider-facing input when it differs from the persisted start seed. */
     providerInput?: ThreadCreateServiceRequestInput["input"];
-    /** Source environment selected by the public fork route. */
     forkSourceEnvironmentId?: string;
   } = {},
 ) {
@@ -615,8 +534,6 @@ export async function createThreadFromRequest(
       'originPluginId requires origin "plugin"',
     );
   }
-  // Resolve the server-owned "project-default" environment marker into a
-  // concrete environment before any workspace/provisioning logic runs.
   const requestInput = {
     ...rawRequestInput,
     environment:
@@ -626,10 +543,6 @@ export async function createThreadFromRequest(
           })
         : rawRequestInput.environment,
   };
-  // Plugin mentions resolve once at send time (plugin design §4.9): each
-  // unique mention becomes an agent-only context input appended after the
-  // user's message; a resolve failure throws a 422 before the thread is
-  // created.
   const pluginMentionContext = await resolvePluginMentionContextInputs(
     requestInput.input,
   );
@@ -669,8 +582,6 @@ export async function createThreadFromRequest(
       })
     : null;
   if (originKind !== null && sourceThread !== null) {
-    // Forks and side chats are not hierarchy children, but they still consume
-    // the same spawn allowance exposed as ThreadResponse.canSpawnChild.
     assertValidParentThread(deps, {
       parentThreadId: sourceThread.id,
     });
@@ -691,9 +602,6 @@ export async function createThreadFromRequest(
     requestInput.environment.environmentId === sourceThread.environmentId
       ? sourceThread.environmentId
       : undefined);
-  // Provenance coherence + anti-forgery. The validated source/parent thread
-  // anchors senderThreadId so a caller cannot claim a start on behalf of an
-  // arbitrary or cross-project thread.
   if (requestInput.startedOnBehalfOf !== null) {
     const senderThread = sourceThread ?? parentThread;
     if (senderThread === null) {
@@ -712,10 +620,6 @@ export async function createThreadFromRequest(
           : "startedOnBehalfOf.senderThreadId must match sourceThreadId",
       );
     }
-    // Seeding a thread-start without a provider run (startedOnBehalfOf) is
-    // only meaningful for a tagged source-derived spawn. Requiring originKind
-    // keeps the two signals coupled so the thread is excluded from reshaping
-    // the project's stored execution defaults.
     if (originKind === null) {
       throw new ApiError(
         400,
@@ -729,9 +633,6 @@ export async function createThreadFromRequest(
     input: requestInput.input,
     projectId: requestInput.projectId,
   });
-  // Providers register with plugin startup, which the listener does not wait
-  // for: without this, a thread created on boot sees an empty registry and
-  // fails with "no provider available".
   await deps.providerRegistry.whenRegistrationsSettled();
   const { executionDefaults, providerId, requestedModel } =
     resolveProjectExecutionDefaultsForCreate(deps, {
@@ -758,9 +659,6 @@ export async function createThreadFromRequest(
       requestedVisibility: requestInput.visibility,
     }),
     environment: resolveCreateThreadEnvironment({
-      // Source-derived forks already resolve their environment before this
-      // call. Applying ordinary child defaults here would turn an isolated
-      // personal fork back into source reuse.
       parentThread:
         forkSourceEnvironmentId !== undefined
           ? null
@@ -769,20 +667,17 @@ export async function createThreadFromRequest(
       requestedEnvironment: requestInput.environment,
     }),
     providerId,
-    titleFallback: deriveThreadCreateTitleFallback({
-      input: requestInput.input,
-      originKind,
-      sourceThread,
-    }),
+    titleFallback: deriveTitleFallback(requestInput.input),
   };
   const resolvedEnvironment = resolveStableThreadRequestEnvironment(deps, {
     allowUnmanagedPersonalProjectReuseEnvironmentId: forkSourceEnvironmentId,
     environment: request.environment,
     projectId: request.projectId,
   });
-  const hostDataDir = await ensureCreateHostOnline(deps, {
-    resolvedEnvironment,
-  });
+  const childHostId = childHostIdForResolvedEnvironment(resolvedEnvironment);
+  const hostDataDir = (
+    await ensureHostSessionReadyForWork(deps, { hostId: childHostId })
+  ).dataDir;
   const modelCatalogCwd =
     modelCatalogCwdForResolvedEnvironment(resolvedEnvironment);
   const resolvedExecutionDefaults = await resolveCatalogExecutionDefaults(
@@ -790,7 +685,7 @@ export async function createThreadFromRequest(
     {
       ...(modelCatalogCwd !== undefined ? { cwd: modelCatalogCwd } : {}),
       executionDefaults,
-      hostId: childHostIdForResolvedEnvironment(resolvedEnvironment),
+      hostId: childHostId,
       providerId,
       requestedModel,
     },
@@ -875,7 +770,7 @@ export async function createThreadFromRequest(
         type: "direct-managed",
         hostId,
         sourcePath: managedSource.path,
-        baseBranch: await resolveManagedDefaultBaseBranchForCreate(deps, {
+        baseBranch: await resolveManagedBaseBranchForCreate(deps, {
           baseBranch: workspace.baseBranch,
           hostId,
           sourcePath: managedSource.path,
@@ -885,9 +780,6 @@ export async function createThreadFromRequest(
       break;
     }
     case "personal": {
-      if (resolvedEnvironment.hostId === null) {
-        throw new Error("Resolved personal environment is missing hostId");
-      }
       environmentIntent = {
         type: "direct-personal",
         hostId: resolvedEnvironment.hostId,
@@ -897,18 +789,14 @@ export async function createThreadFromRequest(
     }
   }
 
-  const fork = resolveForkDescriptor(deps, {
-    childHostId: childHostIdForResolvedEnvironment(resolvedEnvironment),
+  const fork = resolveForkPoint(deps, {
+    childHostId,
     originKind: request.originKind ?? null,
     providerId: request.providerId,
     sourceSeqEnd: request.sourceSeqEnd,
     sourceThread,
   });
 
-  // A fork/side-chat must clone the source provider session. If that clone
-  // cannot be resolved (source has no active session, provider lacks fork
-  // support, or the target is cross-host), do not fall back to a fresh
-  // history-less thread.start.
   if (request.originKind !== null && fork === null) {
     throw new ApiError(
       400,

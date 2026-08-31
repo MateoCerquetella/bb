@@ -2,8 +2,7 @@ import { useAtom, useAtomValue } from "jotai";
 import { atomWithStorage } from "jotai/utils";
 import { createLocalStorageSyncStorage } from "./browser-storage";
 
-export const AUDIO_INPUT_DEVICE_STORAGE_KEY =
-  "bb.voiceInput.audioInputDeviceId";
+const AUDIO_INPUT_DEVICE_STORAGE_KEY = "bb.voiceInput.audioInputDeviceId";
 
 export type PreferredAudioInputDeviceId = string | null;
 
@@ -13,8 +12,7 @@ function isStoredAudioInputDeviceId(
   value: string,
 ): value is NonNullable<PreferredAudioInputDeviceId> {
   return (
-    value.trim().length > 0 &&
-    value.length <= MAX_AUDIO_INPUT_DEVICE_ID_LENGTH
+    value.trim().length > 0 && value.length <= MAX_AUDIO_INPUT_DEVICE_ID_LENGTH
   );
 }
 
@@ -34,7 +32,7 @@ const audioInputDeviceStorage =
     serialize: (value) => value ?? "",
   });
 
-export const audioInputDevicePreferenceAtom =
+const audioInputDevicePreferenceAtom =
   atomWithStorage<PreferredAudioInputDeviceId>(
     AUDIO_INPUT_DEVICE_STORAGE_KEY,
     null,

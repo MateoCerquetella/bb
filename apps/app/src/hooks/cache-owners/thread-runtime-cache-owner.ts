@@ -10,6 +10,7 @@ import type {
 import type {
   CreateQueuedMessageRequest,
   PromptHistoryResponse,
+  SendMessageDelivery,
   SendQueuedMessageMode,
   ThreadQueuedMessageListResponse,
   ThreadResponse,
@@ -19,12 +20,14 @@ import type {
   TimelineRow,
   UpdateQueuedMessageRequest,
 } from "@bb/server-contract";
-import type { AppCreateThreadRequest } from "@/lib/api-types";
-import { OPTIMISTIC_TIMELINE_ROW_ID_PREFIX } from "@/lib/optimistic-timeline-row";
+import type { AppCreateThreadRequest } from "@bb/client-core";
+import { OPTIMISTIC_TIMELINE_ROW_ID_PREFIX } from "@bb/client-core";
 import { collectPromptAttachments } from "@/lib/prompt-attachments";
 import { prependPromptHistoryEntry } from "@/lib/prompt-history";
 import {
   applyQueuedMessageReorder,
+  collectLeadQueuedMessageGroupIds,
+  preserveLeadQueuedMessageGroupAfterReorder,
   type QueuedMessageReorderRequest,
 } from "@/lib/queued-message-reorder";
 import type { SendThreadMessageMutationRequest } from "../mutations/mutation-request-types";
@@ -148,6 +151,7 @@ interface RollbackRemoveQueuedMessageTransactionArgs {
 }
 
 interface ApplySendThreadMessageSuccessArgs {
+  delivery: SendMessageDelivery;
   queryClient: QueryClient;
   realtimeConnected: boolean;
   request: SendThreadMessageMutationRequest;
@@ -166,7 +170,6 @@ interface ReorderQueuedMessageRequest extends QueuedMessageReorderRequest {
 }
 
 interface SetQueuedMessageGroupBoundaryRequest {
-  expectedGroupedPrefixQueuedMessageIds: string[];
   groupBoundaryQueuedMessageId: string;
   id: string;
 }
@@ -242,14 +245,14 @@ interface OptimisticTurnRequestKindArgs {
   threadStatus: ThreadWithRuntime["status"] | null;
 }
 
-export interface SendThreadMessageAcceptedTurnTransaction {
+interface SendThreadMessageAcceptedTurnTransaction {
   kind: "accepted-turn";
   optimisticCreatedAt: number;
   optimisticRowId: string;
   previousThread: ThreadResponse | undefined;
 }
 
-export interface SendThreadMessageQueuedTransaction {
+interface SendThreadMessageQueuedTransaction {
   kind: "queued-message";
   optimisticQueuedMessageId: string;
   previousQueuedMessages: ThreadQueuedMessageListResponse | undefined;
@@ -319,43 +322,6 @@ function applyQueuedMessageGroupBoundary({
   return queuedMessages.map((queuedMessage, index) => ({
     ...queuedMessage,
     groupWithNext: index < boundaryIndex,
-  }));
-}
-
-function collectLeadQueuedMessageGroupIds(
-  queuedMessages: readonly ThreadQueuedMessage[],
-): string[] {
-  const ids: string[] = [];
-  for (const queuedMessage of queuedMessages) {
-    ids.push(queuedMessage.id);
-    if (!queuedMessage.groupWithNext) break;
-  }
-  return ids;
-}
-
-function preserveLeadQueuedMessageGroupAfterReorder({
-  originalLeadGroupIds,
-  queuedMessages,
-}: {
-  originalLeadGroupIds: readonly string[];
-  queuedMessages: readonly ThreadQueuedMessage[];
-}): ThreadQueuedMessage[] {
-  if (originalLeadGroupIds.length <= 1) {
-    return queuedMessages.map((queuedMessage) => ({
-      ...queuedMessage,
-      groupWithNext: false,
-    }));
-  }
-
-  const originalLeadGroupIdSet = new Set(originalLeadGroupIds);
-  const preservesLeadGroup = queuedMessages
-    .slice(0, originalLeadGroupIds.length)
-    .every((queuedMessage) => originalLeadGroupIdSet.has(queuedMessage.id));
-
-  return queuedMessages.map((queuedMessage, index) => ({
-    ...queuedMessage,
-    groupWithNext:
-      preservesLeadGroup && index < originalLeadGroupIds.length - 1,
   }));
 }
 
@@ -641,9 +607,6 @@ function applyOptimisticAcceptedTurnThreadState({
     updatedAt: Math.max(thread.updatedAt, createdAt),
     runtime: {
       ...thread.runtime,
-      // Flip displayStatus so the working indicator mounts with the optimistic
-      // user-message row. Preserve host blockers because promoting them to
-      // "active" would misrepresent host readiness.
       displayStatus:
         thread.runtime.displayStatus === "host-reconnecting" ||
         thread.runtime.displayStatus === "waiting-for-host"
@@ -879,13 +842,30 @@ export function rollbackSendThreadMessageTransaction({
 }
 
 export function applySendThreadMessageSuccess({
+  delivery,
   queryClient,
   realtimeConnected,
   request,
   transaction,
 }: ApplySendThreadMessageSuccessArgs): void {
+  if (delivery === "deferred" && transaction?.kind === "accepted-turn") {
+    if (transaction.previousThread) {
+      queryClient.setQueryData<ThreadResponse>(
+        threadQueryKey(request.id),
+        transaction.previousThread,
+      );
+    }
+    prependThreadPromptHistory(
+      queryClient,
+      request.id,
+      buildAcceptedPromptHistoryEntry({
+        createdAt: transaction.optimisticCreatedAt,
+        input: request.input,
+      }),
+    );
+    return;
+  }
   if (transaction?.kind === "queued-message") {
-    // Queued prompts enter recall too; prepend locally instead of refetching.
     prependThreadPromptHistory(
       queryClient,
       request.id,
@@ -895,9 +875,6 @@ export function applySendThreadMessageSuccess({
       }),
     );
     if (realtimeConnected) {
-      // Enqueuing does not write the thread record, and `queue-changed`
-      // refreshes prompt history; only the queue list needs a read to swap
-      // the optimistic row for the server row.
       invalidateThreadQueuedMessageListQuery({
         queryClient,
         threadId: request.id,
@@ -1201,11 +1178,6 @@ export async function beginReorderQueuedMessageTransaction({
   const previousQueuedMessages =
     queryClient.getQueryData<ThreadQueuedMessageListResponse>(queryKey);
 
-  // Apply the optimistic reorder synchronously — before awaiting cancelQueries
-  // — so the list re-renders in its new order within the same tick as the drop.
-  // If this write lands a microtask late (after the await), dnd-kit has already
-  // animated the dragged row back to its original slot, producing a visible
-  // snap-back before it settles into place.
   queryClient.setQueryData<ThreadQueuedMessageListResponse>(
     queryKey,
     (currentQueuedMessages) => {

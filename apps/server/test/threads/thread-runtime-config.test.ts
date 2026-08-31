@@ -4,16 +4,15 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   markThreadDeleted,
-  setAppSettings,
   setExperiments,
   setThreadExecutionOverride,
 } from "@bb/db";
 import {
-  DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_ENDPOINT,
-  defaultAppSettings,
   defaultExperiments,
   encodeClientTurnRequestIdNumber,
 } from "@bb/domain";
+import { validatePluginProviderDeclaration } from "@get-bb/plugin-sdk/internal/host-policy";
+import { buildPluginProviderRegistration } from "../../src/services/providers/plugin-provider-registration.js";
 import type { DiscoveredSkill } from "@bb/host-daemon-contract";
 import { setPluginAgentContributions } from "../../src/services/plugins/plugin-agent-contributions.js";
 import { readSkillTreeManifest } from "../../src/services/skills/injected-skills.js";
@@ -39,7 +38,10 @@ import {
   registerHostRpcResponder,
   type HostRpcResponder,
 } from "../helpers/host-rpc.js";
-import { registerFakeProviders } from "../helpers/provider-registry.js";
+import {
+  configuredAcpProvider,
+  stubHostArtifact,
+} from "../helpers/provider-registry.js";
 import type { TestAppHarness } from "../helpers/test-app.js";
 import { textInput } from "../helpers/prompt-input.js";
 import { withTestHarness } from "../helpers/test-app.js";
@@ -155,24 +157,23 @@ function registerRemoteRuntimeFileResponder(
 }
 
 describe("thread runtime config", () => {
-  it("attaches custom ACP launch specs to thread start and turn submit commands", async () => {
+  it("carries a configured ACP agent's launch spec on thread start and turn submit", async () => {
     await withTestHarness(
       {
-        customAcpAgents: [
-          {
+        extraProviders: [
+          await configuredAcpProvider({
             id: "custom",
             displayName: "Custom ACP",
             command: "custom-agent",
             args: ["serve"],
             env: { CUSTOM_AGENT_TOKEN: "token" },
-            supportsManualCompaction: false,
             cwd: "/agent-home",
             modelCli: {
               listArgs: ["models", "list"],
               selectFlag: "--model",
               primaryModels: ["model-a"],
             },
-          },
+          }),
         ],
       },
       async (harness) => {
@@ -229,7 +230,9 @@ describe("thread runtime config", () => {
           syncGeneratedTitle: false,
           thread,
         });
-        expect(startCommand.acpLaunchSpec).toEqual(expectedSpec);
+        expect(startCommand.bridgeLaunch.providerOptions).toMatchObject({
+          acpLaunchSpec: expectedSpec,
+        });
         expect(startCommand.dynamicTools).toEqual([
           expect.objectContaining({
             name: "update_environment_directory",
@@ -250,8 +253,12 @@ describe("thread runtime config", () => {
             thread,
           },
         );
-        expect(submitCommand.acpLaunchSpec).toEqual(expectedSpec);
-        expect(submitCommand.resumeContext.acpLaunchSpec).toEqual(expectedSpec);
+        expect(submitCommand.bridgeLaunch.providerOptions).toMatchObject({
+          acpLaunchSpec: expectedSpec,
+        });
+        expect(
+          submitCommand.resumeContext.bridgeLaunch.providerOptions,
+        ).toMatchObject({ acpLaunchSpec: expectedSpec });
         expect(submitCommand.resumeContext.dynamicTools).toEqual([
           expect.objectContaining({
             name: "update_environment_directory",
@@ -321,7 +328,7 @@ describe("thread runtime config", () => {
       requestedModel: "acp-default",
     },
   ])(
-    "attaches known ACP launch specs for $providerId to thread start and turn submit commands",
+    "carries plugin-declared ACP launch specs for $providerId in bridge options",
     async ({ expectedSpec, providerId, requestedModel }) => {
       await withTestHarness(async (harness) => {
         const { host } = seedHostSession(harness.deps, {
@@ -365,7 +372,9 @@ describe("thread runtime config", () => {
           syncGeneratedTitle: false,
           thread,
         });
-        expect(startCommand.acpLaunchSpec).toEqual(expectedSpec);
+        expect(startCommand.bridgeLaunch.providerOptions).toMatchObject({
+          acpLaunchSpec: expectedSpec,
+        });
         expect(startCommand.dynamicTools).toEqual([
           expect.objectContaining({
             name: "update_environment_directory",
@@ -386,8 +395,12 @@ describe("thread runtime config", () => {
             thread,
           },
         );
-        expect(submitCommand.acpLaunchSpec).toEqual(expectedSpec);
-        expect(submitCommand.resumeContext.acpLaunchSpec).toEqual(expectedSpec);
+        expect(submitCommand.bridgeLaunch.providerOptions).toMatchObject({
+          acpLaunchSpec: expectedSpec,
+        });
+        expect(
+          submitCommand.resumeContext.bridgeLaunch.providerOptions,
+        ).toMatchObject({ acpLaunchSpec: expectedSpec });
         expect(submitCommand.resumeContext.dynamicTools).toEqual([
           expect.objectContaining({
             name: "update_environment_directory",
@@ -817,72 +830,10 @@ describe("thread runtime config", () => {
     });
   });
 
-  it("gates Claude Code mock CLI traffic on its experiment with the fixed endpoint", async () => {
+  it("carries each provider's plugin-derived options and nothing provider-named on the shared contract", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps, {
-        id: "host-runtime-mock-cli-traffic-experiment",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-      const thread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        providerId: "codex",
-      });
-      const execution = await resolveExecutionOptions(harness.deps, {
-        threadId: thread.id,
-        requestedExecution: {
-          model: "gpt-5",
-          source: "client/turn/requested",
-        },
-      });
-      const buildCommand = (requestValue: number) =>
-        buildThreadStartCommand(harness.deps, {
-          environment,
-          execution,
-          fork: null,
-          permissionEscalation: "ask",
-          input: textInput("hello"),
-          projectId: project.id,
-          providerId: "codex",
-          requestId: encodeClientTurnRequestIdNumber({ value: requestValue }),
-          syncGeneratedTitle: false,
-          thread,
-        });
-
-      expect((await buildCommand(1)).options.claudeCodeMockCliTraffic).toEqual({
-        enabled: false,
-        endpoint: DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_ENDPOINT,
-      });
-
-      setExperiments(harness.db, {
-        claudeCodeMockCliTraffic: true,
-        editMessages: false,
-        newOnboarding: false,
-        providerSessionReaping: false,
-      });
-
-      expect((await buildCommand(2)).options.claudeCodeMockCliTraffic).toEqual({
-        enabled: true,
-        endpoint: DEFAULT_CLAUDE_CODE_MOCK_CLI_TRAFFIC_ENDPOINT,
-      });
-    });
-  });
-
-  it("resolves native memory preferences independently for Codex and Claude Code", async () => {
-    await withTestHarness(async (harness) => {
-      setAppSettings(harness.db, {
-        ...defaultAppSettings,
-        codexMemoryEnabled: false,
-        claudeCodeMemoryEnabled: true,
-      });
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-provider-memory-settings",
+        id: "host-provider-options",
       });
       const { project } = seedProjectWithSource(harness.deps, {
         hostId: host.id,
@@ -892,7 +843,7 @@ describe("thread runtime config", () => {
         projectId: project.id,
       });
 
-      async function build(providerId: "codex" | "claude-code") {
+      async function build(providerId: "codex" | "claude-code" | "pi") {
         const thread = seedThread(harness.deps, {
           projectId: project.id,
           environmentId: environment.id,
@@ -901,58 +852,12 @@ describe("thread runtime config", () => {
         const execution = await resolveExecutionOptions(harness.deps, {
           threadId: thread.id,
           requestedExecution: {
-            model: providerId === "codex" ? "gpt-5" : "claude-sonnet-4-6",
-            source: "client/turn/requested",
-          },
-        });
-        return buildThreadStartCommand(harness.deps, {
-          environment,
-          execution,
-          fork: null,
-          permissionEscalation: "ask",
-          input: textInput("hello"),
-          projectId: project.id,
-          providerId,
-          requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
-          syncGeneratedTitle: false,
-          thread,
-        });
-      }
-
-      expect((await build("codex")).options.memoryEnabled).toBe(false);
-      expect((await build("claude-code")).options.memoryEnabled).toBe(true);
-    });
-  });
-
-  it("carries provider-native feature settings independently", async () => {
-    await withTestHarness(async (harness) => {
-      setAppSettings(harness.db, {
-        ...defaultAppSettings,
-        codexSubagentsDisabled: true,
-        claudeCodeSubagentsDisabled: true,
-        claudeCodeWorkflowsDisabled: true,
-      });
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-provider-subagent-settings",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-
-      async function build(providerId: "codex" | "claude-code") {
-        const thread = seedThread(harness.deps, {
-          projectId: project.id,
-          environmentId: environment.id,
-          providerId,
-        });
-        const execution = await resolveExecutionOptions(harness.deps, {
-          threadId: thread.id,
-          requestedExecution: {
-            model: providerId === "codex" ? "gpt-5" : "claude-sonnet-4-6",
+            model:
+              providerId === "codex"
+                ? "gpt-5"
+                : providerId === "pi"
+                  ? "pi-model"
+                  : "claude-sonnet-4-6",
             source: "client/turn/requested",
           },
         });
@@ -971,30 +876,72 @@ describe("thread runtime config", () => {
       }
 
       const codex = await build("codex");
-      expect(codex.options.providerSubagentsEnabled).toBe(false);
-      expect(codex.disallowedTools).toBeUndefined();
+      expect(codex.options.providerOptions).toEqual({
+        memoryEnabled: true,
+        providerSubagentsEnabled: true,
+      });
+      expect(codex.options.promptMode).toBeUndefined();
+      expect(codex.options).not.toHaveProperty("memoryEnabled");
+      expect(codex.options).not.toHaveProperty("workflowsEnabled");
 
       const claudeCode = await build("claude-code");
-      expect(claudeCode.options.providerSubagentsEnabled).toBe(false);
-      expect(claudeCode.options.workflowsEnabled).toBe(false);
-      expect(claudeCode.disallowedTools).toBeUndefined();
+      expect(claudeCode.options.providerOptions).toEqual({
+        memoryEnabled: true,
+        providerSubagentsEnabled: true,
+        workflowsEnabled: true,
+      });
+
+      const pi = await build("pi");
+      expect(pi.options.providerOptions).toEqual({});
     });
   });
 
-  it("scopes the Claude workflows toggle to claude-code only", async () => {
+  it("runs the owning plugin's options hook with the command context", async () => {
     await withTestHarness(async (harness) => {
-      // A non-Claude provider that declares `supportsWorkflows: true`, like
-      // the first third-party workflow provider would.
-      registerFakeProviders(
-        harness.deps.providerRegistry,
-        harness.deps.pluginHostArtifacts,
-      );
-      setAppSettings(harness.db, {
-        ...defaultAppSettings,
-        claudeCodeWorkflowsDisabled: true,
+      const pluginId = "provider-hooked";
+      const registration = buildPluginProviderRegistration({
+        available: true,
+        pluginId,
+        declaration: validatePluginProviderDeclaration({
+          id: "hooked",
+          displayName: "Hooked",
+          maintenance: { health: false, usage: false, installation: false },
+          capabilities: {
+            supportsServiceTier: false,
+            supportsNativeUserQuestion: false,
+            fork: "none",
+            supportsManualCompaction: false,
+            supportsThreadArchive: false,
+            supportsThreadRename: false,
+            permissionModes: ["accept-edits", "auto", "full"],
+            reasoningLevels: ["medium"],
+          },
+          composerActions: ["plan"],
+          deriveProviderOptions: (context) => ({
+            seen: {
+              threadId: context.threadId,
+              projectId: context.projectId,
+              model: context.model,
+              permissionMode: context.permissionMode,
+              promptMode: context.promptMode ?? null,
+            },
+            verbose: context.settings.verbose === true,
+          }),
+        }),
+        readSettings: () => ({ verbose: true }),
       });
+      harness.deps.providerRegistry.register({
+        ...registration,
+        pluginId,
+        iconNames: new Set<string>(),
+      });
+      harness.deps.pluginHostArtifacts.set(
+        pluginId,
+        stubHostArtifact(pluginId),
+      );
+
       const { host } = seedHostSession(harness.deps, {
-        id: "host-provider-workflows-scope",
+        id: "host-provider-hook",
       });
       const { project } = seedProjectWithSource(harness.deps, {
         hostId: host.id,
@@ -1003,44 +950,44 @@ describe("thread runtime config", () => {
         hostId: host.id,
         projectId: project.id,
       });
+      const thread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "hooked",
+      });
+      const command = await buildThreadStartCommand(harness.deps, {
+        environment,
+        execution: {
+          model: "hook-model",
+          permissionMode: "auto",
+          reasoningLevel: "medium",
+          serviceTier: "default",
+          source: "client/turn/requested",
+        },
+        fork: null,
+        permissionEscalation: "ask",
+        input: textInput("hello"),
+        projectId: project.id,
+        providerId: "hooked",
+        requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
+        syncGeneratedTitle: false,
+        thread,
+      });
 
-      async function build(providerId: "fake" | "claude-code", model: string) {
-        const thread = seedThread(harness.deps, {
+      expect(command.options.providerOptions).toEqual({
+        seen: {
+          threadId: thread.id,
           projectId: project.id,
-          environmentId: environment.id,
-          providerId,
-        });
-        return buildThreadStartCommand(harness.deps, {
-          environment,
-          execution: {
-            model,
-            permissionMode: "auto",
-            reasoningLevel: "medium",
-            serviceTier: "default",
-            source: "client/turn/requested",
-          },
-          fork: null,
-          permissionEscalation: "ask",
-          input: textInput("hello"),
-          projectId: project.id,
-          providerId,
-          requestId: encodeClientTurnRequestIdNumber({ value: 1 }),
-          syncGeneratedTitle: false,
-          thread,
-        });
-      }
-
-      // Claude Code honors the Claude-named toggle.
-      const claudeCode = await build("claude-code", "claude-sonnet-4-6");
-      expect(claudeCode.options.workflowsEnabled).toBe(false);
-
-      // Another workflows-capable provider is unaffected by it.
-      const fake = await build("fake", "fake-model");
-      expect(fake.options.workflowsEnabled).toBe(true);
+          model: "hook-model",
+          permissionMode: "auto",
+          promptMode: null,
+        },
+        verbose: true,
+      });
     });
   });
 
-  it("sets Claude Code native plan mode when the prompt starts from a plan command pill", async () => {
+  it("enters plan mode when the prompt starts from the provider's declared plan command", async () => {
     await withTestHarness(async (harness) => {
       const { host } = seedHostSession(harness.deps, {
         id: "host-runtime-claude-plan",
@@ -1099,7 +1046,35 @@ describe("thread runtime config", () => {
       });
 
       expect(command.input).toEqual(input);
-      expect(command.options.claudeCodePermissionMode).toBe("plan");
+      expect(command.options.promptMode).toBe("plan");
+      expect(command.options.providerOptions).toMatchObject({
+        claudeCodePermissionMode: "plan",
+      });
+
+      const piThread = seedThread(harness.deps, {
+        projectId: project.id,
+        environmentId: environment.id,
+        providerId: "pi",
+      });
+      const piCommand = await buildThreadStartCommand(harness.deps, {
+        environment,
+        execution: {
+          model: "pi-model",
+          permissionMode: "full",
+          reasoningLevel: "medium",
+          serviceTier: "default",
+          source: "client/turn/requested",
+        },
+        fork: null,
+        permissionEscalation: "ask",
+        input,
+        projectId: project.id,
+        providerId: "pi",
+        requestId: encodeClientTurnRequestIdNumber({ value: 2 }),
+        syncGeneratedTitle: false,
+        thread: piThread,
+      });
+      expect(piCommand.options.promptMode).toBeUndefined();
     });
   });
 
@@ -1127,7 +1102,6 @@ describe("thread runtime config", () => {
         reasoningLevelOverride: "high",
       });
 
-      // No model/reasoning in the request: the override sticks for this turn.
       const execution = await resolveExecutionOptions(harness.deps, {
         threadId: thread.id,
         requestedExecution: { source: "client/turn/requested" },
@@ -1135,7 +1109,6 @@ describe("thread runtime config", () => {
       expect(execution.model).toBe("claude-opus-4-8");
       expect(execution.reasoningLevel).toBe("high");
 
-      // An explicit per-turn request still wins over the sticky override.
       const oneOff = await resolveExecutionOptions(harness.deps, {
         threadId: thread.id,
         requestedExecution: {
@@ -1149,77 +1122,9 @@ describe("thread runtime config", () => {
     });
   });
 
-  it("derives ask escalation for user-initiated work on root and child threads", async () => {
-    await withTestHarness(async (harness) => {
-      const { host } = seedHostSession(harness.deps, {
-        id: "host-runtime-permission-escalation",
-      });
-      const { project } = seedProjectWithSource(harness.deps, {
-        hostId: host.id,
-      });
-      const environment = seedEnvironment(harness.deps, {
-        hostId: host.id,
-        projectId: project.id,
-      });
-      const rootThread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-      });
-      const childThread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        parentThreadId: rootThread.id,
-      });
-      const sideChatThread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-        originKind: "fork",
-        originPluginId: "side-chat",
-        visibility: "hidden",
-        sourceThreadId: rootThread.id,
-      });
-      const parentThread = seedThread(harness.deps, {
-        projectId: project.id,
-        environmentId: environment.id,
-      });
-
-      expect(
-        resolvePermissionEscalation({
-          thread: rootThread,
-          initiator: "user",
-        }),
-      ).toBe("ask");
-      expect(
-        resolvePermissionEscalation({
-          thread: rootThread,
-          initiator: "system",
-        }),
-      ).toBe("deny");
-      expect(
-        resolvePermissionEscalation({
-          thread: childThread,
-          initiator: "user",
-        }),
-      ).toBe("ask");
-      expect(
-        resolvePermissionEscalation({
-          thread: childThread,
-          initiator: "system",
-        }),
-      ).toBe("deny");
-      expect(
-        resolvePermissionEscalation({
-          thread: sideChatThread,
-          initiator: "user",
-        }),
-      ).toBe("ask");
-      expect(
-        resolvePermissionEscalation({
-          thread: parentThread,
-          initiator: "user",
-        }),
-      ).toBe("ask");
-    });
+  it("derives ask escalation only for user-initiated work", () => {
+    expect(resolvePermissionEscalation({ initiator: "user" })).toBe("ask");
+    expect(resolvePermissionEscalation({ initiator: "system" })).toBe("deny");
   });
 
   it("resolves the workspace, storage path, and environment directory dynamic tool", async () => {
@@ -1666,8 +1571,6 @@ describe("thread runtime config", () => {
 
   describe("plugin contributeInstructions assembly", () => {
     afterEach(() => {
-      // withTestHarness rebinds this on each createApp; clear so a later
-      // isolated test doesn't see a leftover stub if harness cleanup races.
       setPluginAgentContributions(undefined);
     });
 
@@ -1861,7 +1764,6 @@ describe("thread runtime config", () => {
           'The following instructions come from the BB plugin "ok":',
         );
         expect(instructions).toContain("still contributes");
-        // Truncated to 4096 chars — the full 5000-x body must not appear.
         expect(instructions).not.toContain(longBody);
         expect(instructions).toContain("x".repeat(4096));
         expect(instructions).not.toContain("x".repeat(4097));

@@ -9,8 +9,8 @@ import {
   type ProjectThreadNode,
   type ProjectThreadItem,
   type ThreadComparator,
-} from "./projectThreadGroups";
-import { NO_COLLAPSED_CHILD_ACTIVITY } from "@/lib/thread-activity";
+} from "@bb/client-core";
+import { NO_COLLAPSED_CHILD_ACTIVITY } from "@bb/client-core";
 import type { ThreadTitleMentionResources } from "@/components/thread/ThreadTitleMentions";
 
 function thread(overrides: Partial<ThreadListEntry>): ThreadListEntry {
@@ -281,7 +281,6 @@ describe("getSidebarThreadComparator", () => {
     ).toEqual(["thr_a", "thr_z"]);
   });
 
-  // Regression: leaf threads and mixed section/thread items must both sort A→Z.
   it("alphabetical leaf and item comparators agree", () => {
     const comparator = getSidebarThreadComparator("alpha");
     expect(comparator.compareItems).toBeDefined();
@@ -317,8 +316,6 @@ describe("getSelectedThreadSidebarExpansion", () => {
   });
 
   it("expands the root ancestor's project for a cross-project child in project mode", () => {
-    // The child lives in proj_web but renders under its parent's proj_app group,
-    // so direct navigation must expand proj_app or the selected row stays hidden.
     expect(
       getSelectedThreadSidebarExpansion({
         organizationMode: "project",

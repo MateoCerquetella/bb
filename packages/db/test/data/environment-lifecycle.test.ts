@@ -1,8 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { eq } from "drizzle-orm";
-import { createConnection } from "../../src/connection.js";
 import type { DbTransaction } from "../../src/connection.js";
-import { migrate } from "../../src/migrate.js";
 import { noopNotifier } from "../../src/notifier.js";
 import type { DbNotifier } from "../../src/notifier.js";
 import { environments, threads } from "../../src/schema.js";
@@ -26,10 +24,10 @@ import {
 import { createProject } from "../../src/data/projects.js";
 import { upsertHost } from "../../src/data/hosts.js";
 import { withWriteAfterFirstRead } from "../helpers/interleave.js";
+import { createMigratedConnection } from "../helpers/migrated-connection.js";
 
 function setup() {
-  const db = createConnection(":memory:");
-  migrate(db);
+  const db = createMigratedConnection();
   const host = upsertHost(db, noopNotifier, {
     name: "test-host",
     type: "persistent",
@@ -151,7 +149,6 @@ describe("applyEnvironmentLifecycleEvent", () => {
       const environment = seedEnvironment({ status: "ready" });
 
       vi.setSystemTime(2_000);
-      // ready has no provision.succeeded cell.
       const outcome = applyEnvironmentLifecycleEvent(db, spy, {
         environmentId: environment.id,
         event: { type: "provision.succeeded" },
@@ -256,7 +253,6 @@ describe("applyEnvironmentLifecycleEvent", () => {
       detail: "state changed while applying provision.requested from status ready",
       reason: "cas-conflict",
     });
-    // The interleaved writer's value survives; the event's target does not.
     expect(getEnvironment(db, environment.id)?.status).toBe("error");
   });
 
@@ -284,9 +280,8 @@ describe("applyEnvironmentLifecycleEvent", () => {
     });
     expect(getEnvironment(db, environment.id)?.status).toBe("retiring");
 
-    // A stopping thread blocks the claim even after deletion intent.
     requireThreadLifecycleEventApplied(
-      applyThreadLifecycleEvent(db, noopNotifier, {
+      applyThreadLifecycleEvent(db, {
         event: { type: "stop.requested" },
         threadId: thread.id,
       }),

@@ -9,18 +9,13 @@ import {
   DialogTitle,
 } from "@bb/shared-ui/dialog";
 
-/**
- * Alert-style confirmation built on the vendored Dialog. (The registry's
- * alert-dialog needs the @radix-ui/react-alert-dialog dependency, which this
- * plugin doesn't ship; Dialog covers the confirm/cancel shape.)
- */
 export function ConfirmDialog({
   open,
   onOpenChange,
   title,
   description,
   confirmLabel,
-  destructive = false,
+  confirmDisabled = false,
   onConfirm,
 }: {
   open: boolean;
@@ -28,7 +23,7 @@ export function ConfirmDialog({
   title: string;
   description: ReactNode;
   confirmLabel: string;
-  destructive?: boolean;
+  confirmDisabled?: boolean;
   onConfirm: () => void;
 }) {
   return (
@@ -47,8 +42,9 @@ export function ConfirmDialog({
             Cancel
           </Button>
           <Button
-            variant={destructive ? "destructive" : "default"}
+            variant="destructive"
             size="sm"
+            disabled={confirmDisabled}
             onClick={() => {
               onOpenChange(false);
               onConfirm();

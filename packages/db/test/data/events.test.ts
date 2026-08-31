@@ -8,8 +8,6 @@ import {
   turnScope,
   type PromptInput,
 } from "@bb/domain";
-import { createConnection } from "../../src/connection.js";
-import { migrate } from "../../src/migrate.js";
 import { noopNotifier } from "../../src/notifier.js";
 import type { DbNotifier } from "../../src/notifier.js";
 import {
@@ -31,17 +29,15 @@ import {
   listContextWindowUsageRows,
   listCompletedTurnsByThreadIds,
   listEvents,
-  listLatestGoalEventRowsByThreadIds,
+  listLatestThreadStateEventRowsByThreadIds,
   listRecentStoredEventRows,
   listStoredConversationOutlineEventRows,
   listTimelineSegmentAnchorsDescending,
-  findTimelineSegmentAnchorSequenceAfter,
   getTimelineSegmentAnchorAtSequence,
   listOpenTurnInputAcceptedRowsByThreadIds,
   listStoredClientTurnRequestIdsInRange,
   listStoredClientTurnRequestRowsByKeys,
   listStoredEventRows,
-  listStoredEventRowsInRange,
   listStoredThreadProvisioningRowsByProvisioningId,
   findUnfinishedTurnCoveringSequence,
   hasParentedEventCrossingSequence,
@@ -59,15 +55,16 @@ import {
   pruneResolvedItemDeltas,
   pruneThreadEventsBeforeSequence,
   listLatestOpenBackgroundTaskStateRowsForThread,
+  STORED_TIMELINE_BYTE_PREFLIGHT_EVENT_LIMIT,
 } from "../../src/data/events.js";
 import { createEnvironment } from "../../src/data/environments.js";
 import { createProject } from "../../src/data/projects.js";
 import { createThread } from "../../src/data/threads.js";
 import { upsertHost } from "../../src/data/hosts.js";
+import { createMigratedConnection } from "../helpers/migrated-connection.js";
 
 function setup() {
-  const db = createConnection(":memory:");
-  migrate(db);
+  const db = createMigratedConnection();
   const host = upsertHost(db, noopNotifier, {
     name: "test-host",
     type: "persistent",
@@ -86,6 +83,7 @@ function setup() {
 const emptyItemFields = {
   itemId: null,
   itemKind: null,
+  parentToolCallId: null,
 } as const;
 
 const threadEventFields = {
@@ -218,6 +216,7 @@ describe("events", () => {
         scope: turnScope("turn-1"),
         itemId: "msg-1",
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "msg-1",
@@ -233,6 +232,7 @@ describe("events", () => {
     expect(all[0]).toMatchObject({
       itemId: "msg-1",
       itemKind: "agentMessage",
+      parentToolCallId: null,
     });
   });
 
@@ -288,7 +288,6 @@ describe("events", () => {
       insertedInputIndexes: [0],
     });
 
-    // Same threadId + sequence should be ignored
     const result2 = insertEvents(db, noopNotifier, [
       {
         threadId: thread.id,
@@ -308,11 +307,10 @@ describe("events", () => {
     expect(result2).toEqual({
       insertedCount: 1,
       insertedInputIndexes: [1],
-    }); // only sequence 2 inserted
+    });
 
     const all = listEvents(db, { threadId: thread.id });
     expect(all).toHaveLength(2);
-    // Original data preserved for sequence 1
     expect(JSON.parse(all[0]!.data)).toMatchObject({ message: "first" });
   });
 
@@ -386,6 +384,7 @@ describe("events", () => {
         scope: turnScope(turnId),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         providerThreadId: "provider-thread-denied-approval",
         data: JSON.stringify({
           providerThreadId: "provider-thread-denied-approval",
@@ -398,6 +397,7 @@ describe("events", () => {
         scope: turnScope(turnId),
         itemId,
         itemKind: "commandExecution",
+        parentToolCallId: null,
         providerThreadId: "provider-thread-denied-approval",
         data: JSON.stringify({
           providerThreadId: "provider-thread-denied-approval",
@@ -417,6 +417,7 @@ describe("events", () => {
         scope: turnScope(turnId),
         itemId,
         itemKind: "commandExecution",
+        parentToolCallId: null,
         providerThreadId: "provider-thread-denied-approval",
         data: JSON.stringify({
           providerThreadId: "provider-thread-denied-approval",
@@ -442,6 +443,7 @@ describe("events", () => {
             scope: turnScope(turnId),
             itemId,
             itemKind: "commandExecution",
+            parentToolCallId: null,
             providerThreadId: "provider-thread-denied-approval",
             data: JSON.stringify({
               providerThreadId: "provider-thread-denied-approval",
@@ -462,6 +464,7 @@ describe("events", () => {
             scope: turnScope(turnId),
             itemId,
             itemKind: "commandExecution",
+            parentToolCallId: null,
             providerThreadId: "provider-thread-after-restart",
             data: JSON.stringify({
               providerThreadId: "provider-thread-after-restart",
@@ -481,6 +484,7 @@ describe("events", () => {
             scope: turnScope(turnId),
             itemId,
             itemKind: "commandExecution",
+            parentToolCallId: null,
             providerThreadId: "provider-thread-after-restart",
             data: JSON.stringify({
               providerThreadId: "provider-thread-after-restart",
@@ -556,6 +560,7 @@ describe("events", () => {
         scope: turnScope(turnId),
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         providerThreadId,
         data: JSON.stringify({ providerThreadId }),
       },
@@ -566,6 +571,7 @@ describe("events", () => {
         scope: turnScope(turnId),
         itemId,
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         providerThreadId,
         data: JSON.stringify({ providerThreadId, item: backgroundItem }),
       },
@@ -576,6 +582,7 @@ describe("events", () => {
         scope: threadScope(),
         itemId,
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         providerThreadId,
         data: JSON.stringify({
           providerThreadId,
@@ -594,6 +601,7 @@ describe("events", () => {
             scope: threadScope(),
             itemId,
             itemKind: "backgroundTask",
+            parentToolCallId: null,
             providerThreadId,
             data: JSON.stringify({
               providerThreadId,
@@ -607,6 +615,7 @@ describe("events", () => {
             scope: turnScope(turnId),
             itemId,
             itemKind: "backgroundTask",
+            parentToolCallId: null,
             providerThreadId,
             data: JSON.stringify({ providerThreadId, item: backgroundItem }),
           },
@@ -617,6 +626,7 @@ describe("events", () => {
             scope: threadScope(),
             itemId,
             itemKind: "backgroundTask",
+            parentToolCallId: null,
             providerThreadId,
             data: JSON.stringify({
               providerThreadId,
@@ -635,6 +645,77 @@ describe("events", () => {
       insertedInputIndexes: [1, 2],
       skippedTurnUnstartedInputIndexes: [],
     });
+  });
+
+  it("skips turn/started when a daemon replays an already-committed batch", () => {
+    const { db, thread } = setup();
+    const turnStarted = {
+      threadId: thread.id,
+      type: "turn/started" as const,
+      ...createTurnEventFields({ turnId: "turn_replayed" }),
+      environmentId: null,
+      providerThreadId: "provider_thr_replayed",
+      data: JSON.stringify({
+        providerThreadId: "provider_thr_replayed",
+        turnId: "turn_replayed",
+      }),
+    };
+    const turnCompleted = {
+      threadId: thread.id,
+      type: "turn/completed" as const,
+      ...createTurnEventFields({ turnId: "turn_replayed" }),
+      environmentId: null,
+      providerThreadId: "provider_thr_replayed",
+      data: JSON.stringify({
+        providerThreadId: "provider_thr_replayed",
+        status: "completed",
+        turnId: "turn_replayed",
+      }),
+    };
+
+    const first = db.transaction(
+      (tx) => appendDaemonEventsInTransaction(tx, [turnStarted, turnCompleted]),
+      { behavior: "immediate" },
+    );
+    const replay = db.transaction(
+      (tx) => appendDaemonEventsInTransaction(tx, [turnStarted, turnCompleted]),
+      { behavior: "immediate" },
+    );
+
+    expect(first.insertedInputIndexes).toEqual([0, 1]);
+    expect(replay).toEqual({
+      acceptedEvents: [{ threadId: thread.id, sequence: 3 }],
+      insertedInputIndexes: [1],
+      skippedTurnUnstartedInputIndexes: [],
+    });
+    expect(
+      listEvents(db, { threadId: thread.id }).map((event) => event.type),
+    ).toEqual(["turn/started", "turn/completed", "turn/completed"]);
+  });
+
+  it("skips a turn/started repeated inside one daemon batch", () => {
+    const { db, thread } = setup();
+    const turnStarted = {
+      threadId: thread.id,
+      type: "turn/started" as const,
+      ...createTurnEventFields({ turnId: "turn_twice" }),
+      environmentId: null,
+      providerThreadId: "provider_thr_twice",
+      data: JSON.stringify({
+        providerThreadId: "provider_thr_twice",
+        turnId: "turn_twice",
+      }),
+    };
+
+    const result = db.transaction(
+      (tx) => appendDaemonEventsInTransaction(tx, [turnStarted, turnStarted]),
+      { behavior: "immediate" },
+    );
+
+    expect(result.insertedInputIndexes).toEqual([0]);
+    expect(
+      listEvents(db, { threadId: thread.id }).map((event) => event.type),
+    ).toEqual(["turn/started"]);
   });
 
   it("rejects daemon turn-scoped events before turn/started is stored", () => {
@@ -703,11 +784,6 @@ describe("events", () => {
   it("drops orphan token-usage snapshots with no stored turn/started instead of failing the batch", () => {
     const { db, thread } = setup();
 
-    // A native fork resumes the parent's session, which re-emits the parent's
-    // last-turn token usage scoped to a turn the forked thread never started.
-    // The snapshot must be dropped, not throw — otherwise the whole batch (here
-    // including the fork's real turn/started) rolls back and the daemon retries
-    // forever, wedging the thread.
     const result = db.transaction(
       (tx) =>
         appendDaemonEventsInTransaction(tx, [
@@ -747,11 +823,6 @@ describe("events", () => {
   it("drops orphan provider/unhandled events instead of failing the batch", () => {
     const { db, thread } = setup();
 
-    // A provider can label its own internal traffic with a turn id bb never
-    // started (Codex tags automatic-compaction events "auto-compact-N"). An
-    // unhandled passthrough event is diagnostic only, so dropping it is always
-    // cheaper than rolling back the batch it rode in with — which the daemon
-    // would then repost forever, stalling every thread on the host.
     const result = db.transaction(
       (tx) =>
         appendDaemonEventsInTransaction(tx, [
@@ -1028,6 +1099,7 @@ describe("events", () => {
         scope: turnScope("turn-1"),
         itemId: "msg_1",
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: { id: "msg_1", type: "agentMessage", text: "assistant output" },
         }),
@@ -1039,6 +1111,7 @@ describe("events", () => {
         scope: turnScope("turn-1"),
         itemId: "call_1",
         itemKind: "toolCall",
+        parentToolCallId: null,
         data: JSON.stringify({ item: { id: "call_1", type: "toolCall" } }),
       },
       {
@@ -1055,6 +1128,7 @@ describe("events", () => {
     ).toMatchObject({
       sequence: 2,
       itemKind: "agentMessage",
+      parentToolCallId: null,
       type: "item/completed",
     });
   });
@@ -1077,6 +1151,7 @@ describe("events", () => {
         scope: turnScope("turn-1"),
         itemId: "msg_1",
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: { id: "msg_1", type: "agentMessage", text: "" },
         }),
@@ -1125,14 +1200,6 @@ describe("events", () => {
     ]);
 
     expect(
-      listStoredEventRowsInRange(db, {
-        seqEnd: 2,
-        seqStart: 1,
-        threadId: thread.id,
-      }),
-    ).toHaveLength(2);
-
-    expect(
       listRecentStoredEventRows(db, {
         excludedTypes: ["system/error"],
         maxInlineOutputChars: null,
@@ -1173,6 +1240,7 @@ describe("events", () => {
         sequence: 3,
         type: "turn/started",
         ...createTurnEventFields({ turnId: "turn-subagent" }),
+        parentToolCallId: "call-subagent",
         data: JSON.stringify({ parentToolCallId: "call-subagent" }),
       },
       {
@@ -1346,8 +1414,6 @@ describe("events", () => {
       { rowId: `${thread.id}:user-seed:1`, sequence: 1 },
     ]);
 
-    // The timeline pagination helpers select only the requested page of
-    // anchors, so latest/older page resolution never enumerates a whole thread.
     expect(
       listTimelineSegmentAnchorsDescending(db, {
         limit: 3,
@@ -1377,24 +1443,6 @@ describe("events", () => {
         threadId: thread.id,
       }),
     ).toEqual({ rowId: `${thread.id}:user-seed:2`, sequence: 2 });
-    expect(
-      findTimelineSegmentAnchorSequenceAfter(db, {
-        sequence: 7,
-        threadId: thread.id,
-      }),
-    ).toBe(8);
-    expect(
-      findTimelineSegmentAnchorSequenceAfter(db, {
-        sequence: 10,
-        threadId: thread.id,
-      }),
-    ).toBe(11);
-    expect(
-      findTimelineSegmentAnchorSequenceAfter(db, {
-        sequence: 11,
-        threadId: thread.id,
-      }),
-    ).toBeUndefined();
   });
 
   it("loads timeline event windows with sequence bounds and exclusions", () => {
@@ -1485,6 +1533,7 @@ describe("events", () => {
       type: "item/backgroundTask/progress" as const,
       itemId,
       itemKind: "backgroundTask" as const,
+      parentToolCallId: null,
       data: taskData(itemId, "pending"),
     });
 
@@ -1496,6 +1545,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-1", "pending"),
       },
       {
@@ -1505,10 +1555,9 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-2",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-2", "pending"),
       },
-      // wf-1: 3 and 4 are superseded by 6; wf-2: 5 is superseded by the
-      // completed row at 7, which is not a progress row and stays.
       progress(3, "task:wf-1"),
       progress(4, "task:wf-1"),
       progress(5, "task:wf-2"),
@@ -1520,6 +1569,7 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-2",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-2", "completed"),
       },
     ]);
@@ -1531,8 +1581,6 @@ describe("events", () => {
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([1, 2, 6, 7]);
-    // A window that ends before the superseding row still skips the
-    // superseded ones: the timeline only ever needs the newest snapshot.
     expect(
       listStoredTimelineWindowEventRows(db, {
         beforeSequence: 6,
@@ -1547,7 +1595,6 @@ describe("events", () => {
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([1, 2, 6, 7]);
-    // The byte floor walks the same rows the window read returns.
     expect(
       findStoredTimelineWindowByteBudgetFloor(db, {
         maxDataBytes: 1_000_000,
@@ -1576,8 +1623,6 @@ describe("events", () => {
         threadId: thread.id,
       }).reduce((bytes, row) => bytes + Buffer.byteLength(row.data), 0),
     );
-    // The event-count floor counts the same rows: a budget of 2 lands on the
-    // second-newest surviving row (6), not on a superseded snapshot (5).
     expect(
       findTimelineWindowBudgetFloorSequence(db, {
         eventBudget: 2,
@@ -1592,7 +1637,6 @@ describe("events", () => {
         threadId: thread.id,
       }),
     ).toBe(6);
-    // The conversation outline reads the structural task rows too.
     expect(
       listStoredConversationOutlineEventRows(db, {
         threadId: thread.id,
@@ -1723,7 +1767,7 @@ describe("events", () => {
     ).toEqual([4]);
   });
 
-  it("lists only the latest goal event row per thread", () => {
+  it("lists only the latest goal-state row per thread, legacy and extension rows alike", () => {
     const { db, project, thread } = setup();
     const otherThread = createThread(db, noopNotifier, {
       projectId: project.id,
@@ -1767,20 +1811,46 @@ describe("events", () => {
           timeUsedSeconds: 2,
         }),
       },
+      {
+        threadId: otherThread.id,
+        sequence: 2,
+        type: "thread/extensionState/updated",
+        ...threadEventFields,
+        providerThreadId: "provider-thread-2",
+        data: JSON.stringify({
+          kind: "provider-codex/goal",
+          payload: {
+            objective: "Newer goal",
+            status: "active",
+            tokenBudget: null,
+            tokensUsed: 3,
+            timeUsedSeconds: 3,
+          },
+        }),
+      },
+      {
+        threadId: otherThread.id,
+        sequence: 3,
+        type: "thread/extensionState/updated",
+        ...threadEventFields,
+        providerThreadId: "provider-thread-2",
+        data: JSON.stringify({ kind: "other-plugin/widget", payload: {} }),
+      },
     ]);
 
     const rowsByThreadId = new Map(
-      listLatestGoalEventRowsByThreadIds(db, {
+      listLatestThreadStateEventRowsByThreadIds(db, {
         threadIds: [thread.id, otherThread.id, thread.id],
+        kind: "provider-codex/goal",
       }).map((row) => [row.threadId, row]),
     );
 
     expect(rowsByThreadId.get(thread.id)?.type).toBe("thread/goal/cleared");
     expect(rowsByThreadId.get(thread.id)?.sequence).toBe(2);
     expect(rowsByThreadId.get(otherThread.id)?.type).toBe(
-      "thread/goal/updated",
+      "thread/extensionState/updated",
     );
-    expect(rowsByThreadId.get(otherThread.id)?.sequence).toBe(1);
+    expect(rowsByThreadId.get(otherThread.id)?.sequence).toBe(2);
   });
 
   it("batches latest goal lookups above the SQLite variable limit", () => {
@@ -1790,7 +1860,12 @@ describe("events", () => {
       (_, index) => `thr_missing_goal_${index}`,
     );
 
-    expect(listLatestGoalEventRowsByThreadIds(db, { threadIds })).toEqual([]);
+    expect(
+      listLatestThreadStateEventRowsByThreadIds(db, {
+        threadIds,
+        kind: "provider-codex/goal",
+      }),
+    ).toEqual([]);
   });
 
   it("lists only open accepted turn inputs after the latest interruption", () => {
@@ -2310,6 +2385,7 @@ describe("events", () => {
         type: "turn/completed",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider_a",
           turnId: "turn_a",
@@ -2323,6 +2399,7 @@ describe("events", () => {
         type: "turn/completed",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider_b",
           turnId: "turn_b",
@@ -2363,6 +2440,7 @@ describe("events", () => {
         type: "turn/started",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider_active",
           turnId: "turn_active",
@@ -2376,6 +2454,7 @@ describe("events", () => {
         type: "turn/started",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider_done",
           turnId: "turn_done",
@@ -2389,6 +2468,7 @@ describe("events", () => {
         type: "turn/completed",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider_done",
           turnId: "turn_done",
@@ -2403,6 +2483,7 @@ describe("events", () => {
         type: "turn/started",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: null,
           turnId: "turn_no_provider",
@@ -2455,6 +2536,7 @@ describe("events", () => {
         type: "turn/started",
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider_thr_1",
           turnId: "root_turn",
@@ -2468,6 +2550,7 @@ describe("events", () => {
         type: "turn/started",
         itemId: null,
         itemKind: null,
+        parentToolCallId: "delegation-1",
         data: JSON.stringify({
           providerThreadId: "provider_thr_1",
           turnId: "child_turn",
@@ -2749,6 +2832,7 @@ describe("events", () => {
         sequence: 3,
         type: "turn/started",
         ...createTurnEventFields({ turnId: "turn-subagent" }),
+        parentToolCallId: "call-subagent",
         data: JSON.stringify({ parentToolCallId: "call-subagent" }),
       },
       {
@@ -2842,6 +2926,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "Hel" }),
       },
       {
@@ -2851,6 +2936,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "lo" }),
       },
       {
@@ -2860,6 +2946,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "!" }),
       },
       {
@@ -2869,6 +2956,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "msg-1",
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "msg-1",
@@ -2889,6 +2977,48 @@ describe("events", () => {
     ).toEqual([1, 4]);
   });
 
+  it("bounds each resolved delta prune pass", () => {
+    const { db, thread } = setup();
+    const deltas = Array.from({ length: 502 }, (_, index) => ({
+      threadId: thread.id,
+      sequence: index + 1,
+      scope: turnScope("turn-bounded-prune"),
+      type: "item/agentMessage/delta" as const,
+      itemId: "msg-bounded-prune",
+      itemKind: null,
+      parentToolCallId: null,
+      data: JSON.stringify({
+        itemId: "msg-bounded-prune",
+        delta: `chunk-${index}`,
+      }),
+    }));
+    insertEvents(db, noopNotifier, [
+      ...deltas,
+      {
+        threadId: thread.id,
+        sequence: 503,
+        scope: turnScope("turn-bounded-prune"),
+        type: "item/completed",
+        itemId: "msg-bounded-prune",
+        itemKind: "agentMessage",
+        parentToolCallId: null,
+        data: JSON.stringify({
+          item: {
+            id: "msg-bounded-prune",
+            type: "agentMessage",
+            text: "Complete response",
+          },
+        }),
+      },
+    ]);
+
+    expect(pruneResolvedItemDeltas(db, { threadId: thread.id })).toBe(500);
+    expect(pruneResolvedItemDeltas(db, { threadId: thread.id })).toBe(1);
+    expect(
+      listEvents(db, { threadId: thread.id }).map((event) => event.sequence),
+    ).toEqual([1, 503]);
+  });
+
   it("keeps unresolved assistant deltas", () => {
     const { db, thread } = setup();
 
@@ -2900,6 +3030,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "Hel" }),
       },
       {
@@ -2909,6 +3040,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "lo" }),
       },
     ]);
@@ -2934,6 +3066,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "Hel" }),
       },
       {
@@ -2943,6 +3076,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "lo" }),
       },
       {
@@ -2952,6 +3086,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "msg-1",
         itemKind: "agentMessage",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "msg-1",
@@ -2967,6 +3102,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "New " }),
       },
       {
@@ -2976,6 +3112,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "msg-1", delta: "answer" }),
       },
     ]);
@@ -3001,6 +3138,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: "tool-1",
         data: JSON.stringify({
           itemId: "msg-1",
           parentToolCallId: "tool-1",
@@ -3014,6 +3152,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: "tool-1",
         data: JSON.stringify({
           itemId: "msg-1",
           parentToolCallId: "tool-1",
@@ -3027,6 +3166,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "msg-1",
         itemKind: "agentMessage",
+        parentToolCallId: "tool-1",
         data: JSON.stringify({
           item: {
             id: "msg-1",
@@ -3043,6 +3183,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: "tool-2",
         data: JSON.stringify({
           itemId: "msg-1",
           parentToolCallId: "tool-2",
@@ -3056,6 +3197,7 @@ describe("events", () => {
         type: "item/agentMessage/delta",
         itemId: "msg-1",
         itemKind: null,
+        parentToolCallId: "tool-2",
         data: JSON.stringify({
           itemId: "msg-1",
           parentToolCallId: "tool-2",
@@ -3085,6 +3227,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "Hel" }),
       },
       {
@@ -3094,6 +3237,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "lo" }),
       },
       {
@@ -3103,6 +3247,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "cmd-1",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "cmd-1",
@@ -3139,6 +3284,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "Hel" }),
       },
       {
@@ -3148,6 +3294,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "lo" }),
       },
       {
@@ -3157,6 +3304,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "cmd-1",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "cmd-1",
@@ -3192,6 +3340,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "Hel" }),
       },
       {
@@ -3201,6 +3350,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "lo" }),
       },
       {
@@ -3210,6 +3360,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "cmd-1",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "cmd-1",
@@ -3230,6 +3381,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "New " }),
       },
       {
@@ -3239,6 +3391,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "cmd-1", delta: "output" }),
       },
     ]);
@@ -3264,6 +3417,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: "tool-1",
         data: JSON.stringify({
           itemId: "cmd-1",
           parentToolCallId: "tool-1",
@@ -3277,6 +3431,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: "tool-1",
         data: JSON.stringify({
           itemId: "cmd-1",
           parentToolCallId: "tool-1",
@@ -3290,6 +3445,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "cmd-1",
         itemKind: "commandExecution",
+        parentToolCallId: "tool-1",
         data: JSON.stringify({
           item: {
             id: "cmd-1",
@@ -3311,6 +3467,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: "tool-2",
         data: JSON.stringify({
           itemId: "cmd-1",
           parentToolCallId: "tool-2",
@@ -3324,6 +3481,7 @@ describe("events", () => {
         type: "item/commandExecution/outputDelta",
         itemId: "cmd-1",
         itemKind: null,
+        parentToolCallId: "tool-2",
         data: JSON.stringify({
           itemId: "cmd-1",
           parentToolCallId: "tool-2",
@@ -3353,6 +3511,7 @@ describe("events", () => {
         type: "item/reasoning/textDelta",
         itemId: "reasoning-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "reasoning-1", delta: "raw " }),
       },
       {
@@ -3362,6 +3521,7 @@ describe("events", () => {
         type: "item/reasoning/textDelta",
         itemId: "reasoning-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "reasoning-1", delta: "content" }),
       },
       {
@@ -3371,6 +3531,7 @@ describe("events", () => {
         type: "item/reasoning/summaryTextDelta",
         itemId: "reasoning-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "reasoning-1", delta: "summary " }),
       },
       {
@@ -3380,6 +3541,7 @@ describe("events", () => {
         type: "item/reasoning/summaryTextDelta",
         itemId: "reasoning-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "reasoning-1", delta: "content" }),
       },
       {
@@ -3389,6 +3551,7 @@ describe("events", () => {
         type: "item/completed",
         itemId: "reasoning-1",
         itemKind: "reasoning",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             id: "reasoning-1",
@@ -3421,6 +3584,7 @@ describe("events", () => {
         type: "item/reasoning/textDelta",
         itemId: "reasoning-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "reasoning-1", delta: "raw " }),
       },
       {
@@ -3430,6 +3594,7 @@ describe("events", () => {
         type: "item/reasoning/textDelta",
         itemId: "reasoning-1",
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ itemId: "reasoning-1", delta: "content" }),
       },
     ]);
@@ -3468,6 +3633,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: progressData("running"),
       },
       {
@@ -3477,6 +3643,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: progressData("running"),
       },
       {
@@ -3486,6 +3653,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: progressData("running"),
       },
       {
@@ -3495,6 +3663,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: progressData("running"),
       },
     ]);
@@ -3533,6 +3702,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: itemData("running"),
       },
       {
@@ -3542,6 +3712,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: itemData("running"),
       },
       {
@@ -3551,6 +3722,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: itemData("running"),
       },
       {
@@ -3560,6 +3732,7 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: itemData("completed"),
       },
     ]);
@@ -3598,6 +3771,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-1"),
       },
       {
@@ -3607,6 +3781,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-2",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-2"),
       },
       {
@@ -3616,6 +3791,7 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-1"),
       },
     ]);
@@ -3654,6 +3830,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-1", "running"),
       },
       {
@@ -3663,6 +3840,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-1", "running"),
       },
       {
@@ -3672,6 +3850,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-2",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-2", "running"),
       },
       {
@@ -3681,9 +3860,9 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-1",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-1", "completed"),
       },
-      // Unrelated item id: must not appear in the result.
       {
         threadId: thread.id,
         sequence: 5,
@@ -3691,6 +3870,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-other",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-other", "running"),
       },
     ]);
@@ -3760,6 +3940,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-start-only",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-start-only",
           itemStatus: "pending",
@@ -3774,6 +3955,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-progress",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-progress",
           itemStatus: "pending",
@@ -3788,6 +3970,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-progress",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-progress",
           itemStatus: "pending",
@@ -3802,6 +3985,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-terminal-progress",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-terminal-progress",
           itemStatus: "pending",
@@ -3816,6 +4000,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-terminal-progress",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-terminal-progress",
           itemStatus: "completed",
@@ -3830,6 +4015,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-completed",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-completed",
           itemStatus: "pending",
@@ -3844,6 +4030,7 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-completed",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-completed",
           itemStatus: "completed",
@@ -3858,6 +4045,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:cmd-open",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:cmd-open",
           itemStatus: "pending",
@@ -3872,6 +4060,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:cmd-open",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:cmd-open",
           itemStatus: "pending",
@@ -3886,6 +4075,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:other-thread",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:other-thread",
           itemStatus: "pending",
@@ -3954,6 +4144,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-active",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-active",
           itemStatus: "pending",
@@ -3968,6 +4159,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-active",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-active",
           itemStatus: "pending",
@@ -3982,6 +4174,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-terminal-progress",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-terminal-progress",
           itemStatus: "pending",
@@ -3996,6 +4189,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-terminal-progress",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-terminal-progress",
           itemStatus: "completed",
@@ -4010,6 +4204,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-completed",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-completed",
           itemStatus: "pending",
@@ -4024,6 +4219,7 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-completed",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-completed",
           itemStatus: "completed",
@@ -4038,6 +4234,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-skip-transcript",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:wf-skip-transcript",
           itemStatus: "pending",
@@ -4053,6 +4250,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:cmd-active",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:cmd-active",
           itemStatus: "pending",
@@ -4067,6 +4265,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:agent-active",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:agent-active",
           itemStatus: "pending",
@@ -4081,6 +4280,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:subagent-active",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData({
           itemId: "task:subagent-active",
           itemStatus: "pending",
@@ -4143,6 +4343,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:workflow",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:workflow", LOCAL_WORKFLOW_TASK_TYPE),
       },
       {
@@ -4152,6 +4353,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:command",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:command", LOCAL_BASH_TASK_TYPE),
       },
     ]);
@@ -4171,8 +4373,7 @@ describe("events", () => {
   });
 
   it("lists the latest lifecycle row per open backgroundTask item on a host", () => {
-    const db = createConnection(":memory:");
-    migrate(db);
+    const db = createMigratedConnection();
     const host = upsertHost(db, noopNotifier, {
       name: "task-host",
       type: "persistent",
@@ -4214,6 +4415,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-open",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-open", "running"),
       },
       {
@@ -4224,6 +4426,7 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-open",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-open", "running"),
       },
       {
@@ -4234,9 +4437,9 @@ describe("events", () => {
         type: "item/backgroundTask/progress",
         itemId: "task:wf-open",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-open", "paused"),
       },
-      // Settled item: excluded entirely.
       {
         threadId: thread.id,
         environmentId: environment.id,
@@ -4245,6 +4448,7 @@ describe("events", () => {
         type: "item/started",
         itemId: "task:wf-done",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-done", "running"),
       },
       {
@@ -4255,6 +4459,7 @@ describe("events", () => {
         type: "item/backgroundTask/completed",
         itemId: "task:wf-done",
         itemKind: "backgroundTask",
+        parentToolCallId: null,
         data: taskData("task:wf-done", "completed"),
       },
     ]);
@@ -4268,7 +4473,6 @@ describe("events", () => {
       threadId: thread.id,
       environmentId: environment.id,
     });
-    // The latest snapshot wins: sequence 3 carries the paused status.
     expect(JSON.parse(rows[0]!.data)).toMatchObject({
       item: { taskStatus: "paused" },
     });
@@ -4422,6 +4626,7 @@ describe("timeline read-boundary output truncation", () => {
         ...threadEventFields,
         itemId: "cmd-bytes",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         data: JSON.stringify({
           note: "Unicode: 🐝",
           item: {
@@ -4461,6 +4666,7 @@ describe("timeline read-boundary output truncation", () => {
         ...threadEventFields,
         itemId: null,
         itemKind: null,
+        parentToolCallId: null,
         data: JSON.stringify({ message: "x".repeat(messageChars) }),
       })),
     );
@@ -4508,6 +4714,44 @@ describe("timeline read-boundary output truncation", () => {
     }));
   });
 
+  it("bounds the byte-total preflight before using the early-stopping iterator", () => {
+    const { db, thread } = setup();
+    const validData = JSON.stringify({ message: "valid" });
+    insertEvents(
+      db,
+      noopNotifier,
+      Array.from(
+        { length: STORED_TIMELINE_BYTE_PREFLIGHT_EVENT_LIMIT + 2 },
+        (_, index) => ({
+          threadId: thread.id,
+          sequence: index + 1,
+          type: "system/error" as const,
+          ...threadEventFields,
+          data: validData,
+        }),
+      ),
+    );
+    db.$client
+      .prepare("UPDATE events SET data = ? WHERE thread_id = ? AND sequence = 1")
+      .run(`{"item":{"resultText":"${"x".repeat(1_100)}`, thread.id);
+
+    expect(
+      findStoredTimelineWindowByteBudgetFloor(db, {
+        maxDataBytes: 1,
+        maxInlineOutputChars: 1_000,
+        sequenceStart: 1,
+        threadId: thread.id,
+      }),
+    ).toEqual({
+      createdAt: expect.any(Number),
+      eventDataBytes: Buffer.byteLength(validData),
+      hasOlderRows: true,
+      kind: "single-event-too-large",
+      sequenceStart: STORED_TIMELINE_BYTE_PREFLIGHT_EVENT_LIMIT + 2,
+      turnId: null,
+    });
+  });
+
   it.each(["floor", "single-event-too-large"] as const)(
     "releases its statement after a %s byte-cut result",
     (expectedKind) => {
@@ -4522,6 +4766,7 @@ describe("timeline read-boundary output truncation", () => {
           ...threadEventFields,
           itemId: null,
           itemKind: null,
+          parentToolCallId: null,
           data: JSON.stringify({ message: "x".repeat(messageChars) }),
         })),
       );
@@ -4551,6 +4796,7 @@ describe("timeline read-boundary output truncation", () => {
           ...threadEventFields,
           itemId: null,
           itemKind: null,
+          parentToolCallId: null,
           data: JSON.stringify({ message: "write after byte-cut read" }),
         },
       ]);
@@ -4569,6 +4815,7 @@ describe("timeline read-boundary output truncation", () => {
         ...threadEventFields,
         itemId: "cmd-1",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider-root",
           item: {
@@ -4591,8 +4838,6 @@ describe("timeline read-boundary output truncation", () => {
     const cappedItem = capped.item as Record<string, unknown>;
 
     expect(storedItem.aggregatedOutput).toBe(output);
-    // Byte-identical to what the response-level truncator would produce, so a
-    // reader cannot tell which layer shortened the value.
     expect(cappedItem.aggregatedOutput).toBe(
       `${"x".repeat(maxInlineOutputChars)}\n\u2026[2,345 more characters truncated]`,
     );
@@ -4604,8 +4849,6 @@ describe("timeline read-boundary output truncation", () => {
 
   it("leaves a non-text tool result untouched", () => {
     const { db, thread } = setup();
-    // `item.result` is typed `unknown`. Truncating an object would rewrite it
-    // into a string and corrupt the payload, so only text values are eligible.
     const result = { rows: "y".repeat(maxInlineOutputChars + 500) };
     insertEvents(db, noopNotifier, [
       {
@@ -4615,6 +4858,7 @@ describe("timeline read-boundary output truncation", () => {
         ...threadEventFields,
         itemId: "tool-1",
         itemKind: "toolCall",
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider-root",
           item: {
@@ -4642,6 +4886,7 @@ describe("timeline read-boundary output truncation", () => {
         ...threadEventFields,
         itemId: "cmd-2",
         itemKind: "commandExecution",
+        parentToolCallId: null,
         data: JSON.stringify({
           providerThreadId: "provider-root",
           item: {
@@ -4739,9 +4984,6 @@ describe("findUnfinishedTurnCoveringSequence", () => {
 
   it("refuses a cut that lands outside any turn", () => {
     const { db, thread } = setup();
-    // A turn finishes, then thread-scoped background-task traffic continues past
-    // it. Asking only "did any turn finish after here" would answer "no" for a
-    // floor in this region and invent an in-turn cut where there is no turn.
     insertEvents(db, noopNotifier, [
       {
         threadId: thread.id,
@@ -4816,6 +5058,7 @@ describe("hasParentedEventCrossingSequence", () => {
         ...createTurnEventFields({ turnId: "turn-open" }),
         itemId: "parent-call",
         itemKind: "toolCall",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             type: "toolCall",
@@ -4834,6 +5077,7 @@ describe("hasParentedEventCrossingSequence", () => {
         ...createTurnEventFields({ turnId: "child-turn" }),
         itemId: "child-message",
         itemKind: "agentMessage",
+        parentToolCallId: "parent-call",
         data: JSON.stringify({
           item: {
             type: "agentMessage",
@@ -4869,6 +5113,7 @@ describe("hasParentedEventCrossingSequence", () => {
         ...createTurnEventFields({ turnId: "turn-open" }),
         itemId: "parent-call",
         itemKind: "toolCall",
+        parentToolCallId: null,
         data: JSON.stringify({
           item: {
             type: "toolCall",
@@ -4887,6 +5132,7 @@ describe("hasParentedEventCrossingSequence", () => {
         ...createTurnEventFields({ turnId: "child-turn" }),
         itemId: "child-message",
         itemKind: "agentMessage",
+        parentToolCallId: "parent-call",
         data: JSON.stringify({
           item: {
             type: "agentMessage",

@@ -1,5 +1,6 @@
 import type { IconSvgElement } from "@hugeicons/react";
 import {
+  AiBrowserIcon,
   AiContentGenerator01Icon,
   ArrowDown02Icon,
   ArrowDownDoubleIcon,
@@ -24,6 +25,8 @@ import {
   CircleArrowShrink01Icon,
   CleanIcon,
   Clock01Icon,
+  CloudIcon,
+  CloudOffIcon,
   Coffee02Icon,
   CollapseIcon,
   DashedLine02Icon,
@@ -39,6 +42,7 @@ import {
   FileEmpty02Icon,
   FileQuestionMarkIcon,
   Folder02Icon,
+  FolderEditIcon,
   FolderRemoveIcon,
   GitBranchIcon,
   GitForkIcon,
@@ -72,12 +76,14 @@ import {
   PuzzleIcon,
   Refresh01Icon,
   RepeatIcon,
+  SecurityCheckIcon,
   SentIcon,
   SidebarBottomIcon,
   SidebarRightIcon,
   SmartPhone01Icon,
   Sorting01Icon,
   SquareIcon,
+  SquareUnlock02Icon,
   StarIcon,
   TestTube01Icon,
   TextWrapIcon,
@@ -91,15 +97,6 @@ import {
 } from "@hugeicons/core-free-icons";
 import { type ExtendedIconMap, registerExtendedIcons } from "./icon-registry";
 
-// Extended glyph registry: every named icon the shell does not need before
-// first paint. `./icon` keeps only the core map on the boot path; this module
-// publishes the rest into the registry when it evaluates. Route chunks that
-// render extended icons import it statically (so their icons never flash), and
-// `Icon` loads it on demand for anything else.
-
-// The free hugeicons set ships no artist-palette glyph (its `Palette` export
-// is a pen nib), so this inlines the stroke-rounded palette artwork in the
-// same element format the set uses.
 const PaletteStrokeRoundedIcon: IconSvgElement = [
   [
     "path",
@@ -183,6 +180,7 @@ const PaletteStrokeRoundedIcon: IconSvgElement = [
 ];
 
 export const EXTENDED_ICON_MAP: ExtendedIconMap = {
+  AiBrowser: AiBrowserIcon,
   AiContentGenerator01: AiContentGenerator01Icon,
   AlignLeft: Menu02Icon,
   AppWindow: BrowserIcon,
@@ -207,6 +205,8 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   CircleArrowShrink: CircleArrowShrink01Icon,
   Clean: CleanIcon,
   Clock: Clock01Icon,
+  Cloud: CloudIcon,
+  CloudOff: CloudOffIcon,
   Coffee: Coffee02Icon,
   Columns2: LayoutTwoColumnIcon,
   CornerDownLeft: ArrowMoveDownLeftIcon,
@@ -228,6 +228,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   FileQuestion: FileQuestionMarkIcon,
   FileText: File01Icon,
   FolderOpen: Folder02Icon,
+  FolderEdit: FolderEditIcon,
   FolderMinus: FolderRemoveIcon,
   Fork: GitForkIcon,
   GitBranch: GitBranchIcon,
@@ -260,6 +261,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   Plus: PlusSignIcon,
   Puzzle: PuzzleIcon,
   Repeat: RepeatIcon,
+  SecurityCheck: SecurityCheckIcon,
   RotateCcw: Refresh01Icon,
   Rows2: LayoutTwoRowIcon,
   Sent: SentIcon,
@@ -267,6 +269,7 @@ export const EXTENDED_ICON_MAP: ExtendedIconMap = {
   Smartphone: SmartPhone01Icon,
   Sort: Sorting01Icon,
   Square: SquareIcon,
+  SquareUnlock02: SquareUnlock02Icon,
   Star: StarIcon,
   TextWrap: TextWrapIcon,
   TimeSchedule: TimeScheduleIcon,

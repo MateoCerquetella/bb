@@ -1,4 +1,8 @@
-import type { JsonObject, ThreadEventScope } from "@bb/domain";
+import type {
+  JsonObject,
+  ThreadEventItemPresentation,
+  ThreadEventScope,
+} from "@bb/domain";
 import type {
   EventProjectionApprovalLifecycleStatus,
   EventProjectionMessage,
@@ -31,6 +35,7 @@ import {
   findExecMessageInHistoryCells,
   flushActiveToolCell,
   isProviderExecutionMessage,
+  isWebActivityMessage,
   type ToolActivityCell,
   type ViewProviderExecutionMessage,
   type ViewWebActivityMessage,
@@ -71,6 +76,7 @@ interface RunningExecutionBase {
   completedAt: number | null;
   status: ViewProviderExecutionMessage["status"];
   outputBuffer: VisibleTextBuffer;
+  presentation?: ThreadEventItemPresentation;
 }
 
 interface PendingExecutionOutput {
@@ -101,14 +107,14 @@ interface RunningToolCallExecution extends RunningExecutionBase {
   kind: "tool-call";
   toolName: string | null;
   toolArgs: JsonObject | null;
-  statusLabels?: { pending: string; completed: string };
-  parsedIntents: EventProjectionToolParsedIntent[];
   approvalStatus: EventProjectionApprovalLifecycleStatus | null;
 }
 
 interface RunningDelegationExecution extends RunningExecutionBase {
   kind: "delegation";
   toolName: string | null;
+  childRef: string | null;
+  background: boolean;
   subagentType?: string;
   description?: string;
   model?: string;
@@ -128,7 +134,7 @@ export interface ToolActivityProjectionState {
   toolActivity: ToolActivityState;
 }
 
-export interface ToolActivityState {
+interface ToolActivityState {
   runningCallsById: Map<string, RunningExecCall>;
   pendingOutputsByCallId: Map<string, PendingExecutionOutput>;
   activeCell: ToolActivityCell | null;
@@ -144,7 +150,7 @@ interface MergeCallSummaryOptions {
   visibleOutput?: string;
 }
 
-export interface InterruptPendingToolActivityArgs {
+interface InterruptPendingToolActivityArgs {
   completedAt: number | null;
   turnIds?: ReadonlySet<string>;
 }
@@ -181,8 +187,6 @@ function mergeCallStatus(
   current: EventProjectionToolCallMessage["status"] | undefined,
   incoming: EventProjectionToolCallMessage["status"] | undefined,
 ): EventProjectionToolCallMessage["status"] | undefined {
-  // Lifecycle merge is monotonic: terminal call state sticks unless a later
-  // error wins.
   if (!incoming) return current;
   if (!current) return incoming;
   if (incoming === "error") return "error";
@@ -294,6 +298,7 @@ function createRunningExecutionBase({
     ...(incoming.parentToolCallId
       ? { parentToolCallId: incoming.parentToolCallId }
       : {}),
+    ...(incoming.presentation ? { presentation: incoming.presentation } : {}),
     output: getVisibleTextBufferText(outputBuffer) ?? "",
     completedAt: incoming.completedAt ?? null,
     status: incoming.status ?? "pending",
@@ -336,10 +341,6 @@ function createRunningExecCall(
         kind: "tool-call",
         toolName: incoming.toolName ?? null,
         toolArgs: incoming.toolArgs ?? null,
-        ...(incoming.statusLabels
-          ? { statusLabels: incoming.statusLabels }
-          : {}),
-        parsedIntents: incoming.parsedIntents ?? [],
         approvalStatus: incoming.approvalStatus ?? null,
       };
     case "delegation":
@@ -347,6 +348,8 @@ function createRunningExecCall(
         ...base,
         kind: "delegation",
         toolName: incoming.toolName ?? null,
+        childRef: incoming.childRef ?? null,
+        background: incoming.background ?? false,
         subagentType: incoming.subagentType,
         description: incoming.description,
         model: incoming.model,
@@ -375,22 +378,20 @@ interface CommandExecutionFieldsSource {
 
 interface ToolCallExecutionFieldsTarget {
   approvalStatus: EventProjectionApprovalLifecycleStatus | null;
-  parsedIntents: EventProjectionToolParsedIntent[];
   toolArgs: JsonObject | null;
   toolName: string | null;
-  statusLabels?: { pending: string; completed: string };
 }
 
 interface ToolCallExecutionFieldsSource {
   approvalStatus?: EventProjectionApprovalLifecycleStatus | null;
-  parsedIntents?: EventProjectionToolParsedIntent[];
   status?: EventProjectionToolCallMessage["status"];
   toolArgs?: JsonObject | null;
   toolName?: string | null;
-  statusLabels?: { pending: string; completed: string };
 }
 
 interface DelegationExecutionFieldsTarget {
+  background: boolean;
+  childRef: string | null;
   description?: string;
   model?: string;
   subagentType?: string;
@@ -398,10 +399,29 @@ interface DelegationExecutionFieldsTarget {
 }
 
 interface DelegationExecutionFieldsSource {
+  background?: boolean;
+  childRef?: string | null;
   description?: string;
   model?: string;
   subagentType?: string;
   toolName?: string | null;
+}
+
+interface PresentedExecutionFieldsTarget {
+  presentation?: ThreadEventItemPresentation;
+}
+
+interface PresentedExecutionFieldsSource {
+  presentation?: ThreadEventItemPresentation;
+}
+
+function mergePresentation(
+  target: PresentedExecutionFieldsTarget,
+  incoming: PresentedExecutionFieldsSource,
+): void {
+  if (incoming.presentation) {
+    target.presentation = incoming.presentation;
+  }
 }
 
 function mergeCommandExecutionFields(
@@ -436,12 +456,6 @@ function mergeToolCallExecutionFields(
   if (incoming.toolArgs && !target.toolArgs) {
     target.toolArgs = incoming.toolArgs;
   }
-  if (incoming.statusLabels && !target.statusLabels)
-    target.statusLabels = incoming.statusLabels;
-  target.parsedIntents = chooseParsedIntents(
-    target.parsedIntents,
-    incoming.parsedIntents ?? [],
-  );
   target.approvalStatus = applyApprovalStatusDelta(
     target.approvalStatus,
     buildApprovalStatusDelta(incoming.approvalStatus, incoming.status),
@@ -455,10 +469,19 @@ function mergeDelegationExecutionFields(
   if (incoming.toolName && !target.toolName) {
     target.toolName = incoming.toolName;
   }
+  if (incoming.childRef && !target.childRef) {
+    target.childRef = incoming.childRef;
+  }
+  if (incoming.background === true) {
+    target.background = true;
+  }
   if (incoming.subagentType && !target.subagentType) {
     target.subagentType = incoming.subagentType;
   }
-  if (incoming.description && !target.description) {
+  if (
+    incoming.description &&
+    (!target.description || incoming.childRef !== undefined)
+  ) {
     target.description = incoming.description;
   }
   if (incoming.model && !target.model) {
@@ -485,6 +508,7 @@ function mergeRunningExecutionMetadata(
   existing: RunningExecCall,
   incoming: ProviderExecutionUpdate,
 ): void {
+  mergePresentation(existing, incoming);
   switch (incoming.kind) {
     case "command":
       if (existing.kind !== "command") return;
@@ -515,23 +539,12 @@ function upsertRunningExecCall(
     return createRunningExecCall(incoming, meta, threadId, scopeFields.scope);
   }
 
-  // Merge strategy per field:
-  //   "keep first"  — set once from the first event that provides it
-  //   "keep latest" — provider begin/end can revise command text
-  //   "keep latest non-null" — duration from authoritative terminal events
-  //   "keep longest" — begin events carry partial output, end events carry full output
-  //   "keep terminal" — first terminal state wins unless a later error arrives
-
-  // keep first: provider background work can outlive its spawning turn, and a
-  // late terminal event for the same call id may arrive scoped to a later turn.
-  // Preserve the original placement while still merging terminal state/output.
   mergeRunningExecutionMetadata(existing, incoming);
   mergeExecutionCompletion(existing, incoming);
   if (!existing.parentToolCallId && incoming.parentToolCallId) {
     existing.parentToolCallId = incoming.parentToolCallId;
   }
 
-  // keep longest (begin has partial, end has full)
   if (incoming.output && incoming.output.length > 0) {
     if (
       isTerminalToolCallStatus(incoming.status) ||
@@ -546,7 +559,6 @@ function upsertRunningExecCall(
     }
   }
 
-  // keep latest
   existing.threadId = threadId;
   existing.status =
     mergeCallStatus(existing.status, incoming.status) ?? "pending";
@@ -664,8 +676,6 @@ function reconcilePendingExecutionOutput(
     return;
   }
 
-  // Output deltas can arrive before begin; when the begin snapshot is a
-  // divergent absolute snapshot, preserve both in event order.
   const reconciledText = pendingText.includes(callText)
     ? pendingText
     : `${pendingText}${callText}`;
@@ -713,6 +723,10 @@ function interruptPendingToolMessage(
     case "web-search":
     case "web-fetch":
     case "image-view":
+    case "file-read":
+    case "search":
+    case "plan-steps":
+    case "extension":
       if (message.status === "pending") {
         message.status = "interrupted";
         message.completedAt = completedAt;
@@ -724,12 +738,7 @@ function interruptPendingToolMessage(
 function isInterruptibleToolMessage(
   message: EventProjectionMessage,
 ): message is InterruptibleToolMessage {
-  return (
-    isProviderExecutionMessage(message) ||
-    message.kind === "web-search" ||
-    message.kind === "web-fetch" ||
-    message.kind === "image-view"
-  );
+  return isProviderExecutionMessage(message) || isWebActivityMessage(message);
 }
 
 type ExecutionMergeTarget = RunningExecCall | ViewProviderExecutionMessage;
@@ -772,6 +781,7 @@ function mergeExecutionSummary(
         `Cannot merge ${target.kind} with ${incoming.kind} for call ${incoming.callId}`,
       );
     }
+    mergePresentation(target, incoming);
     switch (incoming.kind) {
       case "command":
         if (target.kind !== "command") return;
@@ -908,6 +918,7 @@ function createExecMessage(
     ...(call.parentToolCallId
       ? { parentToolCallId: call.parentToolCallId }
       : {}),
+    ...(call.presentation ? { presentation: call.presentation } : {}),
     callId: call.callId,
     output: call.output,
     completedAt: call.completedAt,
@@ -931,7 +942,9 @@ function createExecMessage(
     return {
       ...base,
       kind: "delegation",
-      toolName: call.toolName ?? "Agent",
+      toolName: call.toolName ?? "delegation",
+      childRef: call.childRef,
+      background: call.background,
       subagentType: call.subagentType,
       description: call.description,
       model: call.model,
@@ -944,8 +957,6 @@ function createExecMessage(
     kind: "tool-call",
     toolName: call.toolName ?? "tool",
     toolArgs: call.toolArgs,
-    ...(call.statusLabels ? { statusLabels: call.statusLabels } : {}),
-    parsedIntents: call.parsedIntents,
     approvalStatus: call.approvalStatus,
   };
 }

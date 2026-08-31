@@ -77,11 +77,12 @@ function connectPlugin(
     app: { hasApp: false, bundle: null },
     logoUrl: null,
     logoDarkUrl: null,
+    providerIds: [],
+    icons: {},
     ...overrides,
   };
 }
 
-/** What the rpc dispatcher returns for any plugin that is not running. */
 function notRunningRpcError(status: string): BbHttpError {
   const message = `plugin "connect" is not running (status: ${status})`;
   return new BbHttpError({
@@ -109,8 +110,6 @@ describe("AddMachineDialog", () => {
       hostId: "host_new",
       expiresAt: Date.now() + 15 * 60 * 1000,
     });
-    // The connect serverUrl differs from the browser origin (bb viewed on
-    // localhost while paired through a tunnel) — the command must use it.
     vi.mocked(sdk.plugins.callRpc).mockResolvedValue({
       code: "mc_test456",
       expiresAt: Date.now() + 10 * 60 * 1000,
@@ -145,10 +144,16 @@ describe("AddMachineDialog", () => {
     expect(command.textContent).toContain("--server https://example.getbb.app");
     expect(command.textContent).toContain("--machine-code mc_test456");
     expect(command.textContent).not.toContain(window.location.origin);
-    expect(screen.getByText(/Code expires in \d+:\d{2}/)).toBeDefined();
+    expect(command.closest("[data-add-machine-command]")).not.toBeNull();
     expect(
-      screen.getByText("Waiting for the machine to connect…"),
+      screen.getByText(
+        /It installs bb and keeps the machine connected to this server/u,
+      ),
     ).toBeDefined();
+    expect(screen.getByText(/Code expires in \d+:\d{2}/)).toBeDefined();
+    const waiting = screen.getByText("Waiting for the machine to connect…");
+    expect(waiting).toBeDefined();
+    expect(waiting.parentElement?.className).not.toContain("border-border");
 
     fireEvent.click(screen.getByRole("button", { name: "Copy" }));
     await waitFor(() => {
@@ -156,7 +161,6 @@ describe("AddMachineDialog", () => {
       expect(screen.getByRole("button", { name: "Copied" })).toBeDefined();
     });
 
-    // Baseline host list is loaded before the new machine appears.
     await waitFor(() => {
       expect(queryClient.getQueryData<Host[]>(hostsQueryKey())).toHaveLength(1);
     });
@@ -211,8 +215,6 @@ describe("AddMachineDialog", () => {
       { wrapper },
     );
 
-    // No machine code (not connect-paired): the direct/LAN command uses the
-    // server-reported URL and carries no --machine-code flag.
     const command = await screen.findByText(/--join-code jc_test123/);
     expect(command.textContent).toContain(
       "curl -fL --progress-meter --connect-timeout 10 --max-time 60 --retry 2 http://direct.example.test:38886/install.sh",
@@ -226,7 +228,6 @@ describe("AddMachineDialog", () => {
       expect(queryClient.getQueryData<Host[]>(hostsQueryKey())).toHaveLength(2);
     });
 
-    // A pre-existing machine reconnecting is not the machine being added.
     act(() => {
       queryClient.setQueryData<Host[]>(hostsQueryKey(), [
         existingHost,
@@ -271,8 +272,6 @@ describe("AddMachineDialog", () => {
       { wrapper },
     );
 
-    // The desktop server listens on loopback only. Another machine cannot
-    // reach it, so a curl command against 127.0.0.1 can never work.
     const notice = await screen.findByRole("status");
     expect(notice.textContent).toContain(
       "Another machine cannot use this address.",
@@ -312,9 +311,6 @@ describe("AddMachineDialog", () => {
       { wrapper },
     );
 
-    // A 503 says nothing about pairing. Do not print a command that dials the
-    // new machine itself, and do not claim connect is unpaired: let the user
-    // retry.
     expect(
       await screen.findByText("Remote access isn't ready yet."),
     ).toBeDefined();
@@ -329,8 +325,6 @@ describe("AddMachineDialog", () => {
       hostId: "host_new",
       expiresAt: Date.now() + 15 * 60 * 1000,
     });
-    // A disabled plugin answers 503 like a plugin that is still starting;
-    // only the plugin list tells them apart.
     vi.mocked(sdk.plugins.callRpc).mockRejectedValue(
       notRunningRpcError("disabled"),
     );
@@ -351,7 +345,6 @@ describe("AddMachineDialog", () => {
       { wrapper },
     );
 
-    // Retrying cannot help: point at the plugin instead of a dead end.
     const notice = await screen.findByRole("status");
     expect(notice.textContent).toContain("The Connect plugin is disabled");
     const link = screen.getByRole("link", {

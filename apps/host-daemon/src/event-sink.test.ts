@@ -3,9 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import { createEventSink, type CreateEventSinkOptions } from "./event-sink.js";
 import { ServerResponseError } from "./server-client.js";
 
-// The server rejects an event it can never store — e.g. a turn-scoped event
-// whose turn/started it never saw — with a non-retryable 409. Reposting the
-// identical batch always produces the identical rejection.
 function permanentRejection(bodyMessage: string): ServerResponseError {
   return new ServerResponseError({
     action: "post events",
@@ -27,7 +24,6 @@ function createLogger(): CreateEventSinkOptions["logger"] {
 
 function acceptingPostEvents() {
   return vi.fn<CreateEventSinkOptions["postEvents"]>(async (events) => ({
-    kind: "accepted",
     acceptedEvents: events.map((event, eventIndex) => ({
       eventIndex,
       sequence: eventIndex + 1,
@@ -90,7 +86,6 @@ describe("event sink", () => {
       .fn<CreateEventSinkOptions["postEvents"]>()
       .mockRejectedValueOnce(new Error("response lost"))
       .mockImplementation(async (events) => ({
-        kind: "accepted",
         acceptedEvents: events.map((event, eventIndex) => ({
           eventIndex,
           sequence: eventIndex + 1,
@@ -117,17 +112,18 @@ describe("event sink", () => {
 
   it("drops rejected events with a warning without throwing", async () => {
     const logger = createLogger();
-    const postEvents = vi.fn<CreateEventSinkOptions["postEvents"]>(async () => ({
-      kind: "accepted",
-      acceptedEvents: [],
-      rejectedEvents: [
-        {
-          eventIndex: 0,
-          reason: "thread_not_owned_by_host",
-          threadId: "thr_1",
-        },
-      ],
-    }));
+    const postEvents = vi.fn<CreateEventSinkOptions["postEvents"]>(
+      async () => ({
+        acceptedEvents: [],
+        rejectedEvents: [
+          {
+            eventIndex: 0,
+            reason: "thread_not_owned_by_host",
+            threadId: "thr_1",
+          },
+        ],
+      }),
+    );
     const sink = createEventSink({
       isSessionOpen: () => true,
       logger,
@@ -139,16 +135,17 @@ describe("event sink", () => {
 
     expect(logger.warn).toHaveBeenCalledTimes(1);
 
-    // The rejected event is dropped, not retried.
     await sink.flush();
     expect(postEvents).toHaveBeenCalledTimes(1);
   });
 
-  it("warns once when the queue grows large while undelivered", () => {
+  it("warns once when a large queue remains undelivered", () => {
     const logger = createLogger();
+    let now = 0;
     const sink = createEventSink({
       isSessionOpen: () => false,
       logger,
+      now: () => now,
       postEvents: acceptingPostEvents(),
     });
 
@@ -157,12 +154,34 @@ describe("event sink", () => {
     }
     expect(logger.warn).not.toHaveBeenCalled();
 
-    // Crossing the depth threshold fires the tripwire once...
     sink.emit({ threadId: "thr_1", event: systemErrorEvent("thr_1") });
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    now = 5_000;
     sink.emit({ threadId: "thr_1", event: systemErrorEvent("thr_1") });
     expect(logger.warn).toHaveBeenCalledTimes(1);
     expect(logger.warn).toHaveBeenCalledWith(
-      expect.objectContaining({ queueDepth: 512 }),
+      expect.objectContaining({ queueAgeMs: 5_000, queueDepth: 513 }),
+      expect.any(String),
+    );
+  });
+
+  it("warns when even a small queue is stalled for thirty seconds", () => {
+    const logger = createLogger();
+    let now = 0;
+    const sink = createEventSink({
+      isSessionOpen: () => false,
+      logger,
+      now: () => now,
+      postEvents: acceptingPostEvents(),
+    });
+
+    sink.emit({ threadId: "thr_1", event: systemErrorEvent("thr_1") });
+    now = 30_000;
+    sink.emit({ threadId: "thr_1", event: systemErrorEvent("thr_1") });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ queueAgeMs: 30_000, queueDepth: 2 }),
       expect.any(String),
     );
   });
@@ -177,7 +196,6 @@ describe("event sink", () => {
           );
         }
         return {
-          kind: "accepted",
           acceptedEvents: events.map((event, eventIndex) => ({
             eventIndex,
             sequence: eventIndex + 1,
@@ -199,7 +217,6 @@ describe("event sink", () => {
     });
     await sink.flush();
 
-    // The poison event is gone, so a later flush has nothing left to send.
     postEvents.mockClear();
     await sink.flush();
     expect(postEvents).not.toHaveBeenCalled();
@@ -207,10 +224,6 @@ describe("event sink", () => {
   });
 
   it("delivers events queued behind a permanently rejected event", async () => {
-    // The production wedge: one undeliverable event sat at the head of the
-    // single host-wide queue, so every other thread's events piled up behind it
-    // and never reached the server. Every thread showed as stuck until the app
-    // was restarted.
     const delivered: string[] = [];
     const postEvents = vi.fn<CreateEventSinkOptions["postEvents"]>(
       async (events) => {
@@ -221,7 +234,6 @@ describe("event sink", () => {
         }
         delivered.push(...events.map((event) => event.threadId));
         return {
-          kind: "accepted",
           acceptedEvents: events.map((event, eventIndex) => ({
             eventIndex,
             sequence: eventIndex + 1,
@@ -238,9 +250,6 @@ describe("event sink", () => {
       postEvents,
     });
 
-    // One poison event, then healthy traffic from two other threads behind it,
-    // all accumulated while the session was closed — the same shape as the
-    // production queue at the moment the wedge began.
     sink.emit({
       threadId: "thr_poison",
       event: systemErrorEvent("thr_poison"),
@@ -257,7 +266,6 @@ describe("event sink", () => {
 
     expect(delivered).toEqual(["thr_a", "thr_b", "thr_a"]);
 
-    // Nothing is left behind: the queue fully drained.
     postEvents.mockClear();
     await sink.flush();
     expect(postEvents).not.toHaveBeenCalled();
@@ -277,7 +285,6 @@ describe("event sink", () => {
         }),
       )
       .mockImplementation(async (events) => ({
-        kind: "accepted",
         acceptedEvents: events.map((event, eventIndex) => ({
           eventIndex,
           sequence: eventIndex + 1,
@@ -302,10 +309,6 @@ describe("event sink", () => {
   });
 
   it("keeps events queued when the session, not the batch, is rejected", async () => {
-    // 401 inactive_session is a non-retryable 4xx that says nothing about the
-    // events — the daemon is about to reopen a session and deliver them. Only
-    // `invalid_request` means the payload itself is the problem, so these must
-    // survive rather than get bisected away one at a time.
     const postEvents = vi
       .fn<CreateEventSinkOptions["postEvents"]>()
       .mockRejectedValueOnce(
@@ -319,7 +322,6 @@ describe("event sink", () => {
         }),
       )
       .mockImplementation(async (events) => ({
-        kind: "accepted",
         acceptedEvents: events.map((event, eventIndex) => ({
           eventIndex,
           sequence: eventIndex + 1,
@@ -337,7 +339,6 @@ describe("event sink", () => {
     sink.emit({ threadId: "thr_2", event: systemErrorEvent("thr_2") });
     await sink.flush();
 
-    // Only the one failed attempt: no bisecting, nothing dropped.
     expect(postEvents).toHaveBeenCalledTimes(1);
 
     await sink.flush();

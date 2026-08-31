@@ -301,11 +301,7 @@ type ExpectedPluginsKey =
   | "token"
   | "updateSettings";
 
-type ExpectedPluginCatalogKey =
-  | "install"
-  | "installPlan"
-  | "search"
-  | "status";
+type ExpectedPluginCatalogKey = "install" | "installPlan" | "search" | "status";
 
 type ExpectedPluginMarketplacesKey = "add" | "list" | "refresh" | "remove";
 
@@ -323,6 +319,7 @@ type ExpectedProjectsKey =
   | "paths"
   | "promptHistory"
   | "reorder"
+  | "sidebarBootstrap"
   | "sources"
   | "update";
 
@@ -344,9 +341,7 @@ type ExpectedSystemKey =
   | "updateExperiments"
   | "updateGeneralSettings"
   | "updateKeyboardSettings"
-  | "onboardingAgents"
-  | "onboardingEvent"
-  | "onboardingRepos"
+  | "providerStates"
   | "usageLimits"
   | "version";
 
@@ -385,6 +380,7 @@ type ExpectedThreadsKey =
   | "spawn"
   | "stop"
   | "storageFiles"
+  | "storageLocation"
   | "storagePaths"
   | "tabs"
   | "timeline"
@@ -436,8 +432,6 @@ describe("SDK public type entrypoints", () => {
   });
 
   it("keeps the local guide area off the browser SDK instance", () => {
-    // The guide bundles the generated templates; the browser factory must not
-    // attach it so those bytes stay out of the web app's boot chunk.
     expectTypeOf<keyof BrowserRuntimeBbSdk>().toEqualTypeOf<
       Exclude<ExpectedBbSdkKey, "guide">
     >();

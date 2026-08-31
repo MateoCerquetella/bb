@@ -39,12 +39,17 @@ const REMOTE_HOST_NAME = "Sawyer Air";
 
 function createConnectFakeHost(options?: {
   remoteIdentity?: { label: string; baseDomain: string };
+  mobileApp?: boolean;
 }): FakePluginHost {
   return createFakePluginHost({
     pluginId: "connect",
     sdk: {
       system: {
-        config: async () => ({ primaryHostId: SERVER_HOST_ID }) as never,
+        config: async () =>
+          ({
+            primaryHostId: SERVER_HOST_ID,
+            experiments: { mobileApp: options?.mobileApp ?? true },
+          }) as never,
       },
       hosts: {
         get: async ({ hostId }: { hostId: string }) => {
@@ -453,8 +458,6 @@ describe("ShareRegistry", () => {
     expect(registry.snapshot()).toEqual([
       expect.objectContaining({ hostId: "server", port: 3000 }),
     ]);
-    // Idempotent re-expose after the server host resolves must replace the
-    // placeholder row, not sit beside it.
     await registry.add(3000, {
       id: SERVER_HOST_ID,
       name: SERVER_HOST_NAME,
@@ -504,7 +507,6 @@ describe("ShareRegistry", () => {
     await registry.load();
     expect(registry.hasServerPort(3000)).toBe(true);
     await registry.declareMachineShares(() => true);
-    // The stored entry gains the concrete server host id and canonical key.
     expect(kv.get(SHARES_KV_KEY)).toEqual({
       [`${SERVER_HOST_ID}:3000`]: {
         hostId: SERVER_HOST_ID,
@@ -782,7 +784,6 @@ describe("ConnectTunnel share activation", () => {
       hosts: pluginBb.hosts,
       hostResolver: new ShareHostResolver(() => pluginBb.sdk),
       getLoopbackBaseUrl: () => "http://127.0.0.1:38886",
-      // disconnect() cleared the pairing but kept the share kv.
       getCredential: () => null,
       log: pluginBb.log,
     });
@@ -828,10 +829,6 @@ describe("isBareBbRealtimeWs", () => {
     expect(isBareBbRealtimeWs("/api", undefined)).toBe(false);
   });
 });
-
-// ---------------------------------------------------------------------------
-// TunnelSession routing against two ephemeral local origins
-// ---------------------------------------------------------------------------
 
 async function listen(
   handler: (
@@ -925,7 +922,6 @@ describe("TunnelSession routing", () => {
     });
     await waitForOpen(client);
     const relay = await relayReady;
-    // Session replies travel client → relay; collect on the relay side.
     const frames = collectFrames(relay);
 
     const sharedPorts = new Set([share.port]);
@@ -963,11 +959,9 @@ describe("TunnelSession routing", () => {
     cleanups.push(() => session.dispose());
 
     const inject = (frame: Frame) => {
-      // Relay → client: TunnelSession handles inbound frames on `client`.
       relay.send(Buffer.from(encodeFrame(frame)));
     };
 
-    // Primary (no target)
     inject({
       type: "open-http",
       streamId: 1,
@@ -982,7 +976,6 @@ describe("TunnelSession routing", () => {
     expect(primaryHits).toEqual(["GET /hello"]);
     expect(shareHits).toEqual([]);
 
-    // Shared target
     frames.length = 0;
     inject({
       type: "open-http",
@@ -1005,7 +998,6 @@ describe("TunnelSession routing", () => {
     expect(shareHits[0]).toContain(`origin=http://127.0.0.1:${share.port}`);
     expect(primaryHits).toEqual(["GET /hello"]);
 
-    // Unregistered target → 404
     frames.length = 0;
     inject({
       type: "open-http",
@@ -1185,8 +1177,6 @@ describe("TunnelSession routing", () => {
       relay.send(Buffer.from(encodeFrame(frame)));
     };
 
-    // The visitor's compression negotiation reaches the loopback origin, and
-    // compressed bytes cross the bandwidth-sensitive tunnel unchanged.
     inject({
       type: "open-http",
       streamId: 21,
@@ -1226,7 +1216,6 @@ describe("TunnelSession routing", () => {
       ),
     ]);
 
-    // Revalidation: a 304 relays as resp-head + body-end with no chunks.
     frames.length = 0;
     inject({
       type: "open-http",
@@ -1249,12 +1238,10 @@ describe("TunnelSession routing", () => {
   });
 
   it("tracks remoteClients for bare-handle /ws streams", async () => {
-    // Origin WS server that accepts upgrades so the tunnel can open.
     const origin = await listen((_req, res) => {
       res.writeHead(404);
       res.end();
     });
-    // Attach a WS server to the same HTTP server.
     const originWss = new WebSocketServer({ server: origin.server });
     cleanups.push(
       () =>
@@ -1325,7 +1312,6 @@ describe("TunnelSession routing", () => {
     expect(session.remoteClients).toBe(1);
     expect(remoteClientsSeen).toContain(1);
 
-    // Close the stream from the relay side.
     inject({
       type: "close-stream",
       streamId: 10,
@@ -1342,13 +1328,10 @@ describe("connect plugin", () => {
 
   async function loadPlugin(): Promise<FakePluginHost> {
     host = createConnectFakeHost();
-    // The fake host is typed from src; the plugin compiles against the
-    // bundled dts — same contract, nominally different modules.
     await plugin(host.bb as unknown as Parameters<typeof plugin>[0]);
     return host;
   }
 
-  /** Stop the tunnel (reconnect timers, pending sockets) before dispose. */
   async function stopTunnel(current: FakePluginHost): Promise<void> {
     const { controller, done } = current.harness.runService("tunnel");
     controller.abort();
@@ -1378,8 +1361,6 @@ describe("connect plugin", () => {
       lastRemoteActivityAt: null,
       shares: [],
     });
-    // Dashboard URL is sourced from the status payload (the apex when
-    // unpaired), never a frontend literal.
     expect(status.dashboardUrl).toBe("https://getbb.app/dashboard");
     expect(status.nextRetryAt).toBeNull();
     expect(harness.needsConfigurationMessages).toEqual([]);
@@ -1457,8 +1438,6 @@ describe("connect plugin", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { bb, harness } = await loadPlugin();
 
-    // Loopback serverUrl so the post-pair tunnel dial refuses instantly (no
-    // real gate contacted); explicit baseUrl drives the redeem endpoint.
     const status = (await harness.callRpc("pair", {
       code: "ABCD",
       server: "http://127.0.0.1:59321",
@@ -1472,12 +1451,10 @@ describe("connect plugin", () => {
     expect(status.paired).toBe(true);
     expect(status.handle).toBe("sawyer");
     expect(status.url).toBe("http://127.0.0.1:59321");
-    // Persisted for reconnect-on-restart.
     const stored = (await bb.storage.kv.get(CREDENTIAL_KV_KEY)) as {
       credential: string;
     };
     expect(stored.credential).toBe("bbcred_live");
-    // Status transitions rode the realtime channel (pairing → reconnecting).
     const states = harness.realtimeSignals
       .filter((signal) => signal.channel === "connect")
       .map((signal) => (signal.payload as ConnectStatus).state);
@@ -1495,10 +1472,6 @@ describe("connect plugin", () => {
     vi.stubGlobal("fetch", fetchMock);
     const { harness } = await loadPlugin();
 
-    // Loopback baseUrl keeps this hermetic (the derived host resolves to
-    // nothing, so the post-pair dial fails instantly); the panel's real
-    // paste-a-code path omits baseUrl too and falls back to the getbb.app
-    // apex the same way.
     const status = (await harness.callRpc("pair", {
       code: "ABCD",
       baseUrl: "http://localhost:59329",
@@ -1513,7 +1486,6 @@ describe("connect plugin", () => {
   });
 
   it("pair stores a non-primary routing label from redeem (multi-server)", async () => {
-    // Cloud returns the redeemed server's subdomain, not the account handle.
     const fetchMock = vi.fn(
       async () =>
         new Response(
@@ -1547,7 +1519,6 @@ describe("connect plugin", () => {
       credential: "bbcred_second",
     });
 
-    // Share URLs follow the stored label, not the account primary handle.
     const exposed = (await harness.callRpc("expose", { port: 8000 })) as {
       port: number;
       url: string;
@@ -1623,8 +1594,6 @@ describe("connect plugin", () => {
     );
     const { bb, harness } = await loadPlugin();
 
-    // The panel maps codes to human copy; the raw "Redeem failed (410)…"
-    // detail must never reach the caller — only the stable code does.
     await expect(
       harness.callRpc("pair", {
         code: "OLD",
@@ -1675,8 +1644,6 @@ describe("connect plugin", () => {
     });
 
     const { controller, done } = harness.runService("tunnel");
-    // The service read the credential and reports paired (dial refused →
-    // reconnecting, never "not paired").
     await vi.waitFor(async () => {
       const status = (await harness.callRpc("status")) as ConnectStatus;
       expect(status.paired).toBe(true);
@@ -1698,8 +1665,6 @@ describe("connect plugin", () => {
       ),
     );
     const { harness } = await loadPlugin();
-    // Handle-shaped serverUrl so share URLs look real; loopback port so the
-    // post-pair tunnel dial fails instantly (no external network).
     await harness.callRpc("pair", {
       code: "ABCD",
       server: "http://sawyer.localhost:59330",
@@ -1846,12 +1811,10 @@ describe("connect plugin", () => {
     ]);
   });
 
-  it("unexposes a persisted machine share when its declaration push fails offline", async () => {
+  it("unexposes a persisted machine share when its declaration update fails", async () => {
     host = createConnectFakeHost();
     const declarations = vi.fn((_hostId: string, _ports: readonly number[]) => {
-      throw Object.assign(new Error("host is offline"), {
-        body: { code: "connect_host_offline" },
-      });
+      throw new Error("temporary declaration failure");
     });
     Object.defineProperty(host.bb.hosts, "declareSharedPorts", {
       value: declarations,
@@ -1938,8 +1901,6 @@ describe("connect plugin", () => {
       { hostId: REMOTE_HOST_ID, ports: [3000, 4000] },
     ]);
 
-    // The same port is valid on the server host and does not enter the
-    // daemon's machine-tunnel declaration.
     await host.harness.callRpc("expose", { port: 3000 });
     expect(host.harness.sharedPortDeclarations).toEqual([
       { hostId: REMOTE_HOST_ID, ports: [3000, 4000] },
@@ -2076,8 +2037,6 @@ describe("connect plugin", () => {
       { hostId: REMOTE_HOST_ID, ports: [5173] },
     ]);
 
-    // Unpairing must drop the daemon's desired ports; a plain service stop
-    // relies on plugin dispose (load-scoped server-side clearing) instead.
     await host.harness.callRpc("disconnect");
     expect(host.harness.sharedPortDeclarations).toEqual([
       { hostId: REMOTE_HOST_ID, ports: [] },
@@ -2134,7 +2093,6 @@ describe("connect plugin", () => {
           handle: "sawyer",
           name: "default",
           live: true,
-          // URL base comes from the pairing credential's serverUrl apex.
           url: "http://sawyer.localhost:59340",
         },
         {
@@ -2389,8 +2347,10 @@ describe("connect CLI", () => {
     vi.unstubAllGlobals();
   });
 
-  async function loadCli(): Promise<FakePluginHost> {
-    host = createConnectFakeHost();
+  async function loadCli(options?: {
+    mobileApp?: boolean;
+  }): Promise<FakePluginHost> {
+    host = createConnectFakeHost(options);
     await plugin(host.bb as unknown as Parameters<typeof plugin>[0]);
     return host;
   }
@@ -2532,6 +2492,120 @@ describe("connect CLI", () => {
     expect(parsed.servers[1]?.url).toBe(
       "http://sawyer-desktop.localhost:59342",
     );
+  });
+
+  it("machine-code is off until the mobileApp experiment is on", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { harness } = await loadCli({ mobileApp: false });
+    const result = await harness.runCli(["machine-code"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain('"Mobile app" experiment');
+    expect(result.stderr).toContain("bb settings experiment mobileApp true");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("machine-code when unpaired errors clearly", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const { harness } = await loadCli();
+    const result = await harness.runCli(["machine-code"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("not connected to getbb.app");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("machine-code prints the pairing payload as text or json", async () => {
+    const fetchMock = vi.fn(
+      async (input: RequestInfo | URL, _init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/connect/redeem")) {
+          return new Response(
+            JSON.stringify({ credential: "bbcred_live", handle: "sawyer" }),
+            { status: 200 },
+          );
+        }
+        if (url === "https://getbb.app/api/connect/machine-code") {
+          return new Response(
+            JSON.stringify({
+              code: "K7QP-2M4X",
+              expiresInMs: 600_000,
+              serverUrl: "https://sawyer.getbb.app",
+            }),
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const { harness } = await loadCli();
+    await harness.runCli([
+      "--code",
+      "ABCD",
+      "--server",
+      "https://sawyer.getbb.app",
+    ]);
+
+    const before = Date.now();
+    const text = await harness.runCli(["machine-code"]);
+    expect(text.exitCode).toBe(0);
+    expect(text.stdout).toContain("Code:       K7QP-2M4X");
+    expect(text.stdout).toContain("Server:     https://sawyer.getbb.app");
+    expect(text.stdout).toContain("Apex:       https://getbb.app");
+    expect(text.stdout).toContain("in about 10 min");
+    expect(text.stdout).toContain("Add mobile device");
+
+    const json = await harness.runCli(["machine-code", "--json"]);
+    expect(json.exitCode).toBe(0);
+    const parsed = JSON.parse(json.stdout ?? "") as Record<string, unknown>;
+    expect(parsed).toEqual({
+      code: "K7QP-2M4X",
+      serverUrl: "https://sawyer.getbb.app",
+      apex: "https://getbb.app",
+      expiresAt: expect.any(Number),
+    });
+    expect(parsed.expiresAt as number).toBeGreaterThanOrEqual(before + 600_000);
+    const call = fetchMock.mock.calls.find(
+      ([input]) =>
+        String(input) === "https://getbb.app/api/connect/machine-code",
+    );
+    expect(call?.[1]).toEqual({
+      method: "POST",
+      headers: { "x-bb-connect-machine": "bbcred_live" },
+    });
+  });
+
+  it("machine-code explains the account machine limit and names the dashboard", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/connect/redeem")) {
+          return new Response(
+            JSON.stringify({ credential: "bbcred_live", handle: "sawyer" }),
+            { status: 200 },
+          );
+        }
+        if (url.endsWith("/api/connect/machine-code")) {
+          return new Response(JSON.stringify({ error: "machine-limit" }), {
+            status: 409,
+          });
+        }
+        return new Response("not found", { status: 404 });
+      }),
+    );
+    const { harness } = await loadCli();
+    await harness.runCli([
+      "--code",
+      "ABCD",
+      "--server",
+      "https://sawyer.getbb.app",
+    ]);
+    const result = await harness.runCli(["machine-code"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.stderr).toContain("machine limit");
+    expect(result.stderr).toContain("https://getbb.app/dashboard");
+    expect(result.stderr).not.toContain("machine_limit");
   });
 
   it("expose / shares / unexpose happy path", async () => {

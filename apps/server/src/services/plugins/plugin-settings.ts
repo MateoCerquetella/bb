@@ -10,26 +10,11 @@ import type {
   PluginSettingDescriptors,
   PluginSettingValue,
 } from "@get-bb/plugin-sdk";
-import {
-  registerSettingDescriptors,
-  validateSettingsUpdate,
-} from "@get-bb/plugin-sdk/internal/host-policy";
+import { validateSettingsUpdate } from "@get-bb/plugin-sdk/internal/host-policy";
 import { deleteSecretFile, writeSecretFile } from "@bb/secret-storage";
 
-export {
-  registerSettingDescriptors,
-  validateSettingsUpdate as validatePluginSettingsUpdate,
-};
+export { validateSettingsUpdate as validatePluginSettingsUpdate };
 
-// The descriptor types are part of the backend plugin contract in
-// @get-bb/plugin-sdk; re-exported so server code keeps one import site.
-export type {
-  PluginSettingDescriptor,
-  PluginSettingDescriptors,
-  PluginSettingValue,
-} from "@get-bb/plugin-sdk";
-
-/** A settings update the routes rejected: unknown key or wrong value type. */
 export class PluginSettingsValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -68,51 +53,62 @@ async function readSecret(
   }
 }
 
-export interface PluginSettingsStoreArgs {
+interface PluginSettingsStoreArgs {
   db: DbConnection;
   dataDir: string;
   pluginId: string;
   descriptors: PluginSettingDescriptors;
 }
 
-/** Effective typed values: stored value when valid, else the default, else undefined. */
-export async function readPluginSettingsValues(
-  args: PluginSettingsStoreArgs,
-): Promise<Record<string, PluginSettingValue | undefined>> {
+function parseStoredSettingValue(
+  descriptor: PluginSettingDescriptor,
+  raw: string | undefined,
+): PluginSettingValue | undefined {
+  let parsed: unknown;
+  if (raw !== undefined) {
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+  }
+  const expected = descriptor.type === "boolean" ? "boolean" : "string";
+  if (typeof parsed !== expected) parsed = undefined;
+  if (
+    descriptor.type === "select" &&
+    typeof parsed === "string" &&
+    !descriptor.options.includes(parsed)
+  ) {
+    parsed = undefined;
+  }
+  return (parsed as PluginSettingValue | undefined) ?? descriptor.default;
+}
+
+export function readPluginSettingsValuesSync(
+  args: Omit<PluginSettingsStoreArgs, "dataDir">,
+): Record<string, PluginSettingValue | undefined> {
   const stored = getPluginSettingsValues(args.db, args.pluginId);
   const values: Record<string, PluginSettingValue | undefined> = {};
   for (const [key, descriptor] of Object.entries(args.descriptors)) {
-    if (isSecret(descriptor)) {
-      values[key] =
-        (await readSecret(args.dataDir, args.pluginId, key)) ??
-        descriptor.default;
-      continue;
-    }
-    const raw = stored[key];
-    let parsed: unknown;
-    if (raw !== undefined) {
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        parsed = undefined;
-      }
-    }
-    const expected = descriptor.type === "boolean" ? "boolean" : "string";
-    if (typeof parsed !== expected) parsed = undefined;
-    if (
-      descriptor.type === "select" &&
-      typeof parsed === "string" &&
-      !descriptor.options.includes(parsed)
-    ) {
-      parsed = undefined;
-    }
-    values[key] =
-      (parsed as PluginSettingValue | undefined) ?? descriptor.default;
+    if (isSecret(descriptor)) continue;
+    values[key] = parseStoredSettingValue(descriptor, stored[key]);
   }
   return values;
 }
 
-/** Persist a pre-validated update: secrets to files, the rest to plugin_settings. */
+export async function readPluginSettingsValues(
+  args: PluginSettingsStoreArgs,
+): Promise<Record<string, PluginSettingValue | undefined>> {
+  const values = readPluginSettingsValuesSync(args);
+  for (const [key, descriptor] of Object.entries(args.descriptors)) {
+    if (!isSecret(descriptor)) continue;
+    values[key] =
+      (await readSecret(args.dataDir, args.pluginId, key)) ??
+      descriptor.default;
+  }
+  return values;
+}
+
 export async function writePluginSettingsUpdate(
   args: PluginSettingsStoreArgs & { values: Record<string, unknown> },
 ): Promise<void> {
@@ -135,7 +131,6 @@ export async function writePluginSettingsUpdate(
 
 export interface PluginSettingsView {
   schema: PluginSettingDescriptors;
-  /** Effective non-secret values; secret keys map to `{ set: boolean }`. */
   values: Record<string, unknown>;
 }
 

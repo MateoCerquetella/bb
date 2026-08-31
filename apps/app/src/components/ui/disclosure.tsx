@@ -1,5 +1,6 @@
 import { useSetAtom } from "jotai";
 import {
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -8,10 +9,19 @@ import {
   type ReactNode,
 } from "react";
 import { cn } from "@bb/shared-ui/lib/utils";
+import {
+  observedBorderBoxBlockSize,
+  observeSharedResize,
+} from "@/lib/shared-resize-observer";
 import { layoutAnimationInFlightCountAtom } from "./layoutAnimationAtoms.js";
 import { CONTROL_HOVER_TRANSITION } from "@bb/shared-ui/motion";
 
 const EXPANDABLE_PANEL_TRANSITION_MS = 200;
+
+interface PanelHeightSync {
+  isToggleAnimating: boolean;
+  heightPx: number;
+}
 const useBrowserLayoutEffect =
   typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -19,8 +29,7 @@ interface ChevronProps {
   className?: string;
 }
 
-const COLLAPSIBLE_HEADER_COLLAPSED_TONE_CLASS =
-  `text-muted-foreground ${CONTROL_HOVER_TRANSITION} hover:text-foreground focus-visible:text-foreground`;
+const COLLAPSIBLE_HEADER_COLLAPSED_TONE_CLASS = `text-muted-foreground ${CONTROL_HOVER_TRANSITION} hover:text-foreground focus-visible:text-foreground`;
 const COLLAPSIBLE_HEADER_EXPANDED_TONE_CLASS = "text-foreground";
 export const COLLAPSIBLE_HEADER_STATIC_TONE_CLASS = "text-muted-foreground";
 const COLLAPSIBLE_HEADER_BUTTON_BASE_CLASS =
@@ -50,7 +59,7 @@ export function getCollapsibleHeaderToneClass(isExpanded: boolean): string {
     : COLLAPSIBLE_HEADER_COLLAPSED_TONE_CLASS;
 }
 
-export interface CollapsibleHeaderProps {
+interface CollapsibleHeaderProps {
   summaryContent: ReactNode;
   toneClassName: string;
   summaryClassName?: string;
@@ -100,56 +109,43 @@ export function CollapsibleHeader({
             ? "rotate-90"
             : forceChevronVisible
               ? "opacity-100"
-              : // Furled carets reveal only on hover/focus of their own row header
-                // (the toggle button), not the wrapping timeline-row group —
-                // so hovering a row's body or a nested child doesn't surface a
-                // sibling/parent caret.
-                "opacity-0 group-hover/toggle:opacity-100 group-focus-visible/toggle:opacity-100 max-md:pointer-coarse:opacity-100",
+              : "opacity-0 group-hover/toggle:opacity-100 group-focus-visible/toggle:opacity-100 max-md:pointer-coarse:opacity-100",
         )}
       />
     </button>
   );
 }
 
-export interface ExpandablePanelProps {
+interface ExpandablePanelProps {
   isExpanded: boolean;
   summaryContent: ReactNode;
   headerToneClass: string;
   onToggle?: () => void;
   collapsedContent?: ReactNode;
   forceHeaderChevronVisible?: boolean;
-  headerButtonClassName?: string;
   summaryContentClassName?: string;
   children?: ReactNode;
   renderBody?: () => ReactNode;
   className?: string;
   headerClassName?: string;
-  bodyClassName?: string;
   contentClassName?: string;
 }
 
 interface AnimatedExpandablePanelContentProps {
-  bodyClassName?: string;
   collapsedContent: ReactNode;
   contentClassName?: string;
-  isExpanded: boolean;
+  isBodyExpanded: boolean;
   renderedBody: ReactNode;
 }
 
 function AnimatedExpandablePanelContent({
-  bodyClassName,
   collapsedContent,
   contentClassName,
-  isExpanded,
+  isBodyExpanded,
   renderedBody,
 }: AnimatedExpandablePanelContentProps) {
   const regionRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
-  // Only an expand/collapse toggle eases the region height. Content growth
-  // inside an already-open body (a streaming tool result, a todo list gaining
-  // rows) snaps: easing it would restart the 200ms tween on every delta, and
-  // that tween never registers with `layoutAnimationInFlightCountAtom`, so the
-  // timeline's AutoHeightContainer would run its own tween on top of it.
   const toggleAnimationDeadlineRef = useRef(0);
   const isFirstToggleEffectRef = useRef(true);
   useBrowserLayoutEffect(() => {
@@ -159,7 +155,7 @@ function AnimatedExpandablePanelContent({
     }
     toggleAnimationDeadlineRef.current =
       performance.now() + EXPANDABLE_PANEL_TRANSITION_MS;
-  }, [isExpanded]);
+  }, [isBodyExpanded]);
 
   useBrowserLayoutEffect(() => {
     const region = regionRef.current;
@@ -168,38 +164,48 @@ function AnimatedExpandablePanelContent({
       return;
     }
 
-    const syncHeight = () => {
-      const isToggleAnimating =
-        performance.now() < toggleAnimationDeadlineRef.current;
+    const readHeightSync = (
+      entry: ResizeObserverEntry | undefined,
+    ): PanelHeightSync => {
+      const observedHeight =
+        entry === undefined ? undefined : observedBorderBoxBlockSize(entry);
+      return {
+        isToggleAnimating:
+          performance.now() < toggleAnimationDeadlineRef.current,
+        heightPx: observedHeight ?? target.offsetHeight,
+      };
+    };
+    const writeHeightSync = ({
+      heightPx,
+      isToggleAnimating,
+    }: PanelHeightSync) => {
       region.style.transitionDuration = isToggleAnimating ? "" : "0s";
-      region.style.height = `${target.offsetHeight}px`;
+      region.style.height = `${heightPx}px`;
     };
 
-    syncHeight();
+    writeHeightSync(readHeightSync(undefined));
 
     if (typeof ResizeObserver === "undefined") {
       return;
     }
 
-    const resizeObserver = new ResizeObserver(syncHeight);
-    resizeObserver.observe(target);
-    return () => resizeObserver.disconnect();
-  }, [collapsedContent, isExpanded, renderedBody]);
+    return observeSharedResize(target, {
+      read: readHeightSync,
+      write: writeHeightSync,
+    });
+  }, [collapsedContent, isBodyExpanded, renderedBody]);
 
   return (
     <div
       ref={regionRef}
-      className={cn(
-        "relative transition-[height] duration-200 ease-out",
-        bodyClassName,
-      )}
+      className="relative transition-[height] duration-200 ease-out"
       style={{
         overflowX: "visible",
         overflowY: "clip",
       }}
     >
       <div ref={contentRef}>
-        {isExpanded ? (
+        {isBodyExpanded ? (
           <div className={cn("px-2 pb-1 pt-0", contentClassName)}>
             {renderedBody}
           </div>
@@ -218,37 +224,27 @@ export function ExpandablePanel({
   onToggle,
   collapsedContent,
   forceHeaderChevronVisible = false,
-  headerButtonClassName,
   summaryContentClassName,
   children,
   renderBody,
   className,
   headerClassName,
-  bodyClassName,
   contentClassName,
 }: ExpandablePanelProps) {
   const hasCollapsedContent =
     collapsedContent !== undefined && collapsedContent !== null;
-  const headerRootClassName = cn(
-    "px-2 py-1",
-    headerClassName,
-    headerButtonClassName,
-  );
+  const headerRootClassName = cn("px-2 py-1", headerClassName);
   const [isClosing, setIsClosing] = useState(false);
   const renderedBodyRef = useRef<ReactNode>(null);
+  const deferredIsExpanded = useDeferredValue(isExpanded);
   const expandedBody = useMemo(() => {
-    if (!isExpanded) {
+    if (!deferredIsExpanded) {
       return null;
     }
     return renderBody ? renderBody() : children;
-  }, [children, isExpanded, renderBody]);
+  }, [children, deferredIsExpanded, renderBody]);
+  const isBodyExpanded = isExpanded && (deferredIsExpanded || isClosing);
 
-  // Signal to AutoHeightContainer / HeightTransition wrappers that a
-  // CSS-driven layout animation is in flight, so they snap their wrapper to
-  // inner.height each frame instead of running their own lagging 180ms
-  // transition. Without this, parent height wrappers can compound with the
-  // row's own animation and make the bottom-anchored timeline slide longer
-  // than the row's intended 200ms.
   const setLayoutAnimationInFlightCount = useSetAtom(
     layoutAnimationInFlightCountAtom,
   );
@@ -270,14 +266,14 @@ export function ExpandablePanel({
       window.clearTimeout(timer);
       release();
     };
-  }, [isExpanded, setLayoutAnimationInFlightCount]);
+  }, [isBodyExpanded, setLayoutAnimationInFlightCount]);
 
   useBrowserLayoutEffect(() => {
-    if (!isExpanded) {
+    if (!deferredIsExpanded) {
       return;
     }
     renderedBodyRef.current = expandedBody;
-  }, [expandedBody, isExpanded]);
+  }, [deferredIsExpanded, expandedBody]);
 
   useBrowserLayoutEffect(() => {
     if (isExpanded) {
@@ -298,7 +294,7 @@ export function ExpandablePanel({
     }, EXPANDABLE_PANEL_TRANSITION_MS);
     return () => clearTimeout(timeout);
   }, [hasCollapsedContent, isExpanded]);
-  const renderedBody = isExpanded
+  const renderedBody = deferredIsExpanded
     ? expandedBody
     : isClosing
       ? renderedBodyRef.current
@@ -306,10 +302,7 @@ export function ExpandablePanel({
 
   return (
     <div className={cn("rounded-md text-muted-foreground", className)}>
-      {/* Scope the hover group to the header line only. Putting it on the
-          whole panel would let a hover on a nested bundle child (which lives
-          in the body below) reveal every sibling row's chevron, since they
-          share this panel as a hovered ancestor. */}
+      {}
       <div className="group/timeline-row">
         <CollapsibleHeader
           isExpanded={isExpanded}
@@ -325,31 +318,26 @@ export function ExpandablePanel({
       </div>
       {hasCollapsedContent ? (
         <AnimatedExpandablePanelContent
-          bodyClassName={bodyClassName}
           collapsedContent={collapsedContent}
           contentClassName={contentClassName}
-          isExpanded={isExpanded}
-          renderedBody={renderedBody}
+          isBodyExpanded={isBodyExpanded}
+          renderedBody={isBodyExpanded ? renderedBody : null}
         />
       ) : (
         <div
-          aria-hidden={!isExpanded}
+          aria-hidden={!isBodyExpanded}
           className={cn(
             "grid transition-[grid-template-rows,opacity] duration-200 ease-out",
-            isExpanded
+            isBodyExpanded
               ? "pointer-events-auto grid-rows-[1fr] opacity-100"
               : "pointer-events-none grid-rows-[0fr] opacity-0",
-            bodyClassName,
           )}
         >
           <div className="overflow-hidden">
             <div
               className={cn(
-                // No `will-change-transform` here: it would pin a compositing
-                // layer on every collapsed body in the timeline for the
-                // lifetime of the row, only to speed a 200ms toggle.
                 "px-2 pb-1 pt-0 transition-[transform,opacity] duration-200 ease-out",
-                isExpanded
+                isBodyExpanded
                   ? "translate-y-0 opacity-100"
                   : "-translate-y-1 opacity-0",
                 contentClassName,

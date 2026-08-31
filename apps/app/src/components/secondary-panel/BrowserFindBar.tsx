@@ -6,26 +6,23 @@ import {
 } from "@bb/shared-ui/coarse-pointer-sizing";
 import { Icon } from "@bb/shared-ui/icon";
 import { cn } from "@bb/shared-ui/lib/utils";
-import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@/components/ui/chromeStyleTokens";
+import { CHROME_SUBTLE_ICON_BUTTON_FOREGROUND_CLASS } from "@bb/shared-ui/chrome-style-tokens";
 import type { AppShortcutPresentation } from "@/lib/app-keybindings";
 import { SECONDARY_PANEL_TOP_CHROME_BACKGROUND_CLASS } from "./panelChromeClasses";
 
-/** The latest match count Chromium reported for the open find session. */
 export interface BrowserFindMatches {
   activeMatchOrdinal: number;
   matches: number;
 }
 
-export interface BrowserFindBarProps {
+interface BrowserFindBarProps {
   inputRef: RefObject<HTMLInputElement | null>;
   query: string;
-  /** Null until the first result for the current query arrives, or when the query is empty. */
   matches: BrowserFindMatches | null;
   onQueryChange: (query: string) => void;
   onFindNext: () => void;
   onFindPrevious: () => void;
   onClose: () => void;
-  /** The rebindable `browser.find` chord, for the input's accessible label. */
   shortcut: AppShortcutPresentation | null;
 }
 
@@ -36,7 +33,7 @@ interface FindBarButtonProps {
   onClick: () => void;
 }
 
-export function formatBrowserFindMatches(
+function formatBrowserFindMatches(
   matches: BrowserFindMatches | null,
 ): string | null {
   if (matches === null) {
@@ -63,12 +60,6 @@ function FindBarButton({ icon, label, disabled, onClick }: FindBarButtonProps) {
   );
 }
 
-/**
- * Find-in-page bar for the embedded browser. It lives in the DOM row between
- * the address bar and the native browser view (the native overlay would hide
- * anything rendered inside the view area). Enter steps forward, Shift+Enter
- * steps backward, Escape closes the bar.
- */
 export function BrowserFindBar({
   inputRef,
   query,

@@ -4,8 +4,8 @@ import {
   usePromptDraftStorage,
   type PromptDraftScope,
 } from "@/hooks/usePromptDraftStorage";
-import { promptDraftToInput } from "@/lib/prompt-draft";
-import type { PromptDraftState } from "@/lib/prompt-draft";
+import { promptDraftToInput } from "@bb/client-core";
+import type { PromptDraftState } from "@bb/client-core";
 import type { PromptInput } from "@bb/domain";
 import type { InlineQueuedMessageEditState } from "./useInlineQueuedMessageEditing";
 
@@ -18,12 +18,10 @@ interface UseActiveComposerDraftArgs {
   ) => void;
 }
 
-export interface UseActiveComposerDraftResult {
+interface UseActiveComposerDraftResult {
   promptDraft: ReturnType<typeof usePromptDraftStorage>;
-  /** The persisted bottom-composer draft, independent of any inline edit. */
   currentPromptDraft: PromptDraftState;
   currentPromptDraftInput: PromptInput[];
-  /** The inline edit draft when present, otherwise the bottom draft. */
   activeComposerDraft: PromptDraftState;
   activeComposerDraftInput: PromptInput[];
   setActiveComposerDraft: (draft: PromptDraftState) => void;
@@ -31,12 +29,6 @@ export interface UseActiveComposerDraftResult {
   removeActiveComposerAttachment: (path: string) => void;
 }
 
-/**
- * Exposes the persisted bottom draft plus an active draft view for the inline
- * queued-message editor and the currently published plugin host. Active writes
- * route through the inline-edit ref so back-to-back plugin composer actions in
- * one event observe each other's updates.
- */
 export function useActiveComposerDraft({
   draftScope,
   inlineEditingQueuedMessage,

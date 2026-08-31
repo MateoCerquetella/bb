@@ -10,17 +10,12 @@ export interface PluginRuntimeStatusPresentation {
   recovery: string;
 }
 
-export type PluginRuntimeStatusDefinition = Omit<
+type PluginRuntimeStatusDefinition = Omit<
   PluginRuntimeStatusPresentation,
   "condition" | "recovery"
 >;
 
-/**
- * Canonical user-facing projection of plugin runtime health. Enabled/disabled
- * remains lifecycle state, while updates remain release state; neither is
- * folded into this health vocabulary.
- */
-export const PLUGIN_RUNTIME_STATUS_DEFINITIONS: Record<
+const PLUGIN_RUNTIME_STATUS_DEFINITIONS: Record<
   PluginRuntimeStatus,
   PluginRuntimeStatusDefinition | null
 > = {
@@ -40,12 +35,6 @@ export const PLUGIN_RUNTIME_STATUS_DEFINITIONS: Record<
   },
   degraded: { icon: "AlertTriangle", label: "Degraded", tone: "warning" },
 };
-
-export function pluginRuntimeStatusDefinition(
-  status: PluginRuntimeStatus,
-): PluginRuntimeStatusDefinition | null {
-  return PLUGIN_RUNTIME_STATUS_DEFINITIONS[status];
-}
 
 function pluginRuntimeRecovery(plugin: PluginListItem): string {
   switch (plugin.status) {
@@ -96,7 +85,7 @@ function pluginRuntimeCondition(plugin: PluginListItem): string {
 export function pluginRuntimeStatusPresentation(
   plugin: PluginListItem,
 ): PluginRuntimeStatusPresentation | null {
-  const definition = pluginRuntimeStatusDefinition(plugin.status);
+  const definition = PLUGIN_RUNTIME_STATUS_DEFINITIONS[plugin.status];
   if (definition === null) return null;
   return {
     ...definition,
@@ -105,14 +94,6 @@ export function pluginRuntimeStatusPresentation(
   };
 }
 
-/**
- * A plugin row earns at most one signal. Updates use a pill; abnormal runtime
- * health uses a specific icon action that opens plugin details. A failed update
- * that rolled back outranks an available update — the user should know a
- * rollback happened before applying anything else. Newer-but-incompatible
- * releases and pinned sources never signal the list; they surface on the detail
- * page.
- */
 export type PluginRowSignal =
   | { kind: "update"; version: string }
   | {
@@ -127,8 +108,6 @@ export function pluginRowSignal(
   plugin: PluginListItem,
 ): PluginRowSignal | null {
   const state = plugin.updateState;
-  // A rollback wins the row's single signal slot even when the same plugin
-  // still has an available candidate.
   if (state.lastFailure !== null) {
     return {
       kind: "status",
@@ -164,12 +143,4 @@ export function pluginRowSignal(
     return { kind: "update", version: state.availableVersion };
   }
   return null;
-}
-
-/** The detail-page banner mirrors the row pill's update case. */
-export function pluginUpdateAvailableVersion(
-  plugin: PluginListItem,
-): string | null {
-  const signal = pluginRowSignal(plugin);
-  return signal?.kind === "update" ? signal.version : null;
 }

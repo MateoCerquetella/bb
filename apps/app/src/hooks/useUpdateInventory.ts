@@ -7,10 +7,13 @@ import type { BbDesktopInfo } from "@bb/desktop-contract";
 import {
   buildProviderCliIssue,
   isProviderCliIssue,
+  isProviderCliUpdateIssue,
   providerCliEntries,
   type ProviderCliIssue,
 } from "@/components/provider-cli/provider-cli-install";
 import { useDesktopUpdateInfo } from "@/hooks/useDesktopUpdateInfo";
+import { usePluginList } from "@/hooks/queries/plugin-settings-queries";
+import { pluginsNeedingAttention } from "@/hooks/usePluginAttention";
 import { selectPrimaryHost, useHosts } from "@/hooks/queries/host-queries";
 import { hostProviderCliStatusQueryKey } from "@/hooks/queries/query-keys";
 import { SESSION_STATIC_QUERY_POLICY } from "@/hooks/queries/query-policies";
@@ -24,12 +27,11 @@ import { sdk } from "@/lib/sdk";
 export interface UpdateInventoryMachine {
   host: Host;
   isPrimary: boolean;
-  /** Null while the host is offline or its status is still loading. */
   providerStatus: ProviderCliStatusResponse | null;
   statusPending: boolean;
   statusError: boolean;
+  statusFetching: boolean;
   issues: ProviderCliIssue[];
-  /** Daemon stuck on an old protocol version; the server can force a retry. */
   canRetryDaemonUpdate: boolean;
 }
 
@@ -37,20 +39,12 @@ export interface UpdateInventory {
   isLoading: boolean;
   systemVersion: SystemVersionResponse | undefined;
   desktopInfo: BbDesktopInfo | null;
-  /** bb-app (web/npm) has a newer release on the registry. */
   appUpdateAvailable: boolean;
-  /** Desktop shell downloaded an update; a relaunch applies it. */
   desktopUpdateReady: boolean;
   machines: UpdateInventoryMachine[];
-  /** Count of things a user can act on right now. */
+  pluginAttentionCount: number;
   actionableCount: number;
   hasAttention: boolean;
-  /**
-   * Epoch ms when the oldest source in the current inventory was last checked.
-   * Null until the app and every connected machine have returned a result.
-   * Using the oldest source prevents one fresh response from making stale
-   * machine data look current.
-   */
   lastCheckedAt: number | null;
 }
 
@@ -58,13 +52,14 @@ interface UseUpdateInventoryOptions {
   enabled?: boolean;
 }
 
-/**
- * One consolidated view of every update bb knows about: the bb app itself
- * (npm registry / desktop feed) plus provider CLIs on every connected
- * machine. Remote daemons follow the server version automatically via
- * protocol self-update, so per-machine bb rows only surface when a daemon is
- * stuck and needs a manual retry.
- */
+export function buildUpdateInventoryProviderIssues(
+  providerStatus: ProviderCliStatusResponse,
+): ProviderCliIssue[] {
+  return providerCliEntries(providerStatus)
+    .map(buildProviderCliIssue)
+    .filter(isProviderCliIssue);
+}
+
 export function useUpdateInventory(
   options?: UseUpdateInventoryOptions,
 ): UpdateInventory {
@@ -73,6 +68,9 @@ export function useUpdateInventory(
   const systemConfigQuery = useSystemConfig({ enabled });
   const hostsQuery = useHosts({ enabled });
   const { desktopInfo, isDesktop } = useDesktopUpdateInfo();
+  const pluginAttentionCount = pluginsNeedingAttention(
+    usePluginList({ enabled }).data?.plugins ?? [],
+  ).length;
 
   const hosts = useMemo(() => hostsQuery.data ?? [], [hostsQuery.data]);
   const connectedHosts = useMemo(
@@ -109,24 +107,20 @@ export function useUpdateInventory(
     const issues =
       providerStatus === null
         ? []
-        : providerCliEntries(providerStatus)
-            .map(buildProviderCliIssue)
-            .filter(isProviderCliIssue);
+        : buildUpdateInventoryProviderIssues(providerStatus);
     return {
       host,
       isPrimary: host.id === primaryHostId,
       providerStatus,
       statusPending: statusQuery?.isPending ?? false,
       statusError: statusQuery?.isError ?? false,
+      statusFetching: statusQuery?.isFetching ?? false,
       issues,
       canRetryDaemonUpdate: hostCanRetryUpdate(host),
     };
   });
 
   const systemVersion = systemVersionQuery.data;
-  // Gate on `isDesktop`, not on `desktopInfo`: the desktop shell answers
-  // `getInfo()` a render or two after mount, and treating that gap as "web"
-  // flashes an npm-upgrade prompt the desktop build never uses.
   const appUpdateAvailable =
     !isDesktop &&
     systemVersion !== undefined &&
@@ -136,11 +130,14 @@ export function useUpdateInventory(
   const actionableCount =
     machines.reduce(
       (count, machine) =>
-        count + machine.issues.length + (machine.canRetryDaemonUpdate ? 1 : 0),
+        count +
+        machine.issues.filter(isProviderCliUpdateIssue).length +
+        (machine.canRetryDaemonUpdate ? 1 : 0),
       0,
     ) +
     (appUpdateAvailable ? 1 : 0) +
-    (desktopUpdateReady ? 1 : 0);
+    (desktopUpdateReady ? 1 : 0) +
+    pluginAttentionCount;
 
   const desktopLastCheckedAt =
     desktopInfo?.lastCheckedAt === null ||
@@ -165,6 +162,7 @@ export function useUpdateInventory(
     appUpdateAvailable,
     desktopUpdateReady,
     machines,
+    pluginAttentionCount,
     actionableCount,
     hasAttention: actionableCount > 0,
     lastCheckedAt,

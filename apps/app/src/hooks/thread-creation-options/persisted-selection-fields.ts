@@ -28,27 +28,27 @@ type StoredServiceTierSetter = (value: StoredServiceTier) => void;
 type StoredReasoningLevelSetter = (value: StoredReasoningLevel) => void;
 type StoredPermissionModeSetter = (value: StoredPermissionMode) => void;
 
-export interface PersistedStringSelectionField {
+interface PersistedStringSelectionField {
   setValue: StringSelectionSetter;
   value: string;
 }
 
-export interface PersistedServiceTierSelectionField {
+interface PersistedServiceTierSelectionField {
   setValue: StoredServiceTierSetter;
   value: StoredServiceTier;
 }
 
-export interface PersistedReasoningLevelSelectionField {
+interface PersistedReasoningLevelSelectionField {
   setValue: StoredReasoningLevelSetter;
   value: StoredReasoningLevel;
 }
 
-export interface PersistedPermissionModeSelectionField {
+interface PersistedPermissionModeSelectionField {
   setValue: StoredPermissionModeSetter;
   value: StoredPermissionMode;
 }
 
-export interface PromptBoxProviderModelReasoningPreference {
+interface PromptBoxProviderModelReasoningPreference {
   providerId: string;
   model: string;
   reasoningLevel: ReasoningLevel;
@@ -231,11 +231,6 @@ const serviceTierAtom = atomWithStorage<StoredServiceTier>(
   createLocalStorageEnumStorage(isStoredServiceTier),
   { getOnInit: true },
 );
-// Legacy preference migration: "workspace-write" maps onto the same workspace
-// sandbox as "accept-edits", so the user's stored intent carries forward.
-// Legacy "readonly" (and any other unknown value) is dropped rather than
-// reinterpreted — localStorage is untrusted, and a read-only preference must
-// never silently become a writable mode.
 const permissionModePreferenceStorage =
   createLocalStorageSyncStorage<StoredPermissionMode>({
     parse: (storedValue, initialValue) => {
@@ -282,9 +277,6 @@ export function usePromptBoxProviderPreference(
         nextValue !== value &&
         typeof window !== "undefined"
       ) {
-        // Once the provider changes, the legacy unscoped values no longer have
-        // a trustworthy owner. The caller saves the current pair under its
-        // provider-scoped keys before changing this value.
         window.localStorage.removeItem(MODEL_STORAGE_KEY);
         window.localStorage.removeItem(REASONING_STORAGE_KEY);
       }

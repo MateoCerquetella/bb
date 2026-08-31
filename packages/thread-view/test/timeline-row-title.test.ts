@@ -4,6 +4,7 @@ import type {
   TimelineApprovalWorkRow,
   TimelineCommandWorkRow,
   TimelineFileChangeWorkRow,
+  TimelineFileReadWorkRow,
   TimelineImageViewWorkRow,
   TimelineParentChange,
   TimelineRowBase,
@@ -54,18 +55,10 @@ interface PermissionGrantApprovalRowArgs {
 interface ParentChangeSystemRowArgs {
   parentChange: TimelineParentChange;
   status?: TimelineRowStatus;
-  /**
-   * The thread name carried in the flat title; the App splits this back out of
-   * `title` to render the linked thread-name segment. Defaults to "Worker 3".
-   */
   threadName?: string;
-  /** Override the row's thread id (defaults to the base row's thread id). */
   threadId?: string;
 }
 
-// The ownership verbs the projection interpolates into the flat title. Mirrors
-// `OWNERSHIP_CHANGE_VERBS` so the test builds the same `"{name} {verb} {parent}"`
-// title the server emits, which the App re-splits.
 const PARENT_CHANGE_VERB: Record<TimelineParentChange["action"], string> = {
   assign: "assigned to",
   release: "released from",
@@ -125,14 +118,24 @@ function toolRow(): TimelineToolWorkRow {
     workKind: "tool",
     status: "completed",
     callId: "tool-call-1",
-    toolName: "Read",
-    toolArgs: {
-      file_path: "/repo/src/app.ts",
-    },
+    toolName: "LookupTool",
+    toolArgs: { query: "select:TodoWrite" },
     output: "",
     completedAt: 2_101,
     approvalStatus: null,
-    activityIntents: [readIntent("/repo/src/app.ts")],
+  };
+}
+
+function fileReadRow(path: string): TimelineFileReadWorkRow {
+  return {
+    ...baseRow("file-read-1"),
+    kind: "work",
+    workKind: "file-read",
+    status: "completed",
+    callId: "file-read-call-1",
+    path,
+    cmd: null,
+    completedAt: 2_101,
   };
 }
 
@@ -269,6 +272,8 @@ function delegationRow(): TimelineViewDelegationWorkRow {
     status: "completed",
     callId: "delegation-call-1",
     toolName: "spawnAgent",
+    childRef: null,
+    background: false,
     subagentType: "general-purpose-review-agent-with-a-long-name",
     description: "Review correctness + plan adherence",
     output: "",
@@ -406,11 +411,6 @@ describe("buildTimelineRowTitle", () => {
   });
 
   it("collapses newlines in multi-line command content to single-line title segments", () => {
-    // Command content can include literal newlines (heredocs, scripts pasted
-    // as a single argument, etc.). The App renders segments with
-    // `whitespace-pre`, which would honor `\n` as a line break, and the
-    // plain text feeds CLI rendering and HTML title attributes. Both must
-    // be single-line, so segment construction normalizes newlines.
     const row = {
       ...commandRow(),
       command: "node <<'EOF'\nconst x = 1;\nconsole.log(x);\nEOF",
@@ -425,9 +425,6 @@ describe("buildTimelineRowTitle", () => {
   });
 
   it("emits a live-tick duration decoration on pending command rows", () => {
-    // Pending rows carry `completedAt: null`. The renderer emits a decoration
-    // sourced from `startedAt`; the App ticks `now - startedAt` locally and
-    // CLI prints nothing (no captured end yet).
     const title = buildTimelineRowTitle(
       {
         ...commandRow(),
@@ -476,10 +473,7 @@ describe("buildTimelineRowTitle", () => {
     const title = buildTimelineRowTitle(
       {
         ...toolRow(),
-        activityIntents: [],
         status: "interrupted",
-        toolArgs: { query: "select:TodoWrite" },
-        toolName: "LookupTool",
         completedAt: 3_001,
       },
       DEFAULT_OPTIONS,
@@ -498,78 +492,17 @@ describe("buildTimelineRowTitle", () => {
     ]);
   });
 
-  it("uses native plugin status labels while preserving the generic fallback", () => {
-    const completed = buildTimelineRowTitle(
-      {
-        ...toolRow(),
-        statusLabels: {
-          pending: "Reading project overview",
-          completed: "Read project overview",
-        },
-      },
-      DEFAULT_OPTIONS,
-    );
-    const pending = buildTimelineRowTitle(
-      {
-        ...toolRow(),
-        status: "pending",
-        completedAt: null,
-        statusLabels: {
-          pending: "Reading project overview",
-          completed: "Read project overview",
-        },
-      },
-      DEFAULT_OPTIONS,
-    );
-
-    expect(completed.plain).toBe("Read project overview (2s)");
-    expect(pending.plain).toBe("Reading project overview");
+  it("titles a generic tool row from its name and arguments, not from a label table", () => {
     expect(
       buildTimelineRowTitle(
         {
           ...toolRow(),
-          activityIntents: [],
           toolName: "repository_context",
           toolArgs: null,
         },
         DEFAULT_OPTIONS,
       ).plain,
     ).toBe("Ran tool repository_context (2s)");
-  });
-
-  // The labels deliberately cover only pending and completed. Every other
-  // state must fall back to the tool's own identity, or a failing plugin tool
-  // would render as a success sentence and the failure would be unreadable.
-  it("ignores plugin status labels outside pending and completed", () => {
-    const statusLabels = {
-      pending: "Reading project overview",
-      completed: "Read project overview",
-    };
-    const render = (overrides: Partial<ReturnType<typeof toolRow>>): string =>
-      buildTimelineRowTitle(
-        {
-          ...toolRow(),
-          activityIntents: [],
-          toolName: "repository_context",
-          toolArgs: null,
-          statusLabels,
-          ...overrides,
-        },
-        DEFAULT_OPTIONS,
-      ).plain;
-
-    expect(render({ status: "error" })).toContain("repository_context");
-    expect(render({ status: "error" })).not.toContain("Read project overview");
-    expect(render({ status: "interrupted" })).toContain("repository_context");
-    expect(render({ status: "interrupted" })).not.toContain(
-      "Read project overview",
-    );
-    expect(
-      render({ status: "pending", approvalStatus: "waiting_for_approval" }),
-    ).not.toContain("Reading project overview");
-    expect(
-      render({ status: "pending", approvalStatus: "denied" }),
-    ).not.toContain("Reading project overview");
   });
 
   it("can render completed work leaves with muted summary title treatment", () => {
@@ -581,8 +514,6 @@ describe("buildTimelineRowTitle", () => {
     expect(title.plain).toBe(
       "Ran pnpm exec turbo run test --filter=@bb/app (2s)",
     );
-    // Summary work-style mutes via tone; per-segment em is preserved so
-    // content emphasis stays visible inside the muted wrapper.
     expect(title.tone).toBe("summary");
     expect(title.segments.find((s) => s.em)?.text).toBe(
       "pnpm exec turbo run test --filter=@bb/app",
@@ -599,6 +530,15 @@ describe("buildTimelineRowTitle", () => {
       } satisfies TimelineCommandWorkRow,
     },
     {
+      expectedPlain: "Permission denied: Read /repo/src/app.ts",
+      row: {
+        ...commandRow(),
+        command: "cat /repo/src/app.ts",
+        activityIntents: [readIntent("/repo/src/app.ts")],
+        approvalStatus: "denied",
+      } satisfies TimelineCommandWorkRow,
+    },
+    {
       expectedPlain: "Permission denied: src/existing-file.ts +1 -1",
       row: {
         ...editedFileRow(),
@@ -606,7 +546,8 @@ describe("buildTimelineRowTitle", () => {
       } satisfies TimelineFileChangeWorkRow,
     },
     {
-      expectedPlain: "Permission denied: Read /repo/src/app.ts",
+      expectedPlain:
+        "Permission denied: LookupTool { query: select:TodoWrite } (2s)",
       row: {
         ...toolRow(),
         approvalStatus: "denied",
@@ -849,8 +790,6 @@ describe("buildTimelineRowTitle", () => {
       expect(title.plain).toBe(expectedPlain);
       expect(title.segments.map((s) => s.text)).toEqual(expectedSegments);
 
-      // The leading thread-name segment is emphasized and linked to the row's
-      // own thread, matching the agent "Message from [thread]" treatment.
       const threadSegment = title.segments[0];
       expect(threadSegment?.em).toBe(true);
       expect(threadSegment?.link).toEqual({
@@ -858,11 +797,9 @@ describe("buildTimelineRowTitle", () => {
         threadId: "thread-1",
       });
 
-      // The verb is a muted, unlinked connector.
       expect(title.segments[1]?.link).toBeUndefined();
       expect(title.segments[1]?.accent).toBe("muted");
 
-      // The trailing parent segment links to the (new/previous) parent.
       const parentSegment = title.segments[2];
       expect(parentSegment?.em).toBe(true);
       expect(parentSegment?.link).toEqual({
@@ -979,7 +916,6 @@ describe("buildTimelineRowTitle", () => {
       DEFAULT_OPTIONS,
     );
 
-    // Null parent → literal "parent" with no link, never a dangling verb.
     expect(title.plain).toBe("Worker 3 assigned to parent");
     expect(title.segments.map((s) => s.text)).toEqual([
       "Worker 3",
@@ -993,8 +929,6 @@ describe("buildTimelineRowTitle", () => {
     const title = buildTimelineRowTitle(
       parentChangeSystemRow({
         threadName: "Worker 3",
-        // A null title with a present id keeps the parent linkable, falling
-        // back to the id as the visible label.
         parentChange: {
           action: "assign",
           previousParentThreadId: null,
@@ -1050,8 +984,6 @@ describe("buildTimelineRowTitle", () => {
         DEFAULT_OPTIONS,
       );
 
-      // The thread name leads the title and carries the shimmer when pending.
-      // (`plain` also folds in any status decoration, so compare the segments.)
       expect(title.segments.map((s) => s.text)).toEqual([
         "Worker 3",
         "assigned to",
@@ -1071,9 +1003,9 @@ describe("buildTimelineRowTitle", () => {
 
   it("renders failed exploration intents using the intent verb", () => {
     const row = {
-      ...toolRow(),
+      ...fileReadRow("/repo/src/app.ts"),
       status: "error",
-    } satisfies TimelineToolWorkRow;
+    } satisfies TimelineFileReadWorkRow;
 
     const title = buildTimelineRowTitle(row, DEFAULT_OPTIONS);
 
@@ -1339,10 +1271,6 @@ describe("buildTimelineRowTitle", () => {
   });
 
   it("emits a live duration decoration for pending turns so the App ticks elapsed", () => {
-    // Pending turns carry `completedAt: null`; the CLI prints just "Working"
-    // (no captured duration to format), but the renderer still emits the
-    // duration decoration so the App's `LiveDurationText` can tick `now -
-    // startedAt` once the elapsed time crosses the visible threshold.
     const row = {
       ...turnRow(),
       completedAt: null,
@@ -1569,7 +1497,7 @@ describe("buildTimelineRowTitle", () => {
       ...workSummaryRow(
         [
           {
-            ...toolRow(),
+            ...fileReadRow("/repo/src/app.ts"),
             status: "pending",
           },
           {
@@ -1597,7 +1525,6 @@ describe("buildTimelineRowTitle", () => {
         [
           {
             ...toolRow(),
-            activityIntents: [],
             toolName: "UnknownTool",
             toolArgs: null,
             status: "pending",
@@ -1643,13 +1570,11 @@ describe("buildTimelineRowTitle", () => {
   it("includes the skill name when compacting SKILL.md read titles", () => {
     const skillPath =
       "/Users/brsbl/.codex/plugins/cache/openai-bundled/browser/26.608.12217/skills/control-in-app-browser/SKILL.md";
-    const row = {
-      ...toolRow(),
-      toolArgs: { file_path: skillPath },
-      activityIntents: [readIntent(skillPath)],
-    } satisfies TimelineToolWorkRow;
 
-    const title = buildTimelineRowTitle(row, DEFAULT_OPTIONS);
+    const title = buildTimelineRowTitle(
+      fileReadRow(skillPath),
+      DEFAULT_OPTIONS,
+    );
 
     expect(title.segments.map((segment) => segment.text)).toEqual([
       "Read",
@@ -1661,13 +1586,11 @@ describe("buildTimelineRowTitle", () => {
   it("uses the plugin name when compacting plugin-root SKILL.md read titles", () => {
     const skillPath =
       "/Users/brsbl/.codex/plugins/cache/openai-bundled/browser/26.608.12217/SKILL.md";
-    const row = {
-      ...toolRow(),
-      toolArgs: { file_path: skillPath },
-      activityIntents: [readIntent(skillPath)],
-    } satisfies TimelineToolWorkRow;
 
-    const title = buildTimelineRowTitle(row, DEFAULT_OPTIONS);
+    const title = buildTimelineRowTitle(
+      fileReadRow(skillPath),
+      DEFAULT_OPTIONS,
+    );
 
     expect(title.segments.map((segment) => segment.text)).toEqual([
       "Read",

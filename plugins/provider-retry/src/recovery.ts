@@ -33,7 +33,7 @@ type FailedTurnInspectionReason =
   | "superseded"
   | "execution-unavailable";
 
-export type ProviderRetryReason =
+type ProviderRetryReason =
   | FailedTurnInspectionReason
   | "eligible"
   | "manual-only"
@@ -41,7 +41,7 @@ export type ProviderRetryReason =
   | "no-terminal-rate-limit-error"
   | "provider-will-retry";
 
-export interface ProviderRetryExecution {
+interface ProviderRetryExecution {
   model: string;
   permissionMode: "accept-edits" | "auto" | "full";
   reasoningLevel: TurnRequestEventRow["data"]["execution"]["reasoningLevel"];
@@ -243,11 +243,7 @@ function inspectFailedTurn(events: ThreadEventRows): FailedTurnInspection {
     return { candidate: null, reason: "superseded" };
   }
 
-  if (
-    completed.type !== "turn/completed" ||
-    completed.data.status !== "failed" ||
-    completed.scope.kind !== "turn"
-  ) {
+  if (completed.data.status !== "failed" || completed.scope.kind !== "turn") {
     return { candidate: null, reason: "no-failed-turn" };
   }
   const turnId = completed.scope.turnId;
@@ -269,10 +265,6 @@ function inspectFailedTurn(events: ThreadEventRows): FailedTurnInspection {
   };
 }
 
-/*
- * Keep failure classification plugin-local. The server event API supplies
- * facts; this plugin decides which provider failures are recoverable.
- */
 export function classifyProviderRetry(args: {
   events: ThreadEventRows;
   hostId: string;

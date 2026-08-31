@@ -51,8 +51,6 @@ type ThreadWriteConnection = DbConnection | DbTransaction;
 export const THREAD_SEARCH_LIMIT_PER_GROUP_DEFAULT = 20;
 export const THREAD_SEARCH_LIMIT_PER_GROUP_MAX = 50;
 
-// The sidebar shows one message line per result, so each thread carries its
-// matching title segments plus a single best-ranked message match.
 const THREAD_SEARCH_MESSAGE_MATCHES_PER_THREAD = 1;
 const THREAD_SEARCH_QUERY_TOKEN_PATTERN = /[\p{L}\p{N}_]+/gu;
 const THREAD_SEARCH_HIGHLIGHT_RANGE_LIMIT = 8;
@@ -97,8 +95,6 @@ export interface ThreadSearchMatch {
   sourceKind: ThreadSearchSourceKind;
   text: string;
   highlightRanges: ThreadSearchHighlightRange[];
-  // Event sequence of the matched message (null for title matches), so callers
-  // can deep-link to the message in the conversation timeline.
   sourceSeq: number | null;
 }
 
@@ -237,7 +233,7 @@ export function upsertThreadSearchSegments(
   }
 }
 
-export function upsertThreadTitleSearchSegments(
+function upsertThreadTitleSearchSegments(
   db: ThreadWriteConnection,
   args: UpsertThreadTitleSearchSegmentsArgs,
 ): void {
@@ -273,7 +269,6 @@ export interface CreateThreadInput {
   parentThreadId?: string | null;
   sourceThreadId?: string | null;
   originKind?: ThreadOriginKind | null;
-  /** Plugin attribution for create origin "plugin". */
   originPluginId?: string | null;
   visibility?: ThreadVisibility;
 }
@@ -343,10 +338,6 @@ export interface ThreadMentionRow {
   titleFallback: string | null;
 }
 
-/**
- * Resolves an exact bounded ID set without loading unrelated threads. Deleted
- * threads and threads whose project was deleted are intentionally absent.
- */
 export function listThreadMentionRowsByIds(
   db: DbQueryConnection,
   threadIds: readonly string[],
@@ -376,22 +367,15 @@ export function listThreadMentionRowsByIds(
 export interface ListThreadsOptions {
   projectId?: string;
   archived?: boolean;
-  /** Restrict to threads filed directly under this section. */
   sectionId?: string;
-  /** Restrict to loose threads — those not filed under any section. */
   unsectioned?: boolean;
   parentThreadId?: string;
-  /** When true, restrict to child threads. When false, restrict to root threads. */
   hasParent?: boolean;
-  /** Restrict to threads spawned from this source thread. */
   sourceThreadId?: string;
-  /** Restrict to threads spawned with this origin. */
   originKind?: ThreadOriginKind;
-  /** Restrict to threads spawned by this plugin. */
   originPluginId?: string;
   limit?: number;
   offset?: number;
-  /** Hidden threads are excluded unless explicitly opted in. */
   includeHidden?: boolean;
 }
 
@@ -522,12 +506,6 @@ export function listActiveVisiblePinnedThreadRoots(
 }
 
 function threadWithPendingInteractionBaseQuery(db: DbConnection) {
-  // A correlated EXISTS instead of a pending_interactions join with
-  // GROUP BY threads.id: the grouped form forces SQLite to either sort the
-  // whole joined result into a temp B-tree or walk the threads table in
-  // id-index order, which costs one random page read per thread on a cold
-  // cache (issue #1131). The probe is served by
-  // pending_interactions_thread_status_created_idx.
   return db
     .select({
       ...getTableColumns(threads),
@@ -635,16 +613,16 @@ export interface ListHostThreadIdsArgs {
   hostId: string;
 }
 
+export interface ListActiveHostThreadsArgs {
+  hostId: string;
+}
+
 export interface ThreadEnvironmentAssignmentRow {
   environmentId: string;
   threadId: string;
 }
 
 export interface HasPendingThreadShutdownInEnvironmentArgs {
-  environmentId: string;
-}
-
-export interface HasNonTerminalThreadInEnvironmentArgs {
   environmentId: string;
 }
 
@@ -721,8 +699,6 @@ function buildListThreadsForProjectsFilters(
   ].filter((value) => value !== undefined);
 }
 
-// Order archived listings by archive recency so paginated pages show the
-// most recently archived rows first.
 function buildActiveProjectThreadOrderBy() {
   return [
     asc(threads.projectId),
@@ -922,12 +898,6 @@ function isHighSurrogate(text: string, index: number): boolean {
   return code >= 0xd800 && code <= 0xdbff;
 }
 
-/**
- * Bounds a message match to a short window around its first highlight so the
- * response carries what the sidebar can show on one line instead of the whole
- * message body. Highlight ranges are rebased onto the snippet, and an ellipsis
- * marks each side that was cut.
- */
 function buildThreadSearchSnippet(args: {
   text: string;
   tokens: readonly string[];
@@ -947,8 +917,6 @@ function buildThreadSearchSnippet(args: {
   );
   let end = Math.min(text.length, start + THREAD_SEARCH_SNIPPET_MAX_CHARS);
 
-  // Prefer word boundaries on each cut side when one exists inside the lead or
-  // tail context, without dropping the highlight itself.
   if (start > 0) {
     const boundary = text.slice(start, anchorStart).search(/\s/u);
     if (boundary !== -1) {
@@ -958,8 +926,6 @@ function buildThreadSearchSnippet(args: {
   if (end < text.length) {
     const tailStart = Math.max(anchorEnd, start);
     const boundary = text.slice(tailStart, end).search(/\s\S*$/u);
-    // Snap back to the last word break unless that would discard more than a
-    // lead's worth of context (long URLs and code paths keep the hard cut).
     if (
       boundary > 0 &&
       end - (tailStart + boundary) <= THREAD_SEARCH_SNIPPET_LEAD_CHARS
@@ -991,13 +957,6 @@ function buildThreadSearchSnippet(args: {
   };
 }
 
-/**
- * One FTS pass for both result groups: rank threads that contain every query
- * token, keep the top `limitPerGroup` per archive partition, then pull the
- * matching title segments plus the single best message segment for each kept
- * thread. Rows come back ordered by group, thread rank, then title before
- * message.
- */
 function listThreadSearchMatchRows(
   db: DbConnection,
   args: ListThreadSearchMatchRowsArgs,
@@ -1108,8 +1067,6 @@ function hydrateThreadSearchGroup(
     }
     const matches = matchesByThreadId.get(row.threadId) ?? [];
     const sourceKind = threadSearchSourceKindSchema.parse(row.sourceKind);
-    // Titles stay whole so the sidebar can pair the match with the display
-    // title; message bodies are cut down to a snippet around the first hit.
     const snippet = isThreadSearchTitleSourceKind(sourceKind)
       ? {
           text: row.text,
@@ -1220,12 +1177,6 @@ export function listThreadsWithPendingInteractionState(
   return rows.map(toThreadWithPendingInteractionState);
 }
 
-/**
- * Whether the active, sidebar-visible thread set contains work that would
- * light the app favicon: an unread attention timestamp or a pending user
- * interaction. Kept as an existence query because the desktop shell polls
- * this summary for every registered server.
- */
 export function hasActiveThreadAttention(db: DbConnection): boolean {
   const unreadThread = or(
     isNull(threads.lastReadAt),
@@ -1283,14 +1234,6 @@ export function countLiveThreadsInEnvironment(
   );
 }
 
-/**
- * Whether the environment has a thread that is archived but not deleted — i.e. a
- * thread that could still be unarchived. The archive grace window (which delays
- * destroying a retiring environment's worktree so an accidental archive can be
- * undone) only applies when such a revivable thread exists; an environment left
- * retiring solely by deleted/tombstoned threads has nothing to undo and is
- * cleaned up immediately.
- */
 export function hasRevivableArchivedThreadInEnvironment(
   db: ThreadWriteConnection,
   args: HasRevivableArchivedThreadInEnvironmentArgs,
@@ -1337,11 +1280,6 @@ export function listUnarchivedAssignedChildThreads(
 }
 
 
-/**
- * Live hidden threads forked from this source. A hidden fork has no navigable
- * row of its own, so it retires with the thread it was derived from — the
- * cascade is structural rather than owned by whichever plugin created it.
- */
 export function listUnarchivedHiddenSourceThreads(
   db: ThreadWriteConnection,
   args: ListUnarchivedHiddenSourceThreadsArgs,
@@ -1394,11 +1332,6 @@ export interface HasLiveThreadAtHostPathArgs {
   path: string;
 }
 
-/**
- * Whether any project has a live thread working in one physical directory.
- * A branch checkout rewrites the working tree, so it must not run while
- * another project's agent uses the same folder.
- */
 export function hasLiveThreadAtHostPath(
   db: DbConnection,
   args: HasLiveThreadAtHostPathArgs,
@@ -1411,7 +1344,7 @@ export function hasLiveThreadAtHostPath(
       and(
         eq(environments.hostId, args.hostId),
         eq(environments.path, args.path),
-        nonDeletedThreads(
+        liveThreads(
           inArray(threads.status, [...NON_TERMINAL_THREAD_STATUSES]),
         ),
       ),
@@ -1434,6 +1367,23 @@ export function listHostThreadIds(
     .map((row) => row.id);
 }
 
+export function listActiveHostThreads(
+  db: DbConnection,
+  args: ListActiveHostThreadsArgs,
+): ThreadRow[] {
+  return db
+    .select(getTableColumns(threads))
+    .from(threads)
+    .innerJoin(environments, eq(threads.environmentId, environments.id))
+    .where(
+      nonDeletedThreads(
+        eq(environments.hostId, args.hostId),
+        eq(threads.status, "active"),
+      ),
+    )
+    .all();
+}
+
 export function hasPendingThreadShutdownInEnvironment(
   db: DbConnection,
   args: HasPendingThreadShutdownInEnvironmentArgs,
@@ -1450,19 +1400,6 @@ export function hasPendingThreadShutdownInEnvironment(
     .get();
 
   return row !== undefined;
-}
-
-export function hasNonTerminalThreadInEnvironment(
-  db: DbConnection,
-  args: HasNonTerminalThreadInEnvironmentArgs,
-): boolean {
-  return hasThreadWhere(
-    db,
-    nonDeletedThreads(
-      eq(threads.environmentId, args.environmentId),
-      inArray(threads.status, [...NON_TERMINAL_THREAD_STATUSES]),
-    ),
-  );
 }
 
 export function pinThread(
@@ -1678,8 +1615,6 @@ export function updateThread(
     "visibility" in input &&
     input.visibility !== existing.visibility
   ) {
-    // title-changed is the existing organization-metadata invalidation used
-    // for section changes as well as titles.
     changes.push("title-changed");
   }
   if (
@@ -1755,14 +1690,6 @@ export interface SetThreadExecutionOverrideInput {
   reasoningLevelOverride?: ReasoningLevel | null;
 }
 
-/**
- * Persists the sticky, thread-level execution override. Presence-sensitive:
- * an omitted field is left unchanged, an explicit `null` clears it. Kept off
- * the generic `updateThread` helper because execution config must not flow
- * through generic metadata updates. No realtime notification is emitted: the
- * override is consumed by the next turn's `resolveExecutionOptions`, and no
- * client surface renders it yet (UI surfacing is a follow-up).
- */
 export function setThreadExecutionOverride(
   db: ThreadWriteConnection,
   input: SetThreadExecutionOverrideInput,
@@ -1934,11 +1861,6 @@ export class ThreadLifecycleEventNotAppliedError extends Error {
   }
 }
 
-/**
- * For boundary callers where a no-op outcome is a real error (e.g. a 4xx
- * response): returns the updated row, or throws
- * ThreadLifecycleEventNotAppliedError.
- */
 export function requireThreadLifecycleEventApplied(
   outcome: ApplyThreadLifecycleEventOutcome,
 ) {
@@ -1948,8 +1870,8 @@ export function requireThreadLifecycleEventApplied(
   return outcome.thread;
 }
 
-function applyThreadLifecycleEventRecord(
-  db: ThreadWriteConnection,
+export function applyThreadLifecycleEventInTransaction(
+  db: DbTransaction,
   args: ApplyThreadLifecycleEventArgs,
 ): ApplyThreadLifecycleEventOutcome {
   const thread = db
@@ -1992,9 +1914,6 @@ function applyThreadLifecycleEventRecord(
     set.latestAttentionAt = now;
   }
 
-  // Compare-and-set on the loaded status: belt-and-braces under
-  // better-sqlite3's synchronous transactions, and the contract that survives
-  // any future executor change.
   const updated = db
     .update(threads)
     .set(set)
@@ -2013,34 +1932,12 @@ function applyThreadLifecycleEventRecord(
   return { applied: true, thread: updated };
 }
 
-/**
- * Single writer for thread lifecycle events: loads the row, evaluates the
- * event against THREAD_LIFECYCLE and its supersession predicates, and applies
- * the transition with a status compare-and-set — all in one transaction.
- * Never throws on stale or illegal events; returns a typed outcome for the
- * caller to log. Use applyThreadLifecycleEventInTransaction from inside an
- * existing transaction (the caller then owns notification).
- */
 export function applyThreadLifecycleEvent(
   db: DbConnection,
-  notifier: DbNotifier,
   args: ApplyThreadLifecycleEventArgs,
 ): ApplyThreadLifecycleEventOutcome {
-  const outcome = db.transaction(
-    (tx) => applyThreadLifecycleEventRecord(tx, args),
+  return db.transaction(
+    (tx) => applyThreadLifecycleEventInTransaction(tx, args),
     { behavior: "immediate" },
   );
-  if (outcome.applied) {
-    notifier.notifyThread(args.threadId, ["status-changed"], {
-      projectId: outcome.thread.projectId,
-    });
-  }
-  return outcome;
-}
-
-export function applyThreadLifecycleEventInTransaction(
-  tx: DbTransaction,
-  args: ApplyThreadLifecycleEventArgs,
-): ApplyThreadLifecycleEventOutcome {
-  return applyThreadLifecycleEventRecord(tx, args);
 }

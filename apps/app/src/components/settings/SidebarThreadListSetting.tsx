@@ -10,24 +10,20 @@ import {
   DropdownMenuTrigger,
 } from "@bb/shared-ui/dropdown-menu";
 import { SettingsWithControl } from "@/components/ui/settings-section";
+import { threadListProviderAtom } from "@/components/sidebar/threadListProvider";
 import {
-  AUTOMATIC_THREAD_LIST_PROVIDER,
-  BUILT_IN_THREAD_LIST_PROVIDER,
-  threadListProviderAtom,
-  threadListProviderKey,
-} from "@/components/sidebar/threadListProvider";
+  AUTOMATIC_REPLACEMENT_PROVIDER,
+  BUILT_IN_REPLACEMENT_PROVIDER,
+  replacementProviderKey,
+} from "@/lib/plugin-replacement-preference";
 import { usePluginSlots } from "@/lib/plugin-slots";
 
 const BUILT_IN_OPTION = {
-  key: BUILT_IN_THREAD_LIST_PROVIDER,
+  key: BUILT_IN_REPLACEMENT_PROVIDER,
   title: "bb (built-in)",
   description: "Projects, sections, and nested threads.",
 } as const;
 
-/**
- * Automatic activation remains the default. This control lets the user pin
- * BB's list or a specific plugin provider on this client.
- */
 export function SidebarThreadListSetting() {
   const { threadLists } = usePluginSlots();
   const [preference, setPreference] = useAtom(threadListProviderAtom);
@@ -35,7 +31,7 @@ export function SidebarThreadListSetting() {
   const automaticProvider = threadLists[0];
   if (automaticProvider === undefined) return null;
   const automaticOption = {
-    key: AUTOMATIC_THREAD_LIST_PROVIDER,
+    key: AUTOMATIC_REPLACEMENT_PROVIDER,
     title: "Automatic",
     description: `Currently using ${automaticProvider.title} from ${automaticProvider.pluginId}.`,
   };
@@ -43,12 +39,11 @@ export function SidebarThreadListSetting() {
     automaticOption,
     BUILT_IN_OPTION,
     ...threadLists.map((slot) => ({
-      key: threadListProviderKey(slot),
+      key: replacementProviderKey(slot),
       title: slot.title,
       description: slot.description ?? `From the ${slot.pluginId} plugin.`,
     })),
   ];
-  // An unavailable explicit provider renders BB's list until it returns.
   const selected =
     options.find((option) => option.key === preference) ?? BUILT_IN_OPTION;
 

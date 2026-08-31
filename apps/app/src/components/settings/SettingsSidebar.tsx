@@ -4,43 +4,46 @@ import {
   SectionSidebar,
   SectionSidebarIcon,
   SectionSidebarLabel,
+  SectionSidebarActionRow,
   SectionSidebarRow,
 } from "@/components/sidebar/SectionSidebar";
-import { COARSE_POINTER_ICON_SIZE_CLASS } from "@bb/shared-ui/coarse-pointer-sizing";
+import { canOpenNativeScreen, shellOpenNative } from "@/lib/native-shell";
 import {
   SETTINGS_ROUTE_PATH,
   getPluginConfigurationRoutePath,
-  getSettingsProviderRoutePath,
   getSettingsRoutePath,
 } from "@/lib/route-paths";
-import { getProviderIconInfo } from "@/lib/provider-icon";
 import { useSettingsNavState } from "./settings-nav";
+import type { SettingsNavState } from "./settings-nav";
 
 interface SettingsSidebarProps {
   onResizeMouseDown: (event: ReactMouseEvent<HTMLDivElement>) => void;
   isResizing: boolean;
   showTopReserve: boolean;
   appRoutePath: string;
-  /** Render the body only, inside a compact drawer panel owned by the caller. */
   mobileHosted?: boolean;
 }
 
-/** Focused Settings navigation using the shared section-sidebar shell. */
-export function SettingsSidebar({
+type SettingsSidebarNavigation = Pick<
+  SettingsNavState,
+  "activePluginId" | "activeSection" | "pluginEntries" | "sections"
+>;
+
+interface SettingsSidebarContentProps extends SettingsSidebarProps {
+  navigation: SettingsSidebarNavigation;
+  testIdPrefix?: string;
+}
+
+export function SettingsSidebarContent({
   onResizeMouseDown,
   isResizing,
   showTopReserve,
   appRoutePath,
   mobileHosted,
-}: SettingsSidebarProps) {
-  const {
-    activePluginId,
-    activeProviderId,
-    activeSection,
-    pluginEntries,
-    providerEntries,
-    sections,
-  } = useSettingsNavState();
+  navigation,
+  testIdPrefix = "settings",
+}: SettingsSidebarContentProps) {
+  const { activePluginId, activeSection, pluginEntries, sections } = navigation;
 
   return (
     <SectionSidebar
@@ -50,7 +53,7 @@ export function SettingsSidebar({
       mobileHosted={mobileHosted}
       onResizeMouseDown={onResizeMouseDown}
       showTopReserve={showTopReserve}
-      testIdPrefix="settings"
+      testIdPrefix={testIdPrefix}
     >
       <SectionSidebarLabel>Settings</SectionSidebarLabel>
       <div className="mt-1 space-y-0.5">
@@ -70,28 +73,6 @@ export function SettingsSidebar({
               <SectionSidebarIcon name={section.icon} />
             </SectionSidebarRow>
           ))}
-      </div>
-      <div className="mt-4">
-        <SectionSidebarLabel>Providers</SectionSidebarLabel>
-      </div>
-      <div className="mt-1 space-y-0.5">
-        {providerEntries.map((provider) => {
-          const ProviderIcon = getProviderIconInfo(provider.id)?.icon;
-          return (
-            <SectionSidebarRow
-              key={provider.id}
-              active={activeProviderId === provider.id}
-              label={provider.label}
-              to={getSettingsProviderRoutePath(provider.id)}
-            >
-              {ProviderIcon ? (
-                <ProviderIcon className={COARSE_POINTER_ICON_SIZE_CLASS} />
-              ) : (
-                <SectionSidebarIcon name="Code" />
-              )}
-            </SectionSidebarRow>
-          );
-        })}
       </div>
       {pluginEntries.length > 0 ? (
         <>
@@ -113,6 +94,22 @@ export function SettingsSidebar({
                 />
               </SectionSidebarRow>
             ))}
+          </div>
+        </>
+      ) : null}
+      {canOpenNativeScreen() ? (
+        <>
+          <div className="mt-4">
+            <SectionSidebarLabel>This phone</SectionSidebarLabel>
+          </div>
+          <div className="mt-1 space-y-0.5">
+            <SectionSidebarActionRow
+              label="This device"
+              testId="settings-nav-native-device"
+              onClick={() => shellOpenNative("device-settings")}
+            >
+              <SectionSidebarIcon name="Smartphone" />
+            </SectionSidebarActionRow>
           </div>
         </>
       ) : null}
@@ -138,5 +135,26 @@ export function SettingsSidebar({
         </>
       ) : null}
     </SectionSidebar>
+  );
+}
+
+export function SettingsSidebar({
+  onResizeMouseDown,
+  isResizing,
+  showTopReserve,
+  appRoutePath,
+  mobileHosted,
+}: SettingsSidebarProps) {
+  const navigation = useSettingsNavState();
+
+  return (
+    <SettingsSidebarContent
+      appRoutePath={appRoutePath}
+      isResizing={isResizing}
+      mobileHosted={mobileHosted}
+      navigation={navigation}
+      onResizeMouseDown={onResizeMouseDown}
+      showTopReserve={showTopReserve}
+    />
   );
 }

@@ -4,19 +4,15 @@ import type { PromptMentionLinkResolver } from "@/components/promptbox/editor/pr
 import type { PromptBoxAction } from "@/components/promptbox/PromptBoxActionsMenu";
 import { withAppPromptActions } from "@/components/promptbox/PromptBoxActionsMenu";
 import type { ProviderComposerAction } from "@bb/domain";
-import { buildProviderPromptActionProps } from "@/components/promptbox/mentions/command-trigger";
+import { buildProviderPromptActionProps } from "@bb/client-core";
 import { useCommandSuggestions } from "@/hooks/useCommandSuggestions";
 import { usePromptMentions } from "@/hooks/usePromptMentions";
 
 interface UseComposerTypeaheadArgs {
   projectId: string;
-  /** Project scope for @-mentions when it differs from the command scope. */
   mentionsProjectId?: string;
   providerId: string;
   environmentId: string | null;
-  /** Composer surface used to exclude commands that require an existing thread. */
-  commandScope: "new-thread" | "thread";
-  /** The thread the composer belongs to (excluded from thread mentions). */
   currentThreadId: string;
   selectedProviderComposerActions:
     | readonly ProviderComposerAction[]
@@ -24,22 +20,16 @@ interface UseComposerTypeaheadArgs {
   resolveMentionLink: PromptMentionLinkResolver;
 }
 
-export interface UseComposerTypeaheadResult {
+interface UseComposerTypeaheadResult {
   typeaheadConfig: TypeaheadConfig;
   promptActions: readonly PromptBoxAction[];
 }
 
-/**
- * The @-mention and command-trigger typeahead wiring shared by every
- * thread-chat composer, plus the provider prompt actions (with the app-owned
- * actions appended) that seed the command suggestion list.
- */
 export function useComposerTypeahead({
   projectId,
   mentionsProjectId,
   providerId,
   environmentId,
-  commandScope,
   currentThreadId,
   selectedProviderComposerActions,
   resolveMentionLink,
@@ -65,7 +55,7 @@ export function useComposerTypeahead({
   const commandSuggestions = useCommandSuggestions({
     projectId,
     providerId,
-    commandScope,
+    commandScope: "thread",
     skillsTrigger: providerPromptActions.skillsTrigger,
     promptActions,
     environmentId,
@@ -77,7 +67,7 @@ export function useComposerTypeahead({
     () => ({
       mention: {
         triggers: promptMentions.triggers,
-        suggestions: promptMentions.suggestions,
+        results: promptMentions.results,
         isLoading: promptMentions.isLoading,
         isError: promptMentions.isError,
         onQueryChange: promptMentions.setQuery,
@@ -107,7 +97,7 @@ export function useComposerTypeahead({
       promptMentions.isError,
       promptMentions.isLoading,
       promptMentions.setQuery,
-      promptMentions.suggestions,
+      promptMentions.results,
       promptMentions.triggers,
       resolveMentionLink,
     ],

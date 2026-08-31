@@ -6,15 +6,13 @@ export { MAX_WORKFLOW_SOURCE_BYTES };
 
 export interface WorkflowSourceInput {
   script?: string;
-  /** Backward-compatible alias for `script`. */
   source?: string;
   scriptPath?: string;
-  /** CLI-only base for a relative scriptPath; must itself be workspace-confined. */
   scriptPathBase?: string;
   name?: string;
 }
 
-export interface WorkflowSourceEnvironment {
+interface WorkflowSourceEnvironment {
   id: string;
   projectId: string;
   hostId: string;

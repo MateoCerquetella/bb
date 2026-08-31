@@ -23,6 +23,7 @@ import {
 } from "./areas/thread-sections.js";
 
 export type * from "./public-types.js";
+export { createBuiltinPlanCommandTextInput } from "@bb/domain";
 
 export interface CreateBbSdkArgs {
   context?: BbSdkContext;
@@ -33,11 +34,6 @@ export interface CreateBbSdkWithGuideArgs extends CreateBbSdkArgs {
   guide: GuideArea;
 }
 
-/**
- * Every server-backed SDK area. The Node SDK adds the local `guide` area on
- * top of this; the browser SDK omits it so the generated guide templates
- * (~112 KB of markdown) stay out of the web app's boot chunk.
- */
 export interface BbSdkAreas extends BbRealtime {
   environments: EnvironmentsArea;
   files: FilesArea;
@@ -63,8 +59,7 @@ export function createBbSdk(args: CreateBbSdkArgs): BbSdkAreas;
 export function createBbSdk(
   args: CreateBbSdkArgs | CreateBbSdkWithGuideArgs,
 ): BbSdkAreas | BbSdk {
-  const context = args.context ?? {};
-  const sdkContext = { transport: args.transport, context };
+  const sdkContext = { transport: args.transport };
   const realtime = createBbRealtimeClient({
     transport: args.transport,
   });

@@ -16,7 +16,7 @@ import {
 import { SidebarHistoryNavigationControls } from "@/components/sidebar/SidebarHistoryNavigationControls";
 import { PROJECT_LIST_ACTION_BUTTON_CLASS } from "@/components/sidebar/ProjectList";
 import { SIDEBAR_STANDARD_ROW_PADDING_CLASS } from "@/components/sidebar/sidebarRowClasses";
-import { CHROME_SECTION_LABEL_CLASS } from "@/components/ui/chromeStyleTokens";
+import { CHROME_SECTION_LABEL_CLASS } from "@bb/shared-ui/chrome-style-tokens";
 import {
   CHROME_ROW_CLASS,
   getBbDesktopInfo,
@@ -64,6 +64,35 @@ export function SectionSidebarRow({
   );
 }
 
+export function SectionSidebarActionRow({
+  children,
+  label,
+  onClick,
+  testId,
+}: {
+  children: ReactNode;
+  label: string;
+  onClick: () => void;
+  testId?: string;
+}) {
+  const closeOnMobile = useCloseMobileSidebar();
+  return (
+    <Button
+      size="sm"
+      variant="ghost"
+      data-testid={testId}
+      className={cn(PROJECT_LIST_ACTION_BUTTON_CLASS, "w-full")}
+      onClick={() => {
+        closeOnMobile();
+        onClick();
+      }}
+    >
+      {children}
+      <span className="min-w-0 flex-1 truncate text-left">{label}</span>
+    </Button>
+  );
+}
+
 export function SectionSidebarLabel({ children }: { children: ReactNode }) {
   return (
     <div
@@ -77,14 +106,6 @@ export function SectionSidebarLabel({ children }: { children: ReactNode }) {
   );
 }
 
-/**
- * Shared shell for focused app sections such as Settings and Tools.
- *
- * `mobileHosted` renders the body without its own `<Sidebar>` shell: on
- * compact viewports AppLayoutSidebar owns one persistent drawer panel and
- * hosts this body inside it, so switching between the app sidebar and a
- * section sidebar never remounts the panel or the app sidebar's thread list.
- */
 export function SectionSidebar({
   backLabel,
   backTo,

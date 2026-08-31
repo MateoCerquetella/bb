@@ -18,10 +18,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createStore } from "../api";
 import plugin from "../server";
+import { registerTasksCli } from "./index";
 
-// Passthrough mock with one injectable failure: files named boom.bin fail at
-// blob-write time, simulating a post-preflight persistence error so the
-// create --attach partial-failure path is deterministic.
 vi.mock("../attachments", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../attachments")>();
   const saveAttachmentFromBytes: typeof actual.saveAttachmentFromBytes = async (
@@ -37,11 +35,6 @@ vi.mock("../attachments", async (importOriginal) => {
   return { ...actual, saveAttachmentFromBytes };
 });
 
-// Fake bb.sdk.files backed by the local filesystem, mimicking the host
-// daemon's transport contract (missing-path errors, the 25 MB read cap, and
-// utf8-vs-base64 content encoding). The CLI reaches invoking-machine files
-// only through bb.sdk.files, so these tests stub it instead of relying on
-// the plugin touching the server's disk.
 function localFilesSdk() {
   return {
     read: async ({ path }: { path: string }) => {
@@ -776,6 +769,147 @@ describe("bb tasks CLI", () => {
     await harness.dispose();
   });
 
+  it("deletes a folder by name or id and unfiles its projects and subfolders", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "tasks" });
+    await plugin(bb);
+    const parent = JSON.parse(
+      stdout(
+        await harness.runCli([
+          "folder",
+          "create",
+          "--name",
+          "Parent",
+          "--json",
+        ]),
+      ),
+    ).folder;
+    const child = JSON.parse(
+      stdout(
+        await harness.runCli([
+          "folder",
+          "create",
+          "--name",
+          "Child",
+          "--parent",
+          "Parent",
+          "--json",
+        ]),
+      ),
+    ).folder;
+    const project = JSON.parse(
+      stdout(
+        await harness.runCli([
+          "project",
+          "create",
+          "--name",
+          "Filed project",
+          "--prefix",
+          "FILED",
+          "--folder",
+          "Parent",
+          "--json",
+        ]),
+      ),
+    ).project;
+    const task = JSON.parse(
+      stdout(
+        await harness.runCli([
+          "create",
+          "--project",
+          "FILED",
+          "--title",
+          "Survives folder delete",
+          "--json",
+        ]),
+      ),
+    ).task;
+
+    await expect(
+      harness.runCli(["folder", "delete", "Missing"]),
+    ).resolves.toEqual({
+      exitCode: 1,
+      stdout: "",
+      stderr: "folder not found: Missing",
+    });
+    await expect(harness.runCli(["folder", "delete"])).resolves.toMatchObject({
+      exitCode: 1,
+      stdout: "",
+    });
+
+    const deleted = JSON.parse(
+      stdout(await harness.runCli(["folder", "delete", "parent", "--json"])),
+    );
+    expect(deleted).toMatchObject({
+      deleted: true,
+      folder: { id: parent.id, name: "Parent" },
+      movedProjectIds: [project.id],
+      movedFolderIds: [child.id],
+    });
+
+    expect(
+      JSON.parse(stdout(await harness.runCli(["folder", "list", "--json"])))
+        .folders,
+    ).toEqual([
+      expect.objectContaining({ id: child.id, parentFolderId: null }),
+    ]);
+    expect(
+      JSON.parse(
+        stdout(await harness.runCli(["project", "show", "FILED", "--json"])),
+      ).project,
+    ).toMatchObject({ id: project.id, folderId: null });
+    expect(
+      JSON.parse(stdout(await harness.runCli(["show", task.key, "--json"])))
+        .task,
+    ).toMatchObject({ id: task.id });
+
+    expect(stdout(await harness.runCli(["folder", "delete", child.id]))).toBe(
+      "Deleted folder Child",
+    );
+    await expect(
+      harness.runCli(["folder", "delete", child.id]),
+    ).resolves.toMatchObject({
+      exitCode: 1,
+      stderr: `folder not found: ${child.id}`,
+    });
+
+    await harness.dispose();
+  });
+
+  it("fails folder delete when another client removed the folder first", async () => {
+    const { bb, harness } = createFakePluginHost({ pluginId: "tasks" });
+    const store = createStore(bb);
+    const racingStore = {
+      ...store,
+      tasks: {
+        ...store.tasks,
+        deleteFolder(id: string) {
+          store.tasks.deleteFolder(id);
+          return store.tasks.deleteFolder(id);
+        },
+      },
+    };
+    registerTasksCli(bb, racingStore, { name: "tasks", version: "test" });
+    const folder = store.tasks.createFolder({ name: "Racing" });
+
+    const plain = await harness.runCli(["folder", "delete", "Racing"]);
+    expect(plain.exitCode).toBe(1);
+    expect(plain.stdout).toBe("");
+    expect(plain.stderr).toContain("folder not found: Racing");
+
+    store.tasks.createFolder({ name: "Racing" });
+    const asJson = await harness.runCli([
+      "folder",
+      "delete",
+      "Racing",
+      "--json",
+    ]);
+    expect(asJson.exitCode).toBe(1);
+    expect(asJson.stdout).toBe("");
+    expect(store.tasks.getFolder(folder.id)).toBeUndefined();
+
+    await harness.dispose();
+  });
+
   it("creates, updates, lists, and deletes delegation presets", async () => {
     const { bb, harness } = createFakePluginHost({
       pluginId: "tasks",
@@ -803,6 +937,8 @@ describe("bb tasks CLI", () => {
           "gpt-5.6-sol",
           "--reasoning",
           "high",
+          "--service-tier",
+          "fast",
           "--permission",
           "accept-edits",
           "--environment",
@@ -820,6 +956,9 @@ describe("bb tasks CLI", () => {
     expect(created).toMatchObject({
       name: "CLI worker",
       providerId: "codex",
+      modelId: "gpt-5.6-sol",
+      reasoningLevel: "high",
+      serviceTier: "fast",
       permissionMode: "accept-edits",
       environmentKind: "new-worktree",
       baseBranch: "main",
@@ -832,6 +971,7 @@ describe("bb tasks CLI", () => {
     expect(shown).toContain("Environment   worktree");
     expect(shown).toContain("Base branch   main");
     expect(shown).toContain("Machine       host_air");
+    expect(shown).toContain("Service tier  fast");
 
     const updated = JSON.parse(
       stdout(
@@ -841,6 +981,8 @@ describe("bb tasks CLI", () => {
           "CLI worker",
           "--reasoning",
           "ultra",
+          "--service-tier",
+          "none",
           "--name",
           "CLI reviewer",
           "--environment",
@@ -853,6 +995,7 @@ describe("bb tasks CLI", () => {
       id: created.id,
       name: "CLI reviewer",
       reasoningLevel: "ultra",
+      serviceTier: null,
       environmentKind: "project-default",
       baseBranch: null,
       machineId: null,
@@ -862,6 +1005,7 @@ describe("bb tasks CLI", () => {
     expect(listTable).toContain("ENVIRONMENT");
     expect(listTable).toContain("BASE BRANCH");
     expect(listTable).toContain("MACHINE");
+    expect(listTable).toContain("SERVICE TIER");
 
     const listed = JSON.parse(
       stdout(await harness.runCli(["preset", "list", "--json"])),
@@ -1031,6 +1175,93 @@ describe("bb tasks CLI", () => {
     await harness.dispose();
   });
 
+  it("detaches a thread with `bb tasks detach` and lists live threads first", async () => {
+    const { bb, harness } = createFakePluginHost({
+      pluginId: "tasks",
+      sdk: {
+        threads: {
+          get: async ({ threadId }: { threadId: string }) => ({
+            id: threadId,
+            title: `Worker ${threadId}`,
+            titleFallback: null,
+            status: threadId === "thr_dead_worker" ? "error" : "idle",
+          }),
+          send: async () => undefined,
+        },
+      },
+    });
+    await plugin(bb);
+    stdout(
+      await harness.runCli([
+        "project",
+        "create",
+        "--name",
+        "Detach",
+        "--prefix",
+        "DET",
+      ]),
+    );
+    stdout(
+      await harness.runCli(["create", "--project", "DET", "--title", "Work"]),
+    );
+
+    expect(stdout(await harness.runCli(["--help"]))).toContain(
+      "detach                         Detach an agent thread from a task",
+    );
+
+    stdout(
+      await harness.runCli(["attach", "DET-1", "--thread", "thr_dead_worker"]),
+    );
+    stdout(
+      await harness.runCli(["attach", "DET-1", "--thread", "thr_live_worker"]),
+    );
+    const listed = JSON.parse(
+      stdout(await harness.runCli(["threads", "DET-1", "--json"])),
+    );
+    expect(
+      listed.taskThreads.map((thread: { threadId: string }) => thread.threadId),
+    ).toEqual(["thr_live_worker", "thr_dead_worker"]);
+
+    expect(
+      stdout(
+        await harness.runCli([
+          "detach",
+          "DET-1",
+          "--thread",
+          "thr_dead_worker",
+        ]),
+      ),
+    ).toBe("Detached thr_dead_worker from DET-1");
+    await expect(
+      harness.runCli(["detach", "DET-1", "--thread", "thr_dead_worker"]),
+    ).resolves.toMatchObject({
+      exitCode: 1,
+      stderr: "Thread thr_dead_worker is not attached to DET-1",
+    });
+
+    const previousThreadId = process.env.BB_THREAD_ID;
+    process.env.BB_THREAD_ID = "thr_live_worker";
+    try {
+      expect(
+        JSON.parse(stdout(await harness.runCli(["detach", "DET-1", "--json"]))),
+      ).toMatchObject({ task: { key: "DET-1" }, threadId: "thr_live_worker" });
+      delete process.env.BB_THREAD_ID;
+      await expect(harness.runCli(["detach", "DET-1"])).resolves.toMatchObject({
+        exitCode: 1,
+        stderr: "missing --thread and BB_THREAD_ID is not set",
+      });
+    } finally {
+      if (previousThreadId === undefined) delete process.env.BB_THREAD_ID;
+      else process.env.BB_THREAD_ID = previousThreadId;
+    }
+    expect(
+      JSON.parse(stdout(await harness.runCli(["threads", "DET-1", "--json"])))
+        .taskThreads,
+    ).toEqual([]);
+
+    await harness.dispose();
+  });
+
   it("creates a task with --attach files after validating every source path", async () => {
     const directory = await mkdtemp(join(tmpdir(), "bb-tasks-cli-"));
     const notesPath = join(directory, "notes.txt");
@@ -1058,7 +1289,6 @@ describe("bb tasks CLI", () => {
         ]),
       );
 
-      // A bad path fails before anything is created — no half-built task.
       const missing = await harness.runCli([
         "create",
         "--project",
@@ -1071,7 +1301,6 @@ describe("bb tasks CLI", () => {
       expect(missing.exitCode).toBe(1);
       expect(missing.stderr).toContain("attachment source is not a file");
 
-      // Preflight also enforces the shared 25 MB upload limit.
       const hugePath = join(directory, "huge.bin");
       await writeFile(hugePath, "");
       await truncate(hugePath, 25 * 1024 * 1024 + 1);
@@ -1170,7 +1399,6 @@ describe("bb tasks CLI", () => {
         ]),
       );
 
-      // JSON mode: middle file fails, both neighbors are still attempted.
       const mixed = await harness.runCli([
         "create",
         "--project",
@@ -1197,13 +1425,11 @@ describe("bb tasks CLI", () => {
       expect(payload.failedAttachments).toEqual([
         { path: boomPath, error: "simulated blob write failure" },
       ]);
-      // Both successes really persisted on the created task.
       const listed = JSON.parse(
         stdout(await harness.runCli(["attachment", "list", "MIX-1", "--json"])),
       );
       expect(listed.attachments).toHaveLength(2);
 
-      // Human mode reports the same outcome with a per-file recovery command.
       const human = await harness.runCli([
         "create",
         "--project",
@@ -1315,8 +1541,6 @@ describe("bb tasks CLI", () => {
     expect(shown).toContain("Pull requests");
     expect(shown).toContain("#12  draft  BB-15 Show PRs in tasks");
     expect(shown).toContain("https://github.com/acme/bb/pull/12");
-    // Genuine absence (no environment, or gh reported no PR) stays quiet —
-    // it must not read as a failed lookup.
     expect(shown).not.toContain("PR lookup unavailable");
 
     const payload = JSON.parse(
@@ -1584,7 +1808,6 @@ describe("bb tasks CLI", () => {
         afterRemove.attachments.map((entry: { id: string }) => entry.id),
       ).not.toContain(attachment.id);
 
-      // Removing an already-gone id is an explicit CLI error, not a silent 0.
       const removeMissing = await harness.runCli([
         "attachment",
         "remove",
@@ -1621,9 +1844,6 @@ describe("bb tasks CLI", () => {
   });
 
   it("routes file flags to the invoking thread's machine and honors --machine", async () => {
-    // Files that exist only on the remote enrolled machine, never on the
-    // server's filesystem — the CLI must reach them via bb.sdk.files with
-    // the resolved hostId.
     const remoteFiles = new Map<string, Buffer>([
       ["/remote/notes.md", Buffer.from("remote description\n", "utf8")],
       [
@@ -1710,7 +1930,6 @@ describe("bb tasks CLI", () => {
     expect(created.attachments).toEqual([
       expect.objectContaining({ fileName: "shot.png", mime: "image/png" }),
     ]);
-    // Every client file read resolved the thread's machine.
     for (const [args] of harness.sdk.callsTo("files.read")) {
       expect(args).toMatchObject({ hostId: "machine-remote" });
     }
@@ -1741,7 +1960,6 @@ describe("bb tasks CLI", () => {
       remoteFiles.get("/remote/shot.png"),
     );
 
-    // --machine overrides by name without any thread context.
     stdout(
       await harness.runCli([
         "attachment",
@@ -1812,7 +2030,6 @@ describe("bb tasks CLI", () => {
       stdout: "",
       stderr: 'Task project "Unlinked CLI" is not linked to a bb project',
     });
-    // "delegate" stays as a hidden compatibility alias for "dispatch".
     const aliased = await harness.runCli([
       "delegate",
       "UNL-1",

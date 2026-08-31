@@ -6,11 +6,16 @@ import { CronExpressionParser } from "cron-parser";
 import type { Context } from "hono";
 import {
   CUSTOM_THEME_CSS_MAX_LENGTH,
+  derivePluginId,
   formatPluginThemeId,
+  isNamespacedGlyph,
+  isPluginOwnedIconPath,
   type DeclaredCodeTheme,
+  type DynamicTool,
   type JsonValue,
   type PluginThemeMeta,
   type SystemChangeKind,
+  type ThreadEventItemPresentation,
   type ToolCallResponse,
 } from "@bb/domain";
 import {
@@ -30,8 +35,6 @@ import {
   RESERVED_AGENT_TOOL_NAMES,
   adoptHttpRouteResponse,
 } from "@get-bb/plugin-sdk/internal/host-policy";
-// The build engine's natives (esbuild, Tailwind oxide) are dynamically
-// imported inside buildPluginApp — importing this loads nothing heavy.
 import {
   buildPluginApp,
   buildPluginHost,
@@ -74,11 +77,7 @@ import {
   parsePluginSource,
   recoverInterruptedGitPluginPromotion,
 } from "./install-sources.js";
-import {
-  derivePluginId,
-  readPluginManifest,
-  type PluginManifest,
-} from "./manifest.js";
+import { readPluginManifest, type PluginManifest } from "./manifest.js";
 import { listBundledPluginRegistrations } from "./builtin-registry.js";
 import {
   type BbPluginApi,
@@ -134,24 +133,9 @@ import type {
 } from "./plugin-service-internal.js";
 export type {
   PluginAgentToolContribution,
-  PluginApplyUpdateOutcome,
-  PluginApplyUpdateResult,
-  PluginHandlerStats,
-  PluginInstructionContribution,
-  PluginResolvedAgentConfiguration,
-  PluginListEntry,
-  PluginMentionProviderContribution,
   PluginMentionResolveResult,
-  PluginMentionSearchGroup,
-  PluginMentionSearchItem,
-  PluginRuntimeStatus,
-  PluginScheduleEntry,
   PluginServiceDeps,
-  PluginServiceEntry,
-  PluginServiceState,
-  PluginSourceView,
   PluginThreadEventEmitter,
-  PluginUpdateCheckEntry,
   PluginWireLookup,
 } from "./plugin-service-internal.js";
 
@@ -160,75 +144,44 @@ export interface PluginSkillRootContribution {
   rootPath: string;
 }
 
+export type PluginReloadOutcome =
+  | { ok: true; plugins: PluginListEntry[] }
+  | { ok: false; error: string; plugins: PluginListEntry[] };
+
+export function dispatchPluginSourceWatchChange(
+  handleChange: (relativePath: string) => void,
+  filename: string | null,
+): void {
+  handleChange(filename === null || filename.length === 0 ? "." : filename);
+}
+
 export interface PluginService {
-  /** Whether this installed plugin has builtin provenance. */
   isBuiltin(id: string): boolean;
-  /** Thread lifecycle event emitter, called from the lifecycle seams. */
   events: PluginThreadEventEmitter;
-  /**
-   * Bind the in-process BB SDK to the running server. Call once the HTTP
-   * listener is up, before start(): bb.sdk throws until this runs.
-   */
   bindSdk(args: { baseUrl: string }): void;
-  /** Load all enabled plugins. Call after the HTTP listener is up. */
   start(): Promise<void>;
-  /** Dispose all loaded plugins (server shutdown). */
   stop(): Promise<void>;
+  handleUncaughtException(error: unknown): boolean;
   list(): PluginListEntry[];
-  /** Palettes declared by currently loaded plugins, ordered by plugin id. */
   listThemes(): PluginThemeMeta[];
-  /** Read a loaded plugin palette by its globally namespaced id. */
   readThemeCss(themeId: string): Promise<string | null>;
-  /** Load a plugin theme's declared Pierre / VS Code code theme, if any. */
   readThemeCodeTheme(themeId: string): DeclaredCodeTheme | null;
-  /**
-   * Install from a source spec: `path:<dir>` (bare paths accepted),
-   * `git:<url-ish>@<ref>` (ref required; cloned into the managed dir under
-   * <dataDir>/plugins/git), or `npm:<name>[@<version|tag|range>]` (installed
-   * with npm --ignore-scripts under <dataDir>/plugins/npm). git/npm installs
-   * hard-fail on an engines.bb mismatch and refuse already-registered ids;
-   * use update for an existing managed plugin.
-   *
-   * `selection` picks one plugin out of a multi-plugin `git:`/`path:`
-   * repository, either by directory or by `.bb/plugins.json` entry name.
-   */
   install(
     source: string,
     selection: PluginSourceSelection,
   ): Promise<PluginListEntry>;
-  /**
-   * Install a bundled official plugin by its registry name (store install).
-   * Registers with catalog provenance so the opt-in survives reconciliation.
-   */
   installOfficialPlugin(name: string): Promise<PluginListEntry>;
-  /**
-   * Install a marketplace catalog entry (store install). Installs from the
-   * entry's listed source through the normal pipeline and stamps catalog
-   * provenance, so the plugin traces back to the marketplace that listed it.
-   */
   installCatalogPlugin(args: {
-    /** Marketplace that listed the entry, e.g. `bb-community`. */
     marketplace: string;
     entryId: string;
-    /** Manifest id the catalog entry promises; the install aborts on mismatch. */
     pluginId: string;
     source: string;
-    /** Which plugin of a multi-plugin repository the entry lists. */
     selection: PluginSourceSelection;
-    /** npm registry the listing pins. */
     npmRegistry?: string;
-    /** Git commit the user confirmed before a third-party install. */
     expectedGitCommit?: string;
-    /** npm version the user confirmed before a third-party install. */
     expectedNpmVersion?: string;
-    /** Integrity confirmed with that version, when the registry published one. */
     expectedNpmIntegrity?: string;
   }): Promise<PluginListEntry>;
-  /**
-   * The exact npm version and integrity a listing's spec resolves to now.
-   * The catalog shows this in the install confirmation, and the install then
-   * refuses anything else.
-   */
   resolveCatalogNpmSource(args: {
     packageName: string;
     registry?: string;
@@ -240,6 +193,8 @@ export interface PluginService {
   >;
   installPath(path: string): Promise<PluginListEntry>;
   checkForUpdates(id?: string): Promise<PluginUpdateCheckEntry[]>;
+  startPeriodicUpdateChecks(): void;
+  stopPeriodicUpdateChecks(): Promise<void>;
   listUpdateResults(): PluginUpdateCheckEntry[];
   getSource(id: string): Promise<PluginSourceView | undefined>;
   applyUpdate(id: string): Promise<PluginApplyUpdateOutcome>;
@@ -248,36 +203,29 @@ export interface PluginService {
     id: string,
     enabled: boolean,
   ): Promise<PluginListEntry | undefined>;
-  reload(id?: string): Promise<void>;
-  /** Live API handle for a running plugin (used by later phases and tests). */
+  reload(id?: string): Promise<PluginReloadOutcome>;
   getApi(id: string): BbPluginApi | undefined;
-  /**
-   * On-disk asset backing GET /plugins/:id/assets/app.{js,css}: file path
-   * plus the current content hash (the route compares ?h against it for
-   * cache policy). Undefined when the plugin has no loadable bundle, or no
-   * CSS for kind "css".
-   */
   getAppAsset(
     id: string,
     kind: "js" | "css",
   ): { path: string; hash: string } | undefined;
-  /** Immutable byte snapshot backing one plugin branding asset route. */
   getBrandingAsset(
     id: string,
     variant: PluginBrandingAssetVariant,
   ): { bytes: Uint8Array; contentType: string; hash: string } | undefined;
-  /** Active generations a reconnecting daemon uses to retire stale workers. */
+  getIconAsset(
+    id: string,
+    name: string,
+  ): { bytes: Uint8Array; contentType: string; hash: string } | undefined;
   listHostArtifactGenerations(): Array<{
     pluginId: string;
     generation: string;
   }>;
-  /** Dispatch an unexpected worker exit from an active host generation. */
   handleHostWorkerExit(args: {
     authenticatedHostId: string;
     pluginId: string;
     generation: string;
   }): void;
-  /** Dispatch one validated ephemeral signal from an active host generation. */
   handleHostSignal(args: {
     authenticatedHostId: string;
     pluginId: string;
@@ -285,43 +233,22 @@ export interface PluginService {
     signal: string;
     payload: JsonValue;
   }): void;
-  /**
-   * Declared settings schema + current values for a loaded plugin
-   * (secrets render as `{ set: boolean }`). Undefined when the plugin is not
-   * running — the schema only exists after its factory ran.
-   */
   getSettings(id: string): Promise<PluginSettingsView | undefined>;
-  /**
-   * Validate and persist a settings update (`null` unsets a key), firing the
-   * plugin's onChange listeners when effective values changed. Throws
-   * PluginSettingsValidationError on unknown keys or type mismatches.
-   */
   updateSettings(
     id: string,
     values: Record<string, unknown>,
   ): Promise<PluginSettingsView | undefined>;
-  /** Live http route lookup for the boot-time dispatcher (exact method+path). */
   getHttpRoute(
     id: string,
     method: string,
     path: string,
   ): PluginWireLookup<PluginHttpRouteRecord>;
-  /** Live rpc handler lookup for the boot-time dispatcher. */
   getRpcHandler(id: string, method: string): PluginWireLookup<PluginRpcHandler>;
-  /**
-   * Run an http route handler wrapped in the plugin failure-isolation
-   * discipline (caught, logged, timed into handlerStats). A throwing or
-   * non-Response-returning handler maps to a 500 JSON error response.
-   */
   invokeHttpRoute(
     id: string,
     route: PluginHttpRouteRecord,
     context: Context,
   ): Promise<Response>;
-  /**
-   * Validate RPC input, run the handler with failure isolation, validate its
-   * output, then normalize it as strict JSON for the response envelope.
-   */
   invokeRpcHandler(
     id: string,
     method: string,
@@ -330,142 +257,59 @@ export interface PluginService {
   ): Promise<
     { ok: true; result: JsonValue } | { ok: false; error: PluginRpcError }
   >;
-  /**
-   * Per-plugin secret for auth "token" routes, generated on first use and
-   * stored under <dataDir>/plugins/<id>/secrets/. `rotate` replaces it.
-   * Undefined when the plugin is not installed.
-   */
   httpToken(
     id: string,
     options?: { rotate?: boolean },
   ): Promise<string | undefined>;
-  /**
-   * CLI command metadata for GET /plugins/contributions: fast, no plugin
-   * code execution. Sorted by plugin id.
-   */
   listCliContributions(): PluginCliContribution[];
-  /**
-   * Run a plugin's registered CLI command wrapped in the failure-isolation
-   * discipline. Never throws for dispatch problems: an unknown / not-running
-   * plugin, closed experiment gate, missing registration, throwing handler, or
-   * malformed handler result all map to exitCode 1 with a helpful stderr —
-   * the bb CLI prints stderr and exits with exitCode.
-   */
   runCliCommand(
     id: string,
     argv: string[],
     ctx: PluginCliContext,
   ): Promise<PluginCliExecutionResult>;
-  /**
-   * Skills roots of running plugins (manifest bb.skills or the skills/
-   * convention dir), ordered by plugin id — the "plugin" precedence tier
-   * passed to resolveInjectedSkillSources per turn. Missing directories are
-   * tolerated downstream.
-   */
   listSkillRootContributions(): PluginSkillRootContribution[];
-  /**
-   * Native tools of running plugins (bb.agents.registerTool), ordered by
-   * plugin id then registration order, deduped defensively (first wins —
-   * registration already blocks collisions). Appended to a session's
-   * dynamicTools at thread.start/turn.submit time; changes apply on the
-   * NEXT session start.
-   */
   listAgentTools(): PluginAgentToolContribution[];
-  /**
-   * Evaluate each plugin's optional `bb.agents.configure` callback for one
-   * server-owned thread/session boundary. Registrations stay static; invalid
-   * or throwing callbacks fail closed for that plugin and cannot affect peers.
-   */
   resolveAgentConfiguration(args: {
     context: PluginAgentConfigurationContext;
     skillIdsByPlugin: ReadonlyMap<string, readonly string[]>;
   }): Promise<PluginResolvedAgentConfiguration>;
-  /**
-   * Dynamic instruction providers from bb.agents.contributeInstructions,
-   * ordered by plugin id. Resolved live at thread.start/turn.submit;
-   * empty when no plugin registered a provider.
-   * At most one provider per plugin (duplicate registration is rejected).
-   */
   listInstructionContributions(): PluginInstructionContribution[];
-  /** Resolve one registered native tool by name (same view as listAgentTools). */
   findAgentTool(
     name: string,
   ): { pluginId: string; record: PluginAgentToolRecord } | undefined;
-  /**
-   * Run a native tool call (design §4.4). Invalid arguments (zod-backed
-   * registrations) return an isError tool result without touching the
-   * plugin; execute runs through invokeWrapped, so a throwing or
-   * malformed-result handler maps to an isError tool result too.
-   */
   invokeAgentTool(args: {
     pluginId: string;
     record: PluginAgentToolRecord;
     input: unknown;
     ctx: PluginAgentToolContext;
   }): Promise<ToolCallResponse>;
-  /**
-   * Mention providers of running plugins (bb.ui.registerMentionProvider),
-   * ordered by plugin id then registration order, for
-   * GET /plugins/contributions. No plugin code runs.
-   */
   listMentionProviderContributions(): PluginMentionProviderContribution[];
-  /**
-   * Run every loaded plugin's mention providers against one composer query
-   * (design §4.9). Providers run concurrently, each wrapped in the
-   * failure-isolation discipline (invokeWrapped) and time-boxed (2s); a
-   * slow, throwing, or malformed provider contributes an empty group.
-   * Groups are ordered by plugin id, then registration order; empty groups
-   * are dropped. Item ids are namespaced "<providerId>:<item id>".
-   */
   searchMentions(args: {
     trigger: PluginMentionTrigger;
     query: string;
     projectId: string | null;
     threadId: string | null;
   }): Promise<PluginMentionSearchGroup[]>;
-  /**
-   * Resolve one plugin mention at send time (design §4.9). `itemId` is the
-   * wire-composed "<providerId>:<item id>" from searchMentions. Runs the
-   * provider's resolve through invokeWrapped; any dispatch or handler
-   * problem maps to `{ ok: false, error }` so the send path can block with
-   * a clear error.
-   */
   resolveMention(args: {
     pluginId: string;
     itemId: string;
   }): Promise<PluginMentionResolveResult>;
-  /**
-   * Last `tail` lines of the plugin's JSONL log file (bb.log output).
-   * Undefined when the plugin is not installed.
-   */
   readLogTail(id: string, tail: number): Promise<string[] | undefined>;
-  /**
-   * Run due plugin schedules (design §4.8), called from the periodic-sweeps
-   * loop. Claims each due (plugin_id, name) row with a CAS on next_run_at —
-   * at-most-once per tick even across overlapping sweeps — then runs the
-   * plugin's fn wrapped (errors → last_status/last_error + plugin log).
-   * Rows whose plugin is not loaded are left unclaimed. No host required.
-   */
   sweepDueSchedules(now: number): Promise<void>;
 }
 
 const DEFAULT_MENTION_SEARCH_TIMEOUT_MS = 2_000;
-// Resolve is looser than search: it blocks a send the user already committed
-// to, so it may do one real fetch — but it must not hang POST /threads/:id/send
-// forever when a provider never settles.
 const DEFAULT_MENTION_RESOLVE_TIMEOUT_MS = 10_000;
 const DEFAULT_STABILIZATION_WINDOW_MS = 30_000;
 const DEFAULT_ARTIFACT_RETENTION_MS = 7 * 24 * 60 * 60_000;
 const SCHEDULE_SWEEP_BATCH_SIZE = 100;
 
-/** Next cron occurrence strictly after `now` (server-local time). */
 function nextCronRunAt(cron: string, now: number): number {
   return CronExpressionParser.parse(cron, { currentDate: new Date(now) })
     .next()
     .getTime();
 }
 
-/** True when `promise` settles (either way) within `timeoutMs`. */
 async function settledWithin(
   promise: Promise<unknown>,
   timeoutMs: number,
@@ -560,7 +404,6 @@ async function validateRpcValue(
   return result.value;
 }
 
-/** Strict JsonValue normalization: no coercion, elision, or toJSON hooks. */
 function normalizeRpcJsonResult(value: unknown): JsonValue {
   const ancestors = new Set<object>();
 
@@ -627,11 +470,6 @@ function normalizeRpcJsonResult(value: unknown): JsonValue {
   return visit(value, "$result");
 }
 
-/**
- * Map a tool's return value (string | { content, isError? }) onto the wire
- * ToolCallResponse the daemon round-trip expects. Malformed results throw —
- * the caller runs this inside invokeWrapped so they count as handler errors.
- */
 function normalizeAgentToolResult(
   name: string,
   result: unknown,
@@ -682,12 +520,6 @@ function normalizeAgentToolResult(
   );
 }
 
-/**
- * Validate a mention provider's search() result and namespace item ids for
- * the wire ("<providerId>:<item id>"). Malformed results throw — the caller
- * runs this inside invokeWrapped so they count as handler errors and the
- * provider contributes an empty group.
- */
 function normalizeMentionSearchItems(
   providerId: string,
   result: unknown,
@@ -854,17 +686,16 @@ function normalizePluginAgentToolSelections(args: {
 }
 
 function normalizePluginAgentSelectionIds(args: {
-  field: "skills";
   knownIds: ReadonlySet<string>;
   pluginId: string;
   value: unknown;
 }): string[] {
   if (!Array.isArray(args.value)) {
-    throw new Error(`configure() output.${args.field} must be an array`);
+    throw new Error("configure() output.skills must be an array");
   }
   if (args.value.length > PLUGIN_AGENT_SELECTION_MAX_IDS) {
     throw new Error(
-      `configure() output.${args.field} exceeds the ${PLUGIN_AGENT_SELECTION_MAX_IDS}-id limit`,
+      `configure() output.skills exceeds the ${PLUGIN_AGENT_SELECTION_MAX_IDS}-id limit`,
     );
   }
   const selected: string[] = [];
@@ -873,12 +704,12 @@ function normalizePluginAgentSelectionIds(args: {
     const id = args.value[index];
     if (typeof id !== "string" || id.length === 0) {
       throw new Error(
-        `configure() output.${args.field}[${index}] must be a non-empty string`,
+        `configure() output.skills[${index}] must be a non-empty string`,
       );
     }
     if (seen.has(id)) {
       throw new Error(
-        `configure() output.${args.field} contains duplicate id ${JSON.stringify(id)}`,
+        `configure() output.skills contains duplicate id ${JSON.stringify(id)}`,
       );
     }
     if (!args.knownIds.has(id)) {
@@ -939,7 +770,6 @@ function normalizePluginAgentConfiguration(args: {
     toolIds: toolSelections.toolIds,
     toolParameterOverrides: toolSelections.parameterOverrides,
     skillIds: normalizePluginAgentSelectionIds({
-      field: "skills",
       knownIds: args.knownSkillIds,
       pluginId: args.pluginId,
       value: output.skills,
@@ -947,6 +777,8 @@ function normalizePluginAgentConfiguration(args: {
     instructions,
   };
 }
+
+const GENERIC_AGENT_TOOL_GLYPH = "Toolbox";
 
 export function createPluginService(deps: PluginServiceDeps): PluginService {
   const logger = deps.logger;
@@ -970,9 +802,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       return () => clearTimeout(timer);
     });
 
-  // The token file sits in the settings-secrets dir so `remove` cleans it
-  // up; the dot prefix cannot collide with setting keys (they must match
-  // /^[a-zA-Z0-9_-]+$/).
   const HTTP_TOKEN_FILE = ".http-token";
 
   const {
@@ -988,12 +817,13 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     disposeOne,
     emitThreadEvent,
     handlerStats,
+    handleUncaughtException,
     hungServices,
     hostArtifacts,
     identities,
     invokeWrapped,
     isBuiltinPluginId,
-    isPackagedBuiltinAppEntry,
+    isPackagedBuiltinEntry,
     loadAll,
     loaded,
     loadOne,
@@ -1034,6 +864,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     withLifecycleLock,
     disposeOne,
     loadOne,
+    statuses,
     validateInstallDir: (args) => managedValidateInstallDir(args),
     checkEngineRange,
     checkPluginSdkRange,
@@ -1074,7 +905,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     sourceKind,
     checkEngineRange,
     checkPluginSdkRange,
-    isPackagedBuiltinAppEntry,
+    isPackagedBuiltinEntry,
     registerInstalled,
     assertInstallRegistrationAvailable,
     refuseBuiltinShadow,
@@ -1095,11 +926,45 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     runArtifactGc,
   });
 
-  /**
-   * The live native-tool view: loaded plugins in id order, registration
-   * order within a plugin, deduped first-wins (defensive — registration
-   * already blocks cross-plugin collisions and reserved names).
-   */
+  function resolveAgentToolPresentation(
+    pluginId: string,
+    record: PluginAgentToolRecord,
+  ): ThreadEventItemPresentation {
+    const declared = record.presentation;
+    const brandingIcon = loaded.get(pluginId)?.manifest.branding.icon;
+    const glyph =
+      declared?.icon?.glyph ??
+      (brandingIcon !== undefined &&
+      !isPluginOwnedIconPath(brandingIcon) &&
+      !isNamespacedGlyph(brandingIcon)
+        ? brandingIcon
+        : GENERIC_AGENT_TOOL_GLYPH);
+    return {
+      label: declared?.label ?? {
+        pending: `Running ${record.name}`,
+        completed: `Ran ${record.name}`,
+      },
+      icon: { glyph },
+      ...(declared?.suppress === undefined
+        ? {}
+        : { suppress: declared.suppress }),
+      ...(declared?.tint === undefined ? {} : { tint: declared.tint }),
+    };
+  }
+
+  function toAgentDynamicTool(
+    pluginId: string,
+    record: PluginAgentToolRecord,
+    inputSchema: unknown = record.inputSchema,
+  ): DynamicTool {
+    return {
+      name: record.name,
+      description: record.description,
+      inputSchema,
+      presentation: resolveAgentToolPresentation(pluginId, record),
+    };
+  }
+
   function collectAgentTools(): Array<{
     pluginId: string;
     record: PluginAgentToolRecord;
@@ -1133,11 +998,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     return contributions.sort((a, b) => a.pluginId.localeCompare(b.pluginId));
   }
 
-  /**
-   * Rewrite (or remove) the generated plugin-commands skill after any
-   * load/dispose transition, so agent threads always see current commands.
-   * Best effort — a filesystem problem must not fail the transition.
-   */
   async function syncCliSkill(): Promise<void> {
     try {
       await syncPluginCommandsSkill(deps.dataDir, cliContributions());
@@ -1148,14 +1008,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     }
   }
 
-  /**
-   * Broadcast that the set of running plugins (and therefore host-rendered
-   * contributions) changed, so open app pages re-fetch instead of waiting
-   * out their query stale time. Provider cache invalidation gets its own
-   * change kind and only rides the broadcast when the registry changed since
-   * the previous lifecycle boundary. Fired on install/remove/enable/disable/
-   * reload completion.
-   */
   function notifyPluginsChanged(): void {
     const changes: SystemChangeKind[] = ["plugins-changed"];
     const providerRegistrationRevision =
@@ -1210,10 +1062,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         );
         if (parsed.success && parsed.data.id === row.id)
           persisted = parsed.data;
-      } catch {
-        // The list remains usable if one persisted status is corrupt; the
-        // dedicated updates route retains its strict corruption diagnostic.
-      }
+      } catch {}
     }
     const failure =
       row.lastFailureVersion !== null &&
@@ -1246,13 +1095,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     };
   }
 
-  /**
-   * The user-recognizable capabilities a plugin contributes, for the plugin
-   * detail "Includes" section. Manifest-declared skills and themes stay
-   * accurate while a plugin is disabled; agent tools and thread integrations
-   * only exist on a loaded plugin, so a disabled plugin reports none and the
-   * UI explains that they become visible once it is enabled.
-   */
   function capabilitySummary(
     manifest: PluginManifest | undefined,
     loadedPlugin: LoadedPlugin | undefined,
@@ -1298,9 +1140,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
   function list(): PluginListEntry[] {
     const scheduleRows = listPluginSchedules(deps.db);
     const rows = listInstalledPlugins(deps.db);
-    // Resolving labels parses every marketplace's stored manifest, so it only
-    // runs when a plugin actually traces back to one. The common case — every
-    // plugin bundled or added from a source — reads no manifest at all.
     const publisherLabels = rows.some((row) => row.provenance === "catalog")
       ? marketplacePublisherLabels(deps.db)
       : new Map<string, string>();
@@ -1311,9 +1150,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         const stats = handlerStats.get(row.id);
         const loadedPlugin = loaded.get(row.id);
         const cliRegistration = loadedPlugin?.handle.cli.registration;
-        // An unloaded (disabled/incompatible/errored) plugin keeps its
-        // identity via the static-manifest cache, so it still shows its real
-        // name, icon, and logo instead of falling back to the raw id + glyph.
         const identity =
           loadedPlugin === undefined ? identities.get(row.id) : undefined;
         return {
@@ -1356,8 +1192,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
               ? brandingAssets.get(row.id)?.compactIcon?.url
               : identity?.brandingAssets.compactIcon?.url) ?? null,
           status: runtime?.status ?? (row.enabled ? "error" : "disabled"),
-          // A running plugin's detail is legitimately null — only fall back
-          // to "not loaded" when there is no runtime status at all.
           statusDetail: runtime
             ? runtime.detail
             : row.enabled
@@ -1391,8 +1225,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             loadedPlugin !== undefined &&
             Object.keys(loadedPlugin.handle.settings.descriptors).length > 0,
           app: appBundles.get(row.id)?.state ?? { hasApp: false, bundle: null },
-          // Rich logos come from the live runtime for an exposed plugin, else
-          // from the static-identity cache.
           logoUrl:
             (loadedPlugin !== undefined
               ? brandingAssets.get(row.id)?.logo?.url
@@ -1401,6 +1233,17 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             (loadedPlugin !== undefined
               ? brandingAssets.get(row.id)?.logoDark?.url
               : identity?.brandingAssets.logoDark?.url) ?? null,
+          providerIds:
+            loadedPlugin?.handle
+              .listProviderDeclarations()
+              .map((declaration) => declaration.id) ?? [],
+          icons: Object.fromEntries(
+            [
+              ...((loadedPlugin !== undefined
+                ? brandingAssets.get(row.id)?.icons
+                : identity?.brandingAssets.icons) ?? []),
+            ].map(([name, asset]) => [name, asset.url]),
+          ),
         };
       });
   }
@@ -1445,7 +1288,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         if (!theme) continue;
         return readPluginThemeCodeTheme(
           themeId,
-          plugin.manifest.rootDir,
           theme.codeTheme ?? undefined,
           theme.codeThemePaths,
         );
@@ -1555,14 +1397,15 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
               }
             },
             reloadPlugin: async () => {
-              await withLifecycleLock(row.id, async () => {
+              const problem = await withLifecycleLock(row.id, async () => {
                 const current = getInstalledPlugin(deps.db, row.id);
-                if (current === undefined) return;
+                if (current === undefined) return null;
                 await disposeOne(row.id);
-                await loadOne(current);
+                return loadOne(current);
               });
               await syncCliSkill();
               notifyPluginsChanged();
+              if (problem !== null) throw new Error(problem);
             },
             log: (message) => logger.info(`plugin ${row.id}: ${message}`),
           });
@@ -1570,9 +1413,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             bundled.rootDir,
             { recursive: true },
             (_event, filename) => {
-              if (typeof filename === "string" && filename.length > 0) {
-                loop.handleChange(filename);
-              }
+              dispatchPluginSourceWatchChange(loop.handleChange, filename);
             },
           );
           watcher.on("close", () => loop.dispose());
@@ -1590,6 +1431,8 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       notifyPluginsChanged();
     },
 
+    handleUncaughtException,
+
     list,
 
     async install(source, selection) {
@@ -1601,8 +1444,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         if (parsed.kind === "path") {
           return installPathSource(parsed.path, selection);
         }
-        // Only a repository holds several plugins; npm and builtin sources
-        // are one package each.
         if (selection.kind !== "root") {
           throw new Error(
             `install refused: ${selection.kind === "entry" ? "--plugin" : "--subdirectory"} applies to git: and path: sources only`,
@@ -1658,7 +1499,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           );
         }
         if (parsed.kind === "npm") {
-          // Only a repository holds several plugins.
           if (entry.selection.kind !== "root") {
             throw new Error(
               `catalog entry "${entry.entryId}" selects a subdirectory of an npm package`,
@@ -1699,22 +1539,16 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             : deleteInstalledPlugin(deps.db, id)
           : false;
         if (removed && row) {
-          // The uninstalled tree is no longer reloadable, so stop the module
-          // resolve hook from scanning it on every later import.
           forgetMutableRoot(row.rootDir);
-          // Configuration goes with the registration (a future same-id plugin
-          // must not inherit secrets); kv rows and data.db are plugin data and
-          // survive a remove/reinstall cycle. Schedule rows belong to the
-          // registration too.
           deletePluginSchedules(deps.db, id);
           deleteAllPluginSettings(deps.db, id);
           await rm(pluginSecretsDir(deps.dataDir, id), {
             recursive: true,
             force: true,
           });
-          // Legacy managed installs still own their mutable pre-cache layout.
-          // Immutable artifact directories are retained for future GC policy;
-          // path: sources are the user's directory and are never deleted.
+          logger.info(
+            `plugin ${id} removed from ${row.source}; its settings, secrets, and schedules were deleted`,
+          );
           const managedDir =
             row.activeArtifactId === null && row.sourceKind === "git"
               ? row.rootDir
@@ -1749,8 +1583,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         } else {
           await withLifecycleLock(id, async () => {
             await disposeOne(id);
-            // A hung service outranks "disabled": the degraded status (set by
-            // stopServices) is the only trace of the still-running start().
             if ((hungServices.get(id)?.size ?? 0) === 0) {
               setStatus(id, "disabled");
             }
@@ -1766,11 +1598,19 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
       const rows = listInstalledPlugins(deps.db).filter(
         (row) => id === undefined || row.id === id,
       );
+      const failures: string[] = [];
       for (const row of rows.sort((a, b) => a.id.localeCompare(b.id))) {
-        await withLifecycleLock(row.id, () => loadOne(row));
+        const problem = await withLifecycleLock(row.id, () => loadOne(row));
+        if (problem !== null) {
+          failures.push(`plugin "${row.id}" reload failed: ${problem}`);
+        }
       }
       await syncCliSkill();
       notifyPluginsChanged();
+      const plugins = list();
+      return failures.length === 0
+        ? { ok: true, plugins }
+        : { ok: false, error: failures.join("; "), plugins };
     },
 
     getApi(id) {
@@ -1778,9 +1618,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     },
 
     getAppAsset(id, kind) {
-      // Honest gate: assets are only downloadable while the plugin runtime
-      // is live. A disabled/errored/removed plugin's recorded snapshot may
-      // still ride the inventory for display, but its bytes are not served.
       if (!loaded.has(id)) return undefined;
       const assets = appBundles.get(id)?.assets;
       if (!assets) return undefined;
@@ -1790,8 +1627,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     },
 
     getBrandingAsset(id, variant) {
-      // Branding is identity, not runtime: serve it for a disabled or
-      // incompatible plugin too, matching the inventory.
       const set = loaded.has(id)
         ? brandingAssets.get(id)
         : identities.get(id)?.brandingAssets;
@@ -1801,6 +1636,19 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           : variant === "logo-dark"
             ? set?.logoDark
             : set?.logo;
+      if (!asset) return undefined;
+      return {
+        bytes: asset.bytes,
+        contentType: asset.contentType,
+        hash: asset.hash,
+      };
+    },
+
+    getIconAsset(id, name) {
+      const set = loaded.has(id)
+        ? brandingAssets.get(id)
+        : identities.get(id)?.brandingAssets;
+      const asset = set?.icons.get(name);
       if (!asset) return undefined;
       return {
         bytes: asset.bytes,
@@ -1913,16 +1761,8 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             );
           }
         }
-        // Effective values changed: broadcast so every open page's settings
-        // queries (plugin-sdk useSettings included) refetch instead of
-        // serving the pre-save snapshot until stale time.
+        deps.onSettingsChanged?.(id);
         notifyPluginsChanged();
-        // A plugin stuck on needs-configuration is waiting for exactly this
-        // save — reload it so the new values take effect without a manual
-        // `bb plugin reload` (the NeedsConfigurationError contract documents
-        // this). Healthy plugins are NOT reloaded: they read settings lazily
-        // via settings.get(), and restarting live services on every toggle
-        // would be disruptive.
         if (statuses.get(id)?.status === "needs-configuration") {
           const row = getInstalledPlugin(deps.db, id);
           if (row) {
@@ -2068,11 +1908,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     listAgentTools() {
       return collectAgentTools().map(({ pluginId, record }) => ({
         pluginId,
-        tool: {
-          name: record.name,
-          description: record.description,
-          inputSchema: record.inputSchema,
-        },
+        tool: toAgentDynamicTool(pluginId, record),
         instructions: record.instructions,
       }));
     },
@@ -2094,11 +1930,7 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
           tools.push(
             ...pluginTools.map(({ record }) => ({
               pluginId,
-              tool: {
-                name: record.name,
-                description: record.description,
-                inputSchema: record.inputSchema,
-              },
+              tool: toAgentDynamicTool(pluginId, record),
               instructions: record.instructions,
             })),
           );
@@ -2129,12 +1961,11 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
             .filter(({ record }) => selectedTools.has(record.name))
             .map(({ record }) => ({
               pluginId,
-              tool: {
-                name: record.name,
-                description: record.description,
-                inputSchema:
-                  parameterOverrides.get(record.name) ?? record.inputSchema,
-              },
+              tool: toAgentDynamicTool(
+                pluginId,
+                record,
+                parameterOverrides.get(record.name) ?? record.inputSchema,
+              ),
               instructions: record.instructions,
             })),
         );
@@ -2167,8 +1998,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
     },
 
     async invokeAgentTool({ pluginId, record, input, ctx }) {
-      // Bad arguments are the model's problem, not the plugin's: respond
-      // with an isError result without running (or blaming) plugin code.
       const parsed = record.parse(input);
       if (!parsed.ok) {
         return {
@@ -2240,9 +2069,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
                       projectId: args.projectId,
                       threadId: args.threadId,
                     }))();
-                  // The race abandons a timed-out search; keep its eventual
-                  // rejection observed so it cannot surface as an unhandled
-                  // rejection later.
                   searchPromise.catch(() => {});
                   let timer: NodeJS.Timeout | undefined;
                   try {
@@ -2323,9 +2149,6 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         async () => {
           const resolvePromise = (async () =>
             provider.resolve(providerItemId))();
-          // The race abandons a timed-out resolve; keep its eventual
-          // rejection observed so it cannot surface as an unhandled
-          // rejection later.
           resolvePromise.catch(() => {});
           let timer: NodeJS.Timeout | undefined;
           let result: unknown;
@@ -2371,16 +2194,12 @@ export function createPluginService(deps: PluginServiceDeps): PluginService {
         limit: SCHEDULE_SWEEP_BATCH_SIZE,
       });
       for (const row of due) {
-        // Rows are claimed only while their plugin is running; an unloaded
-        // plugin's row waits untouched for the next load.
         const schedule = loaded
           .get(row.pluginId)
           ?.handle.schedules.find((record) => record.name === row.name);
         if (!schedule) continue;
         let newNextRunAt: number;
         try {
-          // The live registration's cron, not the row's — the row may lag a
-          // just-reloaded plugin by one sweep.
           newNextRunAt = nextCronRunAt(schedule.cron, now);
         } catch (error) {
           logger.warn(

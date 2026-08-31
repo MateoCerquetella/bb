@@ -125,12 +125,10 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
     expect(screen.getByText("this machine")).toBeTruthy();
     expect(screen.getByText("Mac Studio")).toBeTruthy();
 
-    // dev-vm has no source, so only the two set-up machines offer worktrees.
     const worktreeItems = screen.getAllByRole("menuitem", {
       name: /New worktree/u,
     });
     expect(worktreeItems).toHaveLength(2);
-    // Section order is this-machine first, then server order.
     fireEvent.click(worktreeItems[1]!);
     expect(onChange).toHaveBeenCalledWith(`host:${studio.id}:worktree`);
   });
@@ -140,7 +138,6 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
     renderMachineMenu({ onChange });
 
     expect(screen.getByText(/last seen 2h ago/u)).toBeTruthy();
-    // dev-vm has no source, so its section renders the not-set-up placeholder.
     const placeholder = screen.getByRole("menuitem", {
       name: "Not set up for this project",
     });
@@ -257,7 +254,6 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
       button: 0,
     });
 
-    // dev-vm is offline: setup needs its daemon, so no enabled setup row.
     expect(screen.queryByText(/Set up on dev-vm/u)).toBeNull();
     const placeholder = screen.getByRole("menuitem", {
       name: "Not set up for this project",
@@ -265,10 +261,18 @@ describe("EnvironmentPickerUI multi-machine menu", () => {
     expect(placeholder.getAttribute("aria-disabled")).toBe("true");
   });
 
-  it("names a non-primary machine in the trigger label", () => {
+  it("names the primary machine in the trigger label when multiple machines exist", () => {
+    renderMachineMenu({ value: `host:${thisMachine.id}:worktree` });
+
+    expect(screen.getByText("MacBook Pro · New worktree")).toBeTruthy();
+    expect(screen.getByText("Worktree")).toBeTruthy();
+  });
+
+  it("names another selected machine in the trigger label", () => {
     renderMachineMenu({ value: `host:${studio.id}:worktree` });
 
     expect(screen.getByText("Mac Studio · New worktree")).toBeTruthy();
+    expect(screen.getByText("Worktree")).toBeTruthy();
   });
 
   it("keeps the single-host menu when only one host exists", () => {

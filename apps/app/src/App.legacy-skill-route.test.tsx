@@ -5,7 +5,6 @@ import { afterEach, describe, expect, it } from "vitest";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import {
   ExtensionsLandingRedirect,
-  LegacyPluginBrowseRedirect,
   LegacySkillDetailRedirect,
   LegacyToolsPathRedirect,
 } from "./App";
@@ -128,8 +127,6 @@ describe("LegacyToolsPathRedirect", () => {
   });
 
   it("loses /tools/automations to that route's own more-specific redirect", () => {
-    // Ranking, not order, decides this: the automations paths must keep their
-    // plugin-panel redirect instead of being rewritten to /extensions/automations.
     render(
       <MemoryRouter initialEntries={[LEGACY_TOOLS_AUTOMATIONS_ROUTE_PATH]}>
         <Routes>
@@ -149,7 +146,7 @@ describe("LegacyToolsPathRedirect", () => {
   });
 });
 
-describe("LegacyPluginBrowseRedirect", () => {
+describe("legacy plugin browse redirect", () => {
   afterEach(cleanup);
 
   it("redirects the old Browse path to the canonical bare Plugins route", () => {
@@ -158,7 +155,7 @@ describe("LegacyPluginBrowseRedirect", () => {
         <Routes>
           <Route
             path={TOOLS_PLUGIN_BROWSE_ROUTE_PATH}
-            element={<LegacyPluginBrowseRedirect />}
+            element={<ExtensionsLandingRedirect />}
           />
           <Route path={TOOLS_PLUGINS_ROUTE_PATH} element={<LocationPath />} />
         </Routes>

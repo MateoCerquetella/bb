@@ -1,22 +1,12 @@
 import { Fragment } from "react";
 import type { ReactNode } from "react";
+import { isRenderableHref } from "../blog/parse-post";
 
 type InlineToken =
   | { kind: "text"; text: string }
   | { kind: "code"; text: string }
   | { kind: "strong"; children: InlineToken[] }
   | { kind: "link"; href: string; children: InlineToken[] };
-
-/** Only shapes the changelog actually uses. Anything else — a `javascript:`
- *  URL above all — falls back to literal text rather than becoming an anchor. */
-function isRenderableHref(href: string): boolean {
-  return (
-    href.startsWith("https://") ||
-    href.startsWith("http://") ||
-    href.startsWith("/") ||
-    href.startsWith("#")
-  );
-}
 
 function appendText(tokens: InlineToken[], text: string): void {
   if (!text) {
@@ -66,7 +56,6 @@ function parseInline(
       tokens.push({
         kind: "link",
         href,
-        // No nested links, so a stray `[` inside the label stays literal.
         children: parseInline(
           text.slice(tokenStart + 1, labelEnd),
           allowStrong,

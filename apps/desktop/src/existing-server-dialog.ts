@@ -6,10 +6,9 @@ import {
 } from "./existing-server-dialog-ipc.js";
 import type { ForeignRuntimeDetails } from "./foreign-runtime.js";
 
-export type ExistingServerDialogChoice = "connect" | "quit" | "replace";
+type ExistingServerDialogChoice = "connect" | "quit" | "replace";
 
-export interface OpenExistingServerDialogArgs {
-  /** Null when the running bb is too old to describe itself. */
+interface OpenExistingServerDialogArgs {
   details: ForeignRuntimeDetails | null;
   parentWindow: BrowserWindow | null;
   preloadPath: string;
@@ -69,7 +68,7 @@ function buildDetailRows(args: {
   return rows;
 }
 
-export interface RenderExistingServerDialogHtmlArgs {
+interface RenderExistingServerDialogHtmlArgs {
   details: ForeignRuntimeDetails | null;
   now: Date;
   serverUrl: string;
@@ -91,9 +90,6 @@ export function renderExistingServerDialogHtml(
         )}</code></div>`,
     )
     .join("\n      ");
-  // Stopping the other copy needs a verified pid, which only the runtime file
-  // provides. Hide the option, and its warning, rather than offer an action
-  // that cannot work.
   const canReplace = args.details !== null;
   const replaceButtonHtml = canReplace
     ? `<button type="button" data-choice="replace">Quit other bb</button>`
@@ -204,10 +200,6 @@ export function renderExistingServerDialogHtml(
 </html>`;
 }
 
-/**
- * Ask before the desktop app attaches to a bb it did not start. Closing the
- * window resolves to "quit", because attaching must always be a deliberate act.
- */
 export function openExistingServerDialog(
   args: OpenExistingServerDialogArgs,
 ): Promise<ExistingServerDialogChoice> {

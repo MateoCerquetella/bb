@@ -27,6 +27,7 @@ import {
   ModelReasoningPicker,
 } from "./ModelReasoningPicker";
 import type { PickerOption } from "./OptionPicker";
+import type { ProviderPickerOption } from "./model-brand-prefix";
 import type { ModelPickerOption } from "./model-picker-option";
 
 type CapturedCommandHandler = (invocation: {
@@ -61,16 +62,19 @@ vi.mock("@/components/commands/AppCommandProvider", () => ({
   useIsAppCommandModifierHeld: () => false,
 }));
 
-const providerOptions: readonly PickerOption<string>[] = [
-  { value: "codex", label: "Codex" },
-  { value: "claude-code", label: "Claude Code" },
+const providerOptions: readonly ProviderPickerOption[] = [
+  { value: "codex", label: "Codex", brandPrefix: "GPT-" },
+  { value: "claude-code", label: "Claude Code", brandPrefix: "Claude " },
 ];
+
+function ProviderMaskIcon({ className }: { className?: string }) {
+  return <span className={className} data-testid="provider-mask-icon" />;
+}
 
 const codexModels: readonly PickerOption<string>[] = [
   { value: "gpt-5.5", label: "GPT-5.5" },
 ];
 
-// A list long enough (> MODEL_SEARCH_MIN_OPTIONS) to render the search box.
 const manyCodexModels: readonly PickerOption<string>[] = [
   { value: "gpt-5.5", label: "GPT-5.5" },
   { value: "gpt-5.2", label: "GPT-5.2" },
@@ -155,6 +159,7 @@ function renderPicker({
   modelLoadError = null,
   compact = false,
   splitPane = false,
+  muted = false,
 }: {
   onSelectedProviderChange?: ((value: string) => void) | null;
   onModelChange?: (value: string) => void;
@@ -164,7 +169,7 @@ function renderPicker({
   pickerReasoningOptions?: readonly PickerOption<ReasoningLevel>[];
   reasoningValue?: ReasoningLevel;
   moreModelOptions?: readonly ModelPickerOption[];
-  pickerProviderOptions?: readonly PickerOption<string>[];
+  pickerProviderOptions?: readonly ProviderPickerOption[];
   alternateProviderModels?: AvailableModel[];
   providerRouting?: SystemProvidersQuery;
   selectedProviderId?: string;
@@ -172,6 +177,7 @@ function renderPicker({
   modelLoadError?: SystemExecutionOptionsModelLoadError | null;
   compact?: boolean;
   splitPane?: boolean;
+  muted?: boolean;
 } = {}) {
   const { queryClient, wrapper } = createQueryClientTestHarness();
   queryClient.setQueryData(
@@ -211,6 +217,7 @@ function renderPicker({
         fastModeEnabled={false}
         onFastModeChange={vi.fn()}
         showFastModeToggle={false}
+        muted={muted}
         modal={false}
       />
       <button type="button">Composer action</button>
@@ -244,6 +251,31 @@ afterEach(() => {
 });
 
 describe("ModelReasoningPicker", () => {
+  it("uses the lower-emphasis chrome token for the composer caret", () => {
+    renderPicker({ muted: true });
+
+    const trigger = screen.getByRole("button", {
+      name: "Provider, model and reasoning",
+    });
+    expect(
+      trigger.querySelector('[data-icon="ChevronDown"]')?.classList,
+    ).toContain("text-subtle-foreground/75");
+    expect(trigger.classList).toContain("font-normal");
+  });
+
+  it("gives a non-SVG provider mark the same 16px trigger size as button SVGs", () => {
+    renderPicker({
+      pickerProviderOptions: [
+        { ...providerOptions[0], icon: ProviderMaskIcon },
+        providerOptions[1],
+      ],
+    });
+
+    expect(screen.getByTestId("provider-mask-icon").classList).toContain(
+      "size-4",
+    );
+  });
+
   it("keeps a failed provider tab visible with its provider-plugin error", () => {
     renderPicker({
       modelOptions: [],
@@ -335,9 +367,6 @@ describe("ModelReasoningPicker", () => {
     const lockedTarget = screen.getByRole("button", {
       name: "Provider, model and reasoning",
     });
-    // Owning the chord with nowhere to rotate is the correct no-op. Returning
-    // false lets the command provider skip `preventDefault()`, and macOS would
-    // then insert the composed Option+P character into the prompt.
     expect(
       commandHandlers.get("modelPicker.cycleProvider")?.({
         target: lockedTarget,
@@ -475,6 +504,45 @@ describe("ModelReasoningPicker", () => {
     ).toBe("");
   });
 
+  it("caps the desktop picker and scrolls only the model list", () => {
+    renderPicker({ modelOptions: manyCodexModels });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+
+    const menu = screen.getByRole("dialog");
+    expect(menu.className).toContain(
+      "max-h-[min(var(--radix-popover-content-available-height),calc(100dvh-0.5rem))]",
+    );
+    expect(menu.className).toContain("overflow-hidden");
+
+    const scrollers = [
+      ...(menu.className.includes("overflow-y-auto") ? [menu] : []),
+      ...menu.querySelectorAll<HTMLElement>("[class*='overflow-y-auto']"),
+    ];
+    expect(scrollers).toHaveLength(1);
+
+    const models = screen.getByRole("listbox", { name: "Models" });
+    expect(scrollers[0]).toBe(models);
+    expect(models.className).toContain("overscroll-contain");
+    expect(models.className).toContain("max-h-64");
+    expect(models.contains(screen.getByText("High"))).toBe(false);
+  });
+
+  it("leaves compact drawer height and scrolling to the responsive shell", async () => {
+    renderPicker({ compact: true, modelOptions: manyCodexModels });
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Provider, model and reasoning" }),
+    );
+
+    expect(screen.getByRole("dialog").className).not.toContain("100dvh");
+    expect(
+      (await screen.findByRole("listbox", { name: "Models" })).className,
+    ).not.toContain("max-h-");
+  });
+
   it("commits a provider tab immediately and keeps its models selectable", async () => {
     const { onSelectedProviderChange, onModelChange } = renderPicker();
 
@@ -556,7 +624,6 @@ describe("ModelReasoningPicker", () => {
     const search = screen.getByPlaceholderText("Search models");
     fireEvent.change(search, { target: { value: "o4" } });
 
-    // Only the fuzzy match survives; unrelated models are filtered out.
     expect(screen.getByText("o4-mini")).not.toBeNull();
     expect(screen.queryByText("Sonnet")).toBeNull();
 
@@ -611,8 +678,6 @@ describe("ModelReasoningPicker", () => {
       screen.getByRole("button", { name: "Provider, model and reasoning" }),
     );
 
-    // On desktop the extra models normally hide in a hover submenu; searching
-    // flattens them inline so the keyboard can reach them.
     const search = screen.getByPlaceholderText("Search models");
     fireEvent.change(search, { target: { value: "legacy" } });
 
@@ -729,7 +794,6 @@ describe("buildFuzzyRegex", () => {
 
   it("escapes regex metacharacters so they match literally", () => {
     expect(buildFuzzyRegex("5.2").test("5.2")).toBe(true);
-    // The dot is literal, so it must not match an arbitrary character.
     expect(buildFuzzyRegex("5.2").test("512")).toBe(false);
   });
 });

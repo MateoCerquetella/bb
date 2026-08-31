@@ -4,7 +4,7 @@ import {
 } from "@bb/config/local-app-origins";
 import type { ServerRuntimeConfig } from "./types.js";
 
-export interface BrowserRequestGuardDeps {
+interface BrowserRequestGuardDeps {
   config: Pick<ServerRuntimeConfig, "serverPort" | "appUrl" | "devAppPort">;
 }
 
@@ -25,7 +25,7 @@ interface BrowserRequestContext {
   };
 }
 
-function allowedAppOrigins(deps: BrowserRequestGuardDeps): Set<string> {
+export function allowedAppOrigins(deps: BrowserRequestGuardDeps): Set<string> {
   const args: BuildLocalAppOriginsArgs = {
     serverPort: deps.config.serverPort,
   };
@@ -138,12 +138,6 @@ function isJsonContentType(contentType: string | undefined): boolean {
   );
 }
 
-/**
- * Guards privileged local-browser boundaries without imposing credentials on
- * non-browser clients. Browsers send Origin; Node SDK, CLI, and server-to-server
- * callers commonly do not. Dynamic LAN/dev origins must share the request host
- * and use a configured BB port, while configured app origins match exactly.
- */
 export function browserRequestProblem(
   context: BrowserRequestContext,
   deps: BrowserRequestGuardDeps,

@@ -1,8 +1,8 @@
 import {
   type BackgroundTaskStatus,
   type BackgroundTaskUsage,
-  type ThreadEvent,
-  type ThreadEventBackgroundTaskItem,
+  type DeltaBackgroundTaskShape,
+  type ThreadDelta,
   type WorkflowAgentSnapshot,
   type WorkflowAgentState,
   type WorkflowPhaseSnapshot,
@@ -12,8 +12,6 @@ import {
   backgroundTaskItemStatus,
   isBackgroundAgentTaskType,
   isSettledBackgroundTaskStatus,
-  threadScope,
-  turnScope,
 } from "@get-bb/plugin-sdk/provider-bridge";
 import {
   claudeTaskNotificationMessageSchema,
@@ -25,26 +23,11 @@ import {
   type ClaudeTaskUsage,
   type ClaudeWorkflowAgentRecord,
 } from "./schemas.js";
+import { backgroundTaskPresentation } from "./presentation.js";
 
-/**
- * Minimum gap between persisted progress snapshots per task. The CLI flushes
- * progress batches every 16ms; every batch is folded into adapter state, but
- * only snapshots at this cadence become events. Status transitions flush
- * immediately, and the terminal completed event always carries the final
- * state, so skipped intermediate snapshots are never load-bearing.
- */
-export const CLAUDE_TASK_PROGRESS_THROTTLE_MS = 500;
-
-/**
- * Thread-lifetime state for one provider background task. Lives outside the
- * transient turn state (tasks outlive turns by design) and pins its thread's
- * registry entry against LRU eviction while any task is open.
- */
-export interface ClaudeTrackedTask {
+interface ClaudeTrackedTask {
   taskId: string;
-  itemId: string;
-  /** Spawning turn; places the item in the timeline via its item/started. */
-  turnId: string;
+  providerItemKey: string;
   toolUseId: string | undefined;
   taskType: string;
   generation: number;
@@ -58,47 +41,18 @@ export interface ClaudeTrackedTask {
   summary: string | undefined;
   error: string | undefined;
   outputFile: string | undefined;
-  lastProgressEmittedAt: number;
   terminal: boolean;
 }
 
 export type ClaudeTaskMap = Map<string, ClaudeTrackedTask>;
 
-export interface TranslateClaudeTaskMessageArgs {
-  /** Lazily opens the spawning turn and returns its id. */
-  ensureTurnStarted: () => string | undefined;
+interface TranslateClaudeTaskMessageArgs {
   event: unknown;
-  now: number;
-  opaqueTaskIds: Set<string>;
   tasks: ClaudeTaskMap;
-  threadId: string;
+  turnStartSuppressed: boolean;
+  hasForwardedToolUse: (toolUseId: string) => boolean;
 }
 
-export function hasOpenClaudeBackgroundTasks(tasks: ClaudeTaskMap): boolean {
-  for (const task of tasks.values()) {
-    if (!task.terminal) {
-      return true;
-    }
-  }
-  return false;
-}
-
-/**
- * Whether Claude still has bounded agent work that will reinvoke the parent
- * model when it settles. A successful SDK result while one of these tasks is
- * open ends only the current SDK loop segment, not the logical bb turn.
- *
- * Backgrounded shell commands are deliberately excluded: they are detached
- * work and may be long-lived (for example, a dev server). Ambient tasks are
- * excluded for the same reason.
- *
- * Workflows are excluded too, even though they do reinvoke the parent model.
- * They routinely run for many minutes, and holding the turn open kept the
- * thread `active` for their whole duration, which made the composer queue
- * follow-ups instead of sending them. A workflow therefore lets the turn
- * complete and the thread go idle; its progress stays visible through the
- * thread's background-task activity rather than through turn status.
- */
 export function hasCompletionBlockingClaudeTasks(
   tasks: ClaudeTaskMap,
 ): boolean {
@@ -114,7 +68,7 @@ export function hasCompletionBlockingClaudeTasks(
   return false;
 }
 
-function buildClaudeTaskItemId(taskId: string, generation: number): string {
+function buildClaudeTaskItemKey(taskId: string, generation: number): string {
   return generation > 1 ? `task:${taskId}#${generation}` : `task:${taskId}`;
 }
 
@@ -126,11 +80,6 @@ function toBackgroundTaskUsage(usage: ClaudeTaskUsage): BackgroundTaskUsage {
   };
 }
 
-/**
- * Raw record state machine: "start" (queued or running), "progress", "done",
- * "error" (+ skipped flag). Unknown future states degrade to running/queued by
- * slot acquisition rather than failing translation.
- */
 function deriveWorkflowAgentState(
   record: ClaudeWorkflowAgentRecord,
 ): WorkflowAgentState {
@@ -194,12 +143,6 @@ function normalizeWorkflowAgentRecord(
   };
 }
 
-/**
- * Folds one workflow_progress delta batch into the task's per-index maps. The
- * wire carries only records produced since the last CLI flush; the latest
- * record for a (record type, index) key supersedes earlier ones across
- * events, so a snapshot must never be rebuilt from a single batch.
- */
 function foldWorkflowProgressRecords(
   task: ClaudeTrackedTask,
   records: unknown[],
@@ -225,7 +168,6 @@ function foldWorkflowProgressRecords(
           : {}),
       });
     }
-    // Unknown record kinds (e.g. future additions) are ignored by design.
   }
 }
 
@@ -243,13 +185,13 @@ function buildWorkflowSnapshot(
   };
 }
 
-function buildClaudeTaskItem(
+function buildClaudeTaskShape(
   task: ClaudeTrackedTask,
-): ThreadEventBackgroundTaskItem {
+): DeltaBackgroundTaskShape {
   const workflow = buildWorkflowSnapshot(task);
   return {
     type: "backgroundTask",
-    id: task.itemId,
+    familyId: task.taskId,
     taskType: task.taskType,
     description: task.description,
     status: backgroundTaskItemStatus(task.taskStatus),
@@ -263,44 +205,50 @@ function buildClaudeTaskItem(
     ...(task.summary !== undefined ? { summary: task.summary } : {}),
     ...(task.error !== undefined ? { error: task.error } : {}),
     ...(task.outputFile !== undefined ? { outputFile: task.outputFile } : {}),
-    ...(task.toolUseId !== undefined
-      ? { parentToolCallId: task.toolUseId }
-      : {}),
   };
 }
 
-function buildClaudeTaskProgressEvent(
-  task: ClaudeTrackedTask,
-  threadId: string,
-): ThreadEvent {
+function taskKey(task: ClaudeTrackedTask): {
+  providerItemId: string;
+  parentRef?: string;
+} {
   return {
-    type: "item/backgroundTask/progress",
-    threadId,
-    providerThreadId: "",
-    scope: threadScope(),
-    item: buildClaudeTaskItem(task),
+    providerItemId: task.providerItemKey,
+    ...(task.toolUseId !== undefined ? { parentRef: task.toolUseId } : {}),
   };
 }
 
-function buildClaudeTaskCompletedEvent(
+function buildClaudeTaskProgressDelta(
   task: ClaudeTrackedTask,
-  threadId: string,
-): ThreadEvent {
+  flush: boolean,
+): ThreadDelta {
   return {
-    type: "item/backgroundTask/completed",
-    threadId,
-    providerThreadId: "",
-    scope: threadScope(),
-    item: buildClaudeTaskItem(task),
+    kind: "item.progress",
+    key: taskKey(task),
+    snapshot: buildClaudeTaskShape(task),
+    ...(flush ? { flush: true } : {}),
   };
 }
 
-/**
- * Task types bb materializes as background-task timeline rows: dynamic
- * workflows, backgrounded shell commands, and backgrounded agents. Other task
- * types such as monitors share the event family but stay on their own render
- * paths.
- */
+function claudeTaskPresentation(task: ClaudeTrackedTask) {
+  return backgroundTaskPresentation({
+    taskType: task.taskType,
+    description: task.description,
+    workflowName: task.workflowName,
+  });
+}
+
+function buildClaudeTaskCloseDelta(task: ClaudeTrackedTask): ThreadDelta {
+  const shape = buildClaudeTaskShape(task);
+  return {
+    kind: "item.close",
+    key: taskKey(task),
+    status: shape.status,
+    item: shape,
+    presentation: claudeTaskPresentation(task),
+  };
+}
+
 function isMaterializedTaskType(taskType: string): boolean {
   return (
     taskType === LOCAL_WORKFLOW_TASK_TYPE ||
@@ -309,39 +257,34 @@ function isMaterializedTaskType(taskType: string): boolean {
   );
 }
 
-/**
- * Translates the SDK task event family (task_started / task_progress /
- * task_updated / task_notification). Returns null when the message is not a
- * task message; returns [] for task messages that are intentionally not
- * materialized (monitor/unknown task types and events for unknown/settled
- * tasks).
- */
 export function translateClaudeTaskMessage(
   args: TranslateClaudeTaskMessageArgs,
-): ThreadEvent[] | null {
+): ThreadDelta[] | null {
   const started = claudeTaskStartedMessageSchema.safeParse(args.event);
   if (started.success) {
     const message = started.data;
     const taskType = message.task_type ?? "unknown";
     if (!isMaterializedTaskType(taskType)) {
-      args.opaqueTaskIds.add(message.task_id);
       return [];
     }
-    args.opaqueTaskIds.delete(message.task_id);
     const existing = args.tasks.get(message.task_id);
     if (existing && !existing.terminal) {
-      // Duplicate started for an open task — nothing new to materialize.
+      return [];
+    }
+    if (
+      existing === undefined &&
+      message.tool_use_id !== undefined &&
+      !args.hasForwardedToolUse(message.tool_use_id)
+    ) {
       return [];
     }
     const generation = existing ? existing.generation + 1 : 1;
-    const turnId = args.ensureTurnStarted();
-    if (turnId === undefined) {
+    if (args.turnStartSuppressed) {
       return [];
     }
     const task: ClaudeTrackedTask = {
       taskId: message.task_id,
-      itemId: buildClaudeTaskItemId(message.task_id, generation),
-      turnId,
+      providerItemKey: buildClaudeTaskItemKey(message.task_id, generation),
       toolUseId: message.tool_use_id,
       taskType,
       generation,
@@ -355,17 +298,16 @@ export function translateClaudeTaskMessage(
       summary: undefined,
       error: undefined,
       outputFile: undefined,
-      lastProgressEmittedAt: args.now,
       terminal: false,
     };
     args.tasks.set(message.task_id, task);
     return [
+      { kind: "turn.open" },
       {
-        type: "item/started",
-        threadId: args.threadId,
-        providerThreadId: "",
-        scope: turnScope(turnId),
-        item: buildClaudeTaskItem(task),
+        kind: "item.open",
+        key: taskKey(task),
+        item: buildClaudeTaskShape(task),
+        presentation: claudeTaskPresentation(task),
       },
     ];
   }
@@ -381,25 +323,12 @@ export function translateClaudeTaskMessage(
       foldWorkflowProgressRecords(task, message.workflow_progress);
     }
     task.usage = toBackgroundTaskUsage(message.usage);
-    if (
-      args.now - task.lastProgressEmittedAt <
-      CLAUDE_TASK_PROGRESS_THROTTLE_MS
-    ) {
-      return [];
-    }
-    task.lastProgressEmittedAt = args.now;
-    return [buildClaudeTaskProgressEvent(task, args.threadId)];
+    return [buildClaudeTaskProgressDelta(task, false)];
   }
 
   const updated = claudeTaskUpdatedMessageSchema.safeParse(args.event);
   if (updated.success) {
     const message = updated.data;
-    if (
-      message.patch.status !== undefined &&
-      isSettledBackgroundTaskStatus(message.patch.status)
-    ) {
-      args.opaqueTaskIds.delete(message.task_id);
-    }
     const task = args.tasks.get(message.task_id);
     if (!task || task.terminal) {
       return [];
@@ -416,17 +345,7 @@ export function translateClaudeTaskMessage(
     if (patch.error !== undefined) {
       task.error = patch.error;
     }
-    // end_time / total_paused_ms / is_backgrounded are ignored by design for
-    // workflow tasks: duration comes from usage.duration_ms and workflows are
-    // always backgrounded. Revisit when non-workflow tasks materialize.
-    if (
-      !statusChanged &&
-      args.now - task.lastProgressEmittedAt < CLAUDE_TASK_PROGRESS_THROTTLE_MS
-    ) {
-      return [];
-    }
-    task.lastProgressEmittedAt = args.now;
-    return [buildClaudeTaskProgressEvent(task, args.threadId)];
+    return [buildClaudeTaskProgressDelta(task, statusChanged)];
   }
 
   const notification = claudeTaskNotificationMessageSchema.safeParse(
@@ -434,7 +353,6 @@ export function translateClaudeTaskMessage(
   );
   if (notification.success) {
     const message = notification.data;
-    args.opaqueTaskIds.delete(message.task_id);
     const task = args.tasks.get(message.task_id);
     if (!task || task.terminal) {
       return [];
@@ -448,27 +366,16 @@ export function translateClaudeTaskMessage(
       task.usage = toBackgroundTaskUsage(message.usage);
     }
     task.terminal = true;
-    return [buildClaudeTaskCompletedEvent(task, args.threadId)];
+    return [buildClaudeTaskCloseDelta(task)];
   }
 
   return null;
 }
 
-/**
- * Settles every open task. Used when the CLI session backing the tasks is
- * gone: thread/resume restarts the session (settings change, reconnect
- * re-resume) and provider process exit kills it outright. Tasks whose latest
- * patch already reported a finished status (completed/failed/killed) keep it —
- * only the terminal task_notification is lost, not the outcome — while
- * genuinely open tasks settle as interrupted ("stopped"). The daemon-crash
- * case — where this in-memory state is lost entirely — is reconciled
- * server-side on daemon session re-registration.
- */
-export function buildInterruptedClaudeTaskEvents(args: {
+export function buildInterruptedClaudeTaskDeltas(args: {
   tasks: ClaudeTaskMap;
-  threadId: string;
-}): ThreadEvent[] {
-  const events: ThreadEvent[] = [];
+}): ThreadDelta[] {
+  const deltas: ThreadDelta[] = [];
   for (const task of args.tasks.values()) {
     if (task.terminal) {
       continue;
@@ -477,7 +384,7 @@ export function buildInterruptedClaudeTaskEvents(args: {
       task.taskStatus = "stopped";
     }
     task.terminal = true;
-    events.push(buildClaudeTaskCompletedEvent(task, args.threadId));
+    deltas.push(buildClaudeTaskCloseDelta(task));
   }
-  return events;
+  return deltas;
 }

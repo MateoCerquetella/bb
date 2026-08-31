@@ -26,17 +26,20 @@ Context variables set automatically inside a thread environment:
 - BB_CLI — absolute path to the daemon-managed `bb` executable (prefer this if bare `bb` is wrong; official entrypoints also re-exec to it)
 
 Run `bb status` to see your current context (resolved project and thread IDs).
+It also warns when an enabled plugin is not running (incompatible after a bb
+upgrade, failed to load, or missing); run `bb plugin list` for the detail.
 
 All commands support --json for machine-readable output.
 
 To make a repo work with bb worktrees, run `bb guide environments` for the
-repo-level `.bb-env-setup.sh` setup hook. Run `bb guide agent-configuration` for
-the data-dir and workspace files that customize agent behavior.
+repo-level `.bb-env-setup.sh` and `.bb-env-teardown.sh` hooks. Run `bb guide
+agent-configuration` for the data-dir and workspace files that customize agent
+behavior.
 
 Run `bb guide <chapter>` for command details:
 
   threads              Spawning, inspecting, messaging, and managing threads
-  environments         Environment setup hooks, operations, commits, and merges
+  environments         Environment lifecycle hooks, operations, commits, and merges
   agent-configuration  AGENTS.md and skills files that shape agents
   providers            Discovering providers and models
   projects             Project CRUD and sources

@@ -17,7 +17,6 @@ const directUnmanagedIntentSchema = z.object({
   type: z.literal("direct-unmanaged"),
   hostId: z.string().min(1),
   path: z.string().min(1),
-  /** Pre-thread checkout requested for the unmanaged workspace, if any. */
   branch: unmanagedBranchSpecSchema.optional(),
 });
 
@@ -48,38 +47,28 @@ const reuseIntentSchema = z.object({
   environmentId: z.string().min(1),
 });
 
-export const threadProvisionEnvironmentIntentSchema = z.discriminatedUnion(
-  "type",
-  [
-    directUnmanagedIntentSchema,
-    checkoutUnmanagedIntentSchema,
-    directManagedIntentSchema,
-    directPersonalIntentSchema,
-    reuseIntentSchema,
-  ],
-);
+const threadProvisionEnvironmentIntentSchema = z.discriminatedUnion("type", [
+  directUnmanagedIntentSchema,
+  checkoutUnmanagedIntentSchema,
+  directManagedIntentSchema,
+  directPersonalIntentSchema,
+  reuseIntentSchema,
+]);
 
-export const threadForkDescriptorSchema = z.object({
+const threadForkDescriptorSchema = z.object({
   sourceProviderThreadId: z.string().min(1),
+  sourceProviderCheckpointId: z.string().min(1).optional(),
 });
 
-export const threadProvisionCommonPayloadSchema = z.object({
+const threadProvisionCommonPayloadSchema = z.object({
   branchSlug: z.string().nullable().default(null),
   clientRequestId: clientTurnRequestIdSchema,
   environmentIntent: threadProvisionEnvironmentIntentSchema,
   execution: resolvedThreadExecutionOptionsSchema,
-  // Non-null ⇒ provision this thread by cloning the source provider session at
-  // its branch point (native fork) instead of starting a fresh session. null ⇒
-  // not a fork. Only populated for forkable forks; the server gates on
-  // originKind/provider capability/source session/host at create time.
   fork: threadForkDescriptorSchema.nullable().default(null),
   input: z.array(promptInputSchema),
   inputGroups: z.array(z.array(promptInputSchema).min(1)).min(1).optional(),
   titleProvided: z.boolean(),
-  // When true the thread-start turn is persisted/displayed but no provider run
-  // is dispatched — the started agent waits for the user's first message (fork
-  // and side-chat anchors). The thread lands in `idle` once the workspace is
-  // ready. Defaults false (a normal start dispatches immediately).
   seedWithoutRun: z.boolean().default(false),
 });
 
@@ -87,11 +76,11 @@ export type ThreadForkDescriptor = z.infer<typeof threadForkDescriptorSchema>;
 export type ThreadProvisionEnvironmentIntent = z.infer<
   typeof threadProvisionEnvironmentIntentSchema
 >;
-export type ThreadProvisionOperationPayload = z.infer<
+type ThreadProvisionOperationPayload = z.infer<
   typeof threadProvisionCommonPayloadSchema
 >;
 
-export const threadProvisioningStageValues = [
+const threadProvisioningStageValues = [
   "metadata-pending",
   "environment-pending",
   "environment-prepared",
@@ -100,10 +89,9 @@ export const threadProvisioningStageValues = [
   "workspace-ready",
 ] as const;
 
-export type ThreadProvisioningStage =
-  (typeof threadProvisioningStageValues)[number];
+type ThreadProvisioningStage = (typeof threadProvisioningStageValues)[number];
 
-export interface ThreadProvisioningState {
+interface ThreadProvisioningState {
   environmentId: string | null;
   provisionEventSequence: number | null;
   provisioningId: string;
@@ -145,15 +133,14 @@ export type ThreadProvisionEnvironmentPreparedContext =
     };
   };
 
-export type ThreadProvisionEnvironmentAttachedContext =
-  ThreadProvisionContext & {
-    state: ThreadProvisioningState & {
-      environmentId: string;
-      provisionEventSequence: null;
-      stage: "environment-attached";
-      workspaceReadyEventSequence: null;
-    };
+type ThreadProvisionEnvironmentAttachedContext = ThreadProvisionContext & {
+  state: ThreadProvisioningState & {
+    environmentId: string;
+    provisionEventSequence: null;
+    stage: "environment-attached";
+    workspaceReadyEventSequence: null;
   };
+};
 
 export type ThreadProvisionEnvironmentProvisioningContext =
   ThreadProvisionContext & {
@@ -165,13 +152,10 @@ export type ThreadProvisionEnvironmentProvisioningContext =
     };
   };
 
-export type ThreadProvisionWorkspaceReadyContext = ThreadProvisionContext & {
+type ThreadProvisionWorkspaceReadyContext = ThreadProvisionContext & {
   state: ThreadProvisioningState & {
     environmentId: string;
     stage: "workspace-ready";
-    // null ⇒ reaching workspace-ready appended no `system/thread-provisioning`
-    // row because nothing was provisioned (the thread attached to an
-    // already-ready environment). See `hasProvisioningTimelineRow`.
     workspaceReadyEventSequence: number | null;
   };
 };
@@ -182,7 +166,7 @@ export type ThreadProvisionAttachableContext =
   | ThreadProvisionEnvironmentProvisioningContext
   | ThreadProvisionWorkspaceReadyContext;
 
-export type ThreadProvisionProvisionRequestableContext =
+type ThreadProvisionProvisionRequestableContext =
   | ThreadProvisionEnvironmentPreparedContext
   | ThreadProvisionEnvironmentAttachedContext
   | ThreadProvisionEnvironmentProvisioningContext
@@ -193,7 +177,7 @@ export type ThreadProvisionProvisionableContext =
   | ThreadProvisionEnvironmentProvisioningContext
   | ThreadProvisionWorkspaceReadyContext;
 
-export interface CreateMetadataPendingContextArgs {
+interface CreateMetadataPendingContextArgs {
   clientRequestId: ClientTurnRequestId;
   environmentIntent: ThreadProvisionEnvironmentIntent;
   execution: ResolvedThreadExecutionOptions;
@@ -203,24 +187,24 @@ export interface CreateMetadataPendingContextArgs {
   titleProvided: boolean;
 }
 
-export interface CreateEnvironmentPendingContextArgs {
+interface CreateEnvironmentPendingContextArgs {
   branchSlug: string | null;
 }
 
-export interface CreateEnvironmentAttachedContextArgs {
+interface CreateEnvironmentAttachedContextArgs {
   attachedEnvironmentId: string;
 }
 
-export interface CreateEnvironmentPreparedContextArgs {
+interface CreateEnvironmentPreparedContextArgs {
   attachedEnvironmentId: string;
   provisionEventSequence: number;
 }
 
-export interface CreateEnvironmentProvisioningContextArgs {
+interface CreateEnvironmentProvisioningContextArgs {
   provisionEventSequence: number;
 }
 
-export interface CreateReprovisioningContextArgs {
+interface CreateReprovisioningContextArgs {
   clientRequestId: ClientTurnRequestId;
   environmentId: string;
   provisionEventSequence: number;
@@ -230,18 +214,12 @@ export interface CreateReprovisioningContextArgs {
   provisioningId: string;
 }
 
-export interface CreateWorkspaceReadyContextArgs {
+interface CreateWorkspaceReadyContextArgs {
   workspaceReadyEventSequence: number | null;
 }
 
-export interface ResolvePreparedEnvironmentMetadataArgs {
+interface ResolvePreparedEnvironmentMetadataArgs {
   branchSlug: string | null;
-}
-
-export function attachedEnvironmentIdForContext(
-  context: ThreadProvisionContext,
-): string | null {
-  return context.state.environmentId;
 }
 
 export function isAttachableContext(
@@ -305,7 +283,7 @@ export function isEnvironmentPreparedContext(
   );
 }
 
-export function isWorkspaceReadyContext(
+function isWorkspaceReadyContext(
   context: ThreadProvisionContext,
 ): context is ThreadProvisionWorkspaceReadyContext {
   return (
@@ -314,16 +292,6 @@ export function isWorkspaceReadyContext(
   );
 }
 
-/**
- * True when this provisioning run has already appended at least one
- * `system/thread-provisioning` row to the thread timeline.
- *
- * A start that attaches to an already-ready environment provisions nothing and
- * emits no row. Terminal rows (`completed`, `cancelled`) must be suppressed for
- * those runs too — the client keys every provisioning event into a single
- * operation row, so a lone terminal event would surface as "Provisioned thread"
- * for a start that never provisioned anything.
- */
 export function hasProvisioningTimelineRow(
   context: ThreadProvisionContext,
 ): boolean {
@@ -464,7 +432,6 @@ export function createReprovisioningContext(
       },
       clientRequestId: args.clientRequestId,
       execution: args.execution,
-      // Reprovision is a new turn on an existing thread, never a fork.
       fork: null,
       input: args.input,
       ...(args.inputGroups !== undefined

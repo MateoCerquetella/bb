@@ -1,65 +1,23 @@
-/**
- * The echo bridge's conformance run: drives the bridge in-process through the
- * canonical Provider Bridge Protocol suite (JSON-RPC hygiene, the initialize
- * handshake, and the shared session lifecycle) and asserts a fully green
- * report. This is the test every provider bridge should ship — a conformant
- * bridge passes all eleven scenarios.
- *
- * The transport is the in-process pattern: `send` is the bridge's exported
- * line handler, and `takeMessages` drains a captured stdout buffer (the
- * bridge writes protocol lines with process.stdout.write).
- */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, expect, it } from "vitest";
 import {
-  formatConformanceReport,
-  runBridgeConformance,
-  type BridgeConformanceTransport,
-} from "@bb/provider-bridge-protocol/conformance";
+  experimental_captureBridgeJsonRpcOutput as captureBridgeJsonRpcOutput,
+  experimental_formatConformanceReport as formatConformanceReport,
+  experimental_runBridgeConformance as runBridgeConformance,
+} from "@get-bb/plugin-sdk/provider-bridge/testing";
+import type { CapturedBridgeJsonRpcOutput } from "@get-bb/plugin-sdk/provider-bridge/testing";
+
 import { handleLine } from "./src/provider-bridge.js";
+import { ECHO_PLUGIN_ID } from "./src/vocabulary.js";
 
-interface CapturedStdout {
-  messages: unknown[];
-  restore: () => void;
-}
-
-/** Buffer every protocol line the bridge writes to stdout. */
-function captureStdoutJsonLines(): CapturedStdout {
-  const messages: unknown[] = [];
-  const originalWrite = process.stdout.write.bind(process.stdout);
-  let pending = "";
-  process.stdout.write = ((chunk: string | Uint8Array): boolean => {
-    pending += typeof chunk === "string" ? chunk : chunk.toString();
-    for (;;) {
-      const newlineIndex = pending.indexOf("\n");
-      if (newlineIndex === -1) {
-        break;
-      }
-      const line = pending.slice(0, newlineIndex);
-      pending = pending.slice(newlineIndex + 1);
-      if (line.trim().length === 0) {
-        continue;
-      }
-      messages.push(JSON.parse(line));
-    }
-    return true;
-  }) as typeof process.stdout.write;
-  return {
-    messages,
-    restore: () => {
-      process.stdout.write = originalWrite;
-    },
-  };
-}
-
-let output: CapturedStdout;
+let output: CapturedBridgeJsonRpcOutput;
 let workspaceDir: string;
 
 beforeEach(() => {
   workspaceDir = mkdtempSync(join(tmpdir(), "bb-echo-conformance-"));
-  output = captureStdoutJsonLines();
+  output = captureBridgeJsonRpcOutput();
 });
 
 afterEach(() => {
@@ -68,26 +26,18 @@ afterEach(() => {
 });
 
 it("passes the canonical protocol suite", async () => {
-  let drained = 0;
-  const transport: BridgeConformanceTransport = {
-    send: (line) => handleLine(line),
-    takeMessages: () => {
-      const fresh = output.messages.slice(drained);
-      drained = output.messages.length;
-      return fresh;
-    },
-  };
-
   const report = await runBridgeConformance({
-    transport,
+    transport: { send: handleLine, takeMessages: output.takeMessages },
+    providerId: "echo",
     session: {
       cwd: workspaceDir,
       promptInput: [{ type: "text", text: "say hello", mentions: [] }],
+      zeroWorkPromptInput: [{ type: "text", text: "/noop", mentions: [] }],
+      icons: { pluginId: ECHO_PLUGIN_ID, names: ["receipt"] },
     },
     timeoutMs: 5_000,
   });
 
-  // Keep the human-readable report visible for diagnosing any regression.
   output.restore();
   console.info(`echo bridge conformance:\n${formatConformanceReport(report)}`);
 
@@ -105,7 +55,11 @@ it("passes the canonical protocol suite", async () => {
     "events/schema-valid": "pass",
     "item/opens-before-delta": "pass",
     "stop/release-not-interrupted": "pass",
+    "session/resume-identity": "pass",
     "session/resume-id-uniqueness": "pass",
+    "skills/configure-declared": "pass",
+    "presentation/icon-namespaced-declared": "pass",
+    "turn/settles-without-activity": "pass",
   });
   expect(report.passed).toBe(true);
 }, 30_000);

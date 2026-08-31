@@ -12,14 +12,14 @@ import type { ThreadEventType } from "@bb/domain";
 import { roundDurationMs } from "../lib/duration.js";
 import type { AppDeps } from "../../types.js";
 
-export type ThreadEventPruningMode = "active" | "archived" | "idle";
+type ThreadEventPruningMode = "active" | "archived" | "idle";
 
-export interface PruneThreadEventHistoryArgs {
+interface PruneThreadEventHistoryArgs {
   mode: ThreadEventPruningMode;
   threadId: string;
 }
 
-export interface ThreadEventPruningResult {
+interface ThreadEventPruningResult {
   latestSequence: number;
   removedAgePrunableEvents: number;
   removedBackgroundTaskProgressEvents: number;
@@ -28,7 +28,7 @@ export interface ThreadEventPruningResult {
   totalRemoved: number;
 }
 
-export interface MaybePruneActiveThreadEventHistoryArgs {
+interface MaybePruneActiveThreadEventHistoryArgs {
   latestPrunableSequence: number;
   threadId: string;
 }
@@ -56,26 +56,19 @@ class ThreadEventPruningStepError extends Error {
   }
 }
 
-export const ACTIVE_THREAD_EVENT_KEEP_RECENT = 1_000;
-export const IDLE_THREAD_EVENT_KEEP_RECENT = 300;
-export const ARCHIVED_THREAD_EVENT_KEEP_RECENT = 120;
-export const ACTIVE_THREAD_EVENT_PRUNE_MIN_SEQUENCE_DELTA = 250;
-export const ACTIVE_THREAD_EVENT_PRUNE_MIN_INTERVAL_MS = 30_000;
+const ACTIVE_THREAD_EVENT_KEEP_RECENT = 1_000;
+const IDLE_THREAD_EVENT_KEEP_RECENT = 300;
+const ARCHIVED_THREAD_EVENT_KEEP_RECENT = 120;
+const ACTIVE_THREAD_EVENT_PRUNE_MIN_SEQUENCE_DELTA = 250;
+const ACTIVE_THREAD_EVENT_PRUNE_MIN_INTERVAL_MS = 30_000;
 const SLOW_THREAD_EVENT_PRUNE_LOG_THRESHOLD_MS = 1_000;
 
-export const AGE_PRUNABLE_THREAD_EVENT_TYPES: readonly ThreadEventType[] = [
+const AGE_PRUNABLE_THREAD_EVENT_TYPES: readonly ThreadEventType[] = [
   "thread/contextWindowUsage/updated",
   "thread/tokenUsage/updated",
   "turn/diff/updated",
 ] as const;
 
-/**
- * Event types whose ingestion may trigger an opportunistic prune of the
- * thread's event history. Covers the age-prunable stream types plus
- * backgroundTask progress snapshots: workflows keep streaming progress after
- * their spawning turn completed, so without this trigger nothing would bound
- * the superseded snapshots until the next turn completes.
- */
 const ACTIVE_PRUNE_TRIGGER_THREAD_EVENT_TYPES: readonly ThreadEventType[] = [
   ...AGE_PRUNABLE_THREAD_EVENT_TYPES,
   "item/backgroundTask/progress",
@@ -227,9 +220,6 @@ export function maybePruneActiveThreadEventHistory(
   args: MaybePruneActiveThreadEventHistoryArgs,
 ): ThreadEventPruningResult | null {
   const thread = getThread(deps.db, args.threadId);
-  // Idle threads still ingest prunable streams: a backgrounded workflow keeps
-  // emitting thread-scoped progress snapshots after its spawning turn
-  // completed, which is exactly when nothing else would prune them.
   if (
     !thread ||
     (thread.status !== "active" && thread.status !== "idle") ||

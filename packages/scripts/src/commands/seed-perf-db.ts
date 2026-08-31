@@ -9,13 +9,12 @@ import {
   resolveDataDirDatabasePath,
   resolveProdDataDir,
 } from "@bb/config/runtime";
+import { HOST_ID_FILE_NAME } from "@bb/host-daemon-contract";
 import { seedPerfFixture } from "../lib/seed-perf-fixture.js";
 import { bold, cyan, dim, green, log, endStep } from "../lib/script-helpers.js";
 
 const commandDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(commandDir, "..", "..", "..", "..");
-
-const HOST_ID_FILE_NAME = "host-id";
 
 interface SeedCommandArgs {
   dataDir: string | null;
@@ -79,7 +78,6 @@ function parseArgs(argv: string[]): SeedCommandArgs | null {
       return value;
     };
     switch (argument) {
-      // pnpm forwards the "--" separator to the script; skip it.
       case "--":
         break;
       case "--help":
@@ -128,9 +126,7 @@ function readSeedHostId(dataDir: string): string {
   return "host_seedfixture";
 }
 
-export async function main(
-  argv: string[] = process.argv.slice(2),
-): Promise<void> {
+async function main(argv: string[] = process.argv.slice(2)): Promise<void> {
   const args = parseArgs(argv);
   if (args === null) {
     process.stdout.write(renderHelpText());
@@ -154,9 +150,6 @@ export async function main(
     for (const suffix of ["", "-shm", "-wal"]) {
       rmSync(`${databasePath}${suffix}`, { force: true });
     }
-    // The database reset also wipes the daemon's server-side API key. Remove
-    // the local credentials so the daemon re-enrolls under the persisted
-    // host id instead of retrying a dead key.
     rmSync(join(dataDir, "auth.json"), { force: true });
     log(dim("●"), "removed the existing database file and host credentials");
   }
@@ -178,8 +171,6 @@ export async function main(
       onProgress: (message) => log(dim("○"), dim(message)),
     });
     db.$client.pragma("wal_checkpoint(TRUNCATE)");
-    // Real directories keep the host daemon's git probes from failing when a
-    // seeded thread or environment is opened.
     for (const workspacePath of result.projectWorkspacePaths) {
       if (existsSync(join(workspacePath, ".git"))) {
         continue;

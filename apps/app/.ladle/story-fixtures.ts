@@ -7,10 +7,13 @@ import type {
   ThreadListEntry,
   WorkspaceStatus,
 } from "@bb/domain";
+import type {
+  ProviderCliKey,
+  ProviderCliStatus,
+} from "@bb/host-daemon-contract";
 import type { ProjectResponse } from "@bb/server-contract";
-import { ClaudeIcon } from "../src/components/icons/ClaudeIcon";
-import { OpenAiIcon } from "../src/components/icons/OpenAiIcon";
-import { PiIcon } from "../src/components/icons/PiIcon";
+import { EMPTY_ORDERED_MENTION_SUGGESTIONS } from "@bb/client-core";
+import { getProviderIconInfo } from "../src/lib/provider-icon";
 import type { PickerOption } from "../src/components/pickers/OptionPicker";
 import type { ModelPickerOption } from "../src/components/pickers/model-picker-option";
 import type { ProjectSelectorOption } from "../src/components/pickers/ProjectSelector";
@@ -25,12 +28,6 @@ import {
 } from "../src/components/promptbox/PromptBoxInternal";
 
 const noop = () => {};
-
-// ---------------------------------------------------------------------------
-// A small set of realistic, shared constants so the fixture universe feels
-// coherent across stories. Keep this list short — when stories reach for a
-// host or project name, they should reach for one of these.
-// ---------------------------------------------------------------------------
 
 export const HOST_IDS = {
   local: "host_local",
@@ -59,18 +56,12 @@ export const BRANCH_NAMES = {
   feature: "feat/sidebar-rail",
 } as const;
 
-// ---------------------------------------------------------------------------
-// Promptbox config builders. PromptBoxInternal, NewThreadPromptBox, and
-// FollowUpPromptBox stories all reach for the same Mentions / Attachments
-// shapes — share them here so the inert defaults stay consistent.
-// ---------------------------------------------------------------------------
-
 export function makeTypeaheadConfig(
   mentionOverrides: Partial<TypeaheadMentionConfig> = {},
   commandOverrides: Partial<TypeaheadCommandConfig> = {},
 ): TypeaheadConfig {
   const mention: TypeaheadMentionConfig = {
-    suggestions: [],
+    results: EMPTY_ORDERED_MENTION_SUGGESTIONS,
     isLoading: false,
     isError: false,
     onQueryChange: noop,
@@ -99,21 +90,19 @@ export function makeAttachmentsConfig(
   return { ...base, ...overrides };
 }
 
-// ---------------------------------------------------------------------------
-// Provider + model + reasoning fixtures shared across every story that shows
-// the model & reasoning picker (directly, or via ExecutionControls). Match
-// the realistic catalog the prototype stories used so the picker looks like
-// production wherever it appears.
-//
-// Labels are the raw (un-stripped) form — `ModelReasoningPicker` applies the
-// brand-prefix strip at render via `stripModelBrandPrefix`, so callers don't
-// need to pre-format.
-// ---------------------------------------------------------------------------
+function storyProviderIcon(providerId: string, glyph: string) {
+  return getProviderIconInfo(providerId, { logoUrl: null, icon: { glyph } })
+    ?.icon;
+}
 
 export const STORY_PROVIDER_OPTIONS: readonly PickerOption<string>[] = [
-  { value: "codex", label: "Codex", icon: OpenAiIcon },
-  { value: "claude-code", label: "Claude Code", icon: ClaudeIcon },
-  { value: "pi", label: "Pi", icon: PiIcon },
+  { value: "codex", label: "Codex", icon: storyProviderIcon("codex", "Code") },
+  {
+    value: "claude-code",
+    label: "Claude Code",
+    icon: storyProviderIcon("claude-code", "Sparkles"),
+  },
+  { value: "pi", label: "Pi", icon: storyProviderIcon("pi", "Zap") },
 ];
 
 export const STORY_CODEX_MODELS: readonly PickerOption<string>[] = [
@@ -200,20 +189,11 @@ export const STORY_CLAUDE_REASONING: readonly PickerOption<ReasoningLevel>[] = [
   { value: "max", label: "Max" },
 ];
 
-/** Only codex supports the fast / standard service-tier toggle today. */
 export const STORY_SERVICE_TIER_SUPPORT: Record<string, boolean> = {
   codex: true,
   "claude-code": false,
   pi: false,
 };
-
-// ---------------------------------------------------------------------------
-// Host / source / branch / worktree / project catalog. Every story that
-// renders the env strip (EnvironmentOptions, NewThreadPromptBox), the project
-// selector (NewThreadPromptBox), or the follow-up env summary
-// (FollowUpPromptBox) pulls from the same lists so adding a new branch state
-// flows everywhere without each story growing its own copy.
-// ---------------------------------------------------------------------------
 
 export const STORY_PROJECT_SOURCES: readonly ProjectSource[] = [
   {
@@ -269,11 +249,6 @@ export const STORY_PROJECTS: readonly ProjectSelectorOption[] = [
   { id: PROJECT_IDS.pierre, name: PROJECT_NAMES.pierre },
 ];
 
-/**
- * Codex / gpt-5.5 / medium reasoning — the default starting point most
- * stories want. Spread + override individual sections for specific
- * scenarios (locked provider, claude-code selected, fast mode on, etc.).
- */
 export function makeExecutionControlsProps(
   overrides: Partial<ExecutionControlsProps> = {},
 ): ExecutionControlsProps {
@@ -307,13 +282,6 @@ export function makeExecutionControlsProps(
   };
   return { ...base, ...overrides };
 }
-
-// ---------------------------------------------------------------------------
-// Typed-base builders. Each base is annotated with its strict T so TypeScript
-// contextually checks every field (literal enum values + missing fields).
-// `Partial<T>` overrides can only restate existing fields, never invent
-// missing ones.
-// ---------------------------------------------------------------------------
 
 export function makeThread(overrides: Partial<Thread> = {}): Thread {
   const base: Thread = {
@@ -411,6 +379,34 @@ export function makeHost(overrides: Partial<Host> = {}): Host {
     updatedAt: 100,
   };
   return { ...base, ...overrides };
+}
+
+export function makeProviderCliStatus(
+  provider: ProviderCliKey,
+  overrides: Partial<ProviderCliStatus> = {},
+): ProviderCliStatus {
+  const identity =
+    provider === "codex"
+      ? { displayName: "Codex", executableName: "codex" }
+      : provider === "claude-code"
+        ? { displayName: "Claude Code", executableName: "claude" }
+        : { displayName: "Cursor", executableName: "agent" };
+  return {
+    displayName: identity.displayName,
+    executableName: identity.executableName,
+    executablePath: `/usr/local/bin/${identity.executableName}`,
+    installed: true,
+    installSource: "npmGlobal",
+    currentVersion: "1.0.0",
+    latestVersion: "1.0.0",
+    minimumSupportedVersion: null,
+    npmPackageName: null,
+    npmGlobalPackageVersion: null,
+    installAction: null,
+    needsUpdate: false,
+    versionUnsupported: false,
+    ...overrides,
+  };
 }
 
 export function makeEnvironment(

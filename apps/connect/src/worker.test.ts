@@ -15,8 +15,6 @@ import {
   TUNNEL_TARGET_HEADER,
 } from "./protocol-headers";
 
-// ── pure helpers ────────────────────────────────────────────────────────────
-
 describe("connect sign-in page", () => {
   it("points unauthenticated visitors at the dashboard auth flow with returnTo", () => {
     expect(
@@ -103,14 +101,17 @@ describe("parseClientProtocolVersion", () => {
   });
 });
 
-// ── gate worker (mocked session + DO stub) ──────────────────────────────────
-
 vi.mock("./session.js", () => ({
+  invalidateSessionCookie: vi.fn(),
   markMachineSeen: vi.fn(),
   parseCookie: vi.fn(),
   resolveLabel: vi.fn(),
   verifyMachineCredentialDetails: vi.fn(),
-  verifySessionCookie: vi.fn(),
+  verifySessionCookieDetails: vi.fn(),
+}));
+
+vi.mock("./account-session.js", () => ({
+  refreshAccountSessionCookies: vi.fn(),
 }));
 
 vi.mock("./servers.js", () => ({
@@ -135,7 +136,7 @@ vi.mock("./cache.js", async () => {
         _namespace: string,
         _ctx: ExecutionContext,
         fetchOrigin: () => Promise<Response>,
-      ) => fetchOrigin(),
+      ) => ({ cacheable: false, response: await fetchOrigin() }),
     ),
   };
 });
@@ -147,12 +148,14 @@ vi.mock("drizzle-orm/d1", () => ({
 import { drizzle } from "drizzle-orm/d1";
 
 import {
+  invalidateSessionCookie,
   markMachineSeen,
   parseCookie,
   resolveLabel,
   verifyMachineCredentialDetails,
-  verifySessionCookie,
+  verifySessionCookieDetails,
 } from "./session.js";
+import { refreshAccountSessionCookies } from "./account-session.js";
 import {
   handleCreateDesktopSession,
   handleDisconnectServer,
@@ -166,10 +169,12 @@ import worker, { offlinePage, relativeTime, wantsHtml } from "./worker.js";
 import { TUNNEL_OFFLINE_HEADER, TunnelDO } from "./tunnel-do.js";
 
 const mockParseCookie = vi.mocked(parseCookie);
+const mockInvalidateSession = vi.mocked(invalidateSessionCookie);
+const mockRefreshAccountSession = vi.mocked(refreshAccountSessionCookies);
 const mockResolveLabel = vi.mocked(resolveLabel);
 const mockMarkMachineSeen = vi.mocked(markMachineSeen);
 const mockVerifyMachine = vi.mocked(verifyMachineCredentialDetails);
-const mockVerifySession = vi.mocked(verifySessionCookie);
+const mockVerifySessionDetails = vi.mocked(verifySessionCookieDetails);
 const mockServeWithCache = vi.mocked(serveWithCache);
 const mockHandleListAccountServers = vi.mocked(handleListAccountServers);
 const mockHandleCreateDesktopSession = vi.mocked(handleCreateDesktopSession);
@@ -177,7 +182,10 @@ const mockHandleDisconnectServer = vi.mocked(handleDisconnectServer);
 const mockVerifyDesktopSession = vi.mocked(verifyDesktopSessionCookie);
 const mockHandleAssignMachineLabel = vi.mocked(handleAssignMachineLabel);
 
-/** A resolved server row; overrides let a test tweak one field. */
+function sessionDetails(userId = OWNER, needsRefresh = false) {
+  return { userId, needsRefresh };
+}
+
 function resolvedServer(
   over: Partial<{
     lastSeenAt: Date | null;
@@ -292,8 +300,6 @@ describe("GET /api/connect/servers", () => {
   });
 
   it("handles the path even on an unknown host label", async () => {
-    // Apex is not routed to this worker in prod, but the handler is path-based
-    // so a future apex binding or local wrangler still works.
     const { env, ctx } = makeEnv(() => new Response("origin"));
     mockHandleListAccountServers.mockResolvedValue(
       new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 }),
@@ -494,8 +500,6 @@ describe("gate tunnel authentication", () => {
     const hash = [...new Uint8Array(digest)]
       .map((byte) => byte.toString(16).padStart(2, "0"))
       .join("");
-    // resolveLabel itself may hold an older negative cache entry; the worker's
-    // first and only tunnel lookup must explicitly bypass it.
     mockResolveLabel.mockResolvedValueOnce(null);
     const firstEnv = makeEnv(() => new Response("origin"));
     const stale = await worker.fetch(
@@ -685,12 +689,122 @@ describe("machine gate auth", () => {
   );
 });
 
+describe("bb mobile app-link association files", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockParseCookie.mockReturnValue(null);
+    mockResolveLabel.mockResolvedValue(resolvedServer());
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it.each([
+    "/.well-known/apple-app-site-association",
+    "/.well-known/assetlinks.json",
+  ])(
+    "serves %s on a bare label without a session and without proxying",
+    async (path) => {
+      const { env, ctx, captured } = makeEnv(() => new Response("origin"));
+      const response = await worker.fetch(
+        visitorRequest("sawyer.getbb.app", path),
+        env as never,
+        ctx,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(captured).toHaveLength(0);
+      expect(mockResolveLabel).not.toHaveBeenCalled();
+      expect(mockVerifySessionDetails).not.toHaveBeenCalled();
+    },
+  );
+
+  it("serves the AASA on bare labels that do not resolve yet (Apple fetches anonymously before a claim)", async () => {
+    mockResolveLabel.mockResolvedValue(null);
+    const { env, ctx, captured } = makeEnv(() => new Response("origin"));
+    const unknown = await worker.fetch(
+      visitorRequest(
+        "nobody-here.getbb.app",
+        "/.well-known/apple-app-site-association",
+      ),
+      env as never,
+      ctx,
+    );
+    expect(unknown.status).toBe(200);
+    const body = (await unknown.json()) as {
+      applinks: { details: { appIDs: string[] }[] };
+    };
+    expect(body.applinks.details[0]?.appIDs).toEqual([
+      "9QCU24SXK5.app.getbb.mobile",
+    ]);
+    expect(captured).toHaveLength(0);
+  });
+
+  it.each([
+    "/.well-known/apple-app-site-association",
+    "/.well-known/assetlinks.json",
+  ])(
+    "does not claim %s on share hosts — they front arbitrary local apps, so the file falls through to the session gate",
+    async (path) => {
+      const { env, ctx, captured } = makeEnv(() => new Response("origin"));
+      const share = await worker.fetch(
+        visitorRequest("sawyer--8000.getbb.app", path),
+        env as never,
+        ctx,
+      );
+      expect(share.status).toBe(401);
+      expect(share.headers.get("content-type")).not.toBe("application/json");
+      expect(captured).toHaveLength(0);
+    },
+  );
+
+  it("reads Android fingerprints from the env and serves an empty list otherwise", async () => {
+    const { env, ctx } = makeEnv(() => new Response("origin"));
+    const empty = await worker.fetch(
+      visitorRequest("sawyer.getbb.app", "/.well-known/assetlinks.json"),
+      env as never,
+      ctx,
+    );
+    const emptyBody = (await empty.json()) as {
+      target: { sha256_cert_fingerprints: string[] };
+    }[];
+    expect(emptyBody[0]?.target.sha256_cert_fingerprints).toEqual([]);
+
+    const withEnv = await worker.fetch(
+      visitorRequest("sawyer.getbb.app", "/.well-known/assetlinks.json"),
+      { ...env, ASSETLINKS_SHA256_FINGERPRINTS: "aa:bb,cc:dd" } as never,
+      ctx,
+    );
+    const withEnvBody = (await withEnv.json()) as {
+      target: { package_name: string; sha256_cert_fingerprints: string[] };
+    }[];
+    expect(withEnvBody[0]?.target.package_name).toBe("app.getbb.mobile");
+    expect(withEnvBody[0]?.target.sha256_cert_fingerprints).toEqual([
+      "AA:BB",
+      "CC:DD",
+    ]);
+  });
+
+  it("leaves other .well-known paths to the session gate", async () => {
+    const { env, ctx, captured } = makeEnv(() => new Response("origin"));
+    const response = await worker.fetch(
+      visitorRequest("sawyer.getbb.app", "/.well-known/openid-configuration"),
+      env as never,
+      ctx,
+    );
+    expect(response.status).toBe(401);
+    expect(captured).toHaveLength(0);
+  });
+});
+
 describe("gate worker share hosts", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockResolveLabel.mockResolvedValue(resolvedServer());
     mockParseCookie.mockReturnValue("session-token");
-    mockVerifySession.mockResolvedValue(OWNER);
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails());
+    mockRefreshAccountSession.mockResolvedValue(null);
   });
 
   afterEach(() => {
@@ -717,6 +831,105 @@ describe("gate worker share hosts", () => {
     );
   });
 
+  it("renews an active owner session on an ordinary HTTP response", async () => {
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OWNER, true));
+    mockRefreshAccountSession.mockResolvedValue([
+      "__Secure-better-auth.session_token=renewed; Max-Age=604800; Domain=.getbb.app; Path=/; HttpOnly; SameSite=Lax; Secure",
+      "__Secure-better-auth.session_data=cached; Max-Age=300; Domain=.getbb.app; Path=/; HttpOnly; SameSite=Lax; Secure",
+    ]);
+    const { env, ctx } = makeEnv(() => new Response("ok"));
+    const response = await worker.fetch(
+      visitorRequest("sawyer.getbb.app", "/api/v1/threads"),
+      env as never,
+      ctx,
+    );
+
+    expect(mockRefreshAccountSession).toHaveBeenCalledWith(
+      "__Secure-better-auth.session_token=session-token",
+      "https://getbb.app",
+      expect.any(Function),
+    );
+    expect(mockInvalidateSession).toHaveBeenCalledWith("session-token");
+    expect(response.headers.get("set-cookie")).toContain(
+      "__Secure-better-auth.session_token=renewed",
+    );
+    expect(response.headers.get("set-cookie")).toContain(
+      "__Secure-better-auth.session_data=cached",
+    );
+  });
+
+  it("does not call the account worker before the update-age boundary", async () => {
+    const { env, ctx } = makeEnv(() => new Response("ok"));
+    const response = await worker.fetch(
+      visitorRequest("sawyer.getbb.app", "/api/v1/threads"),
+      env as never,
+      ctx,
+    );
+
+    expect(response.status).toBe(200);
+    expect(mockInvalidateSession).not.toHaveBeenCalled();
+    expect(mockRefreshAccountSession).not.toHaveBeenCalled();
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it.each(["hit", "miss"] as const)(
+    "does not renew an owner session on an edge-cache %s",
+    async (cacheStatus) => {
+      mockVerifySessionDetails.mockResolvedValue(sessionDetails(OWNER, true));
+      mockRefreshAccountSession.mockResolvedValue(["should-not-be-used"]);
+      mockServeWithCache.mockResolvedValueOnce({
+        cacheable: true,
+        response: new Response("cached asset", {
+          headers: { "x-bb-cache": cacheStatus },
+        }),
+      });
+      const { env, ctx } = makeEnv(() => new Response("origin"));
+
+      const response = await worker.fetch(
+        visitorRequest("sawyer.getbb.app", "/assets/app.js"),
+        env as never,
+        ctx,
+      );
+
+      expect(mockRefreshAccountSession).not.toHaveBeenCalled();
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.headers.get("x-bb-cache")).toBe(cacheStatus);
+      await expect(response.text()).resolves.toBe("cached asset");
+    },
+  );
+
+  it("reissues the local Cloud cookie without the Secure attribute", async () => {
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OWNER, true));
+    mockRefreshAccountSession.mockResolvedValue([
+      "better-auth.session_token=renewed; Max-Age=604800; Domain=.bb.localhost; Path=/; HttpOnly; SameSite=Lax",
+    ]);
+    const { env, ctx } = makeEnv(() => new Response("ok"));
+    Object.assign(env, {
+      ACCOUNT_APP_URL: "http://bb.localhost:42745",
+      BASE_DOMAIN: "bb.localhost",
+      CLOUD_DEV: "true",
+    });
+    const response = await worker.fetch(
+      new Request("http://127.0.0.1:50743/api/v1/threads", {
+        headers: {
+          host: "127.0.0.1:50743",
+          "x-bb-cloud-dev-host": "sawyer",
+        },
+      }),
+      env as never,
+      ctx,
+    );
+
+    expect(response.headers.get("set-cookie")).toBe(
+      "better-auth.session_token=renewed; Max-Age=604800; Domain=.bb.localhost; Path=/; HttpOnly; SameSite=Lax",
+    );
+    expect(mockRefreshAccountSession).toHaveBeenCalledWith(
+      "better-auth.session_token=session-token",
+      "http://bb.localhost:42745",
+      expect.any(Function),
+    );
+  });
+
   it("renders a bare machine-label page without proxying to the DO", async () => {
     mockResolveLabel.mockResolvedValue(resolvedMachine());
     mockParseCookie.mockReturnValue(null);
@@ -733,7 +946,7 @@ describe("gate worker share hosts", () => {
     expect(html).toContain("sawyer-air--&lt;port&gt;.getbb.app");
     expect(html).toContain("sawyer.getbb.app");
     expect(captured).toHaveLength(0);
-    expect(mockVerifySession).not.toHaveBeenCalled();
+    expect(mockVerifySessionDetails).not.toHaveBeenCalled();
   });
 
   it("renders local machine links with HTTP and the shared gateway port", async () => {
@@ -777,7 +990,7 @@ describe("gate worker share hosts", () => {
       expect.any(Function),
     );
 
-    mockVerifySession.mockResolvedValue(OTHER);
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OTHER));
     const otherEnv = makeEnv(() => new Response("machine-origin"));
     const otherResponse = await worker.fetch(
       visitorRequest("sawyer-air--3000.getbb.app", "/"),
@@ -823,7 +1036,7 @@ describe("gate worker share hosts", () => {
     expect(blockedEnv.routingKeys).toEqual(["shared-machine:generation-b"]);
     expect(blockedEnv.captured).toHaveLength(0);
 
-    mockVerifySession.mockResolvedValue(OTHER);
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OTHER));
     const newEnv = makeEnv(() => new Response("owner-b"));
     const newResponse = await worker.fetch(
       visitorRequest("shared-machine--3000.getbb.app", "/asset.js"),
@@ -879,9 +1092,6 @@ describe("gate worker share hosts", () => {
   });
 
   it("forwards a share host on a non-primary label (single-dash subdomain)", async () => {
-    // `sawyer-desktop` is a second bb's own subdomain, not the account handle;
-    // `--3000` nests its port share. parseVisitorHost splits on the first `--`
-    // only, so the base label stays `sawyer-desktop` and resolves per-bb.
     mockResolveLabel.mockResolvedValue(resolvedServer());
     const { env, ctx, captured } = makeEnv(() => new Response("ok"));
     const res = await worker.fetch(
@@ -945,7 +1155,7 @@ describe("gate worker share hosts", () => {
   });
 
   it("returns 403 when share host session is a different user", async () => {
-    mockVerifySession.mockResolvedValue(OTHER);
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OTHER));
     const { env, ctx, captured } = makeEnv(() => new Response("ok"));
     const res = await worker.fetch(
       visitorRequest("sawyer--8000.getbb.app", "/"),
@@ -955,6 +1165,7 @@ describe("gate worker share hosts", () => {
     expect(res.status).toBe(403);
     expect(await res.text()).toContain("not your server");
     expect(captured).toHaveLength(0);
+    expect(mockRefreshAccountSession).not.toHaveBeenCalled();
   });
 
   it("accepts the short-lived desktop cookie for the owning account", async () => {
@@ -980,7 +1191,7 @@ describe("gate worker share hosts", () => {
     mockParseCookie.mockImplementation((_header, name) =>
       name === DESKTOP_SESSION_COOKIE ? "desktop-token" : "github-token",
     );
-    mockVerifySession.mockResolvedValue(OTHER);
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OTHER));
     mockVerifyDesktopSession.mockResolvedValue(OWNER);
     const { env, ctx, captured } = makeEnv(() => new Response("ok"));
     const response = await worker.fetch(
@@ -1032,7 +1243,7 @@ describe("gate worker share hosts", () => {
   });
 
   it("forwards websocket upgrades on share hosts with the target header", async () => {
-    // Node's Response rejects status 101; the gate only needs the upgrade path.
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails(OWNER, true));
     const { env, ctx, captured } = makeEnv(
       () => new Response("upgraded", { status: 200 }),
     );
@@ -1047,6 +1258,7 @@ describe("gate worker share hosts", () => {
     expect(captured[0].headers.get(TUNNEL_TARGET_HEADER)).toBe("8000");
     expect(captured[0].headers.get("upgrade")).toBe("websocket");
     expect(mockServeWithCache).not.toHaveBeenCalled();
+    expect(mockRefreshAccountSession).not.toHaveBeenCalled();
   });
 
   it("does not apply machine-credential branch on share hosts", async () => {
@@ -1080,8 +1292,6 @@ describe("gate worker share hosts", () => {
   });
 });
 
-// ── gate offline page (styled 503 vs plain 503) ─────────────────────────────
-
 const OFFLINE_BODY =
   "bb connect: this server is offline (no tunnel connected)\n";
 
@@ -1099,7 +1309,7 @@ describe("gate offline page", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockParseCookie.mockReturnValue("session-token");
-    mockVerifySession.mockResolvedValue(OWNER);
+    mockVerifySessionDetails.mockResolvedValue(sessionDetails());
   });
 
   it("renders the styled offline page on a browser navigation, using last-seen", async () => {
@@ -1198,7 +1408,6 @@ describe("gate page helpers", () => {
     expect(relativeTime(new Date(now - 3 * 60 * 60_000), now)).toBe(
       "3 hours ago",
     );
-    // Beyond a day → calendar date, not "N hours ago".
     expect(
       relativeTime(new Date(now - 3 * 24 * 60 * 60_000), now),
     ).not.toContain("ago");
@@ -1231,9 +1440,6 @@ describe("gate page helpers", () => {
   });
 });
 
-// ── TunnelDO protocol-version + target stamping ─────────────────────────────
-
-// Node lacks Workers globals used by TunnelDO's constructor.
 class FakeWebSocketRequestResponsePair {
   constructor(
     readonly request: string,
@@ -1302,7 +1508,7 @@ function makeDoEnv() {
 
 function fakeTunnelSocket(
   send?: (data: ArrayBuffer | ArrayBufferView | string) => void,
-  readyState = 1, // READY_STATE_OPEN
+  readyState = 1,
 ) {
   return {
     send: send ?? vi.fn(),
@@ -1351,7 +1557,6 @@ describe("TunnelDO targeted request with old client", () => {
     const dob = new TunnelDO(state.api, makeDoEnv());
     await state.restore;
 
-    // Tunnel must look connected for the version gate (vs 503 offline).
     state.addSocket(fakeTunnelSocket(), ["tunnel"]);
 
     const res = await dob.fetch(
@@ -1419,7 +1624,6 @@ describe("TunnelDO targeted request with old client", () => {
         frame.headers.every(([n]) => n.toLowerCase() !== TUNNEL_TARGET_HEADER),
       ).toBe(true);
 
-      // Resolve the hung proxyHttp promise via its resp-head timeout.
       vi.advanceTimersByTime(30_000);
       const timedOut = await pending;
       expect(timedOut.status).toBe(504);
@@ -1429,9 +1633,6 @@ describe("TunnelDO targeted request with old client", () => {
   });
 });
 
-// ── TunnelDO response relay ─────────────────────────────────────────────────
-
-/** Tunnel-socket send handler that records binary frames into `sent`. */
 function captureSent(sent: Uint8Array[]) {
   return (data: ArrayBuffer | ArrayBufferView | string) => {
     if (typeof data === "string") return;
@@ -1443,7 +1644,6 @@ function captureSent(sent: Uint8Array[]) {
   };
 }
 
-/** Encode a frame as the ArrayBuffer webSocketMessage receives on the wire. */
 function frameBuffer(frame: Frame): ArrayBuffer {
   const u8 = encodeFrame(frame);
   return u8.buffer.slice(
@@ -1549,7 +1749,6 @@ describe("TunnelDO response relay", () => {
     const tunnel = fakeTunnelSocket(captureSent(sent));
     state.addSocket(tunnel, ["tunnel"]);
 
-    // A browser revalidating a cached asset (the dev-server reload path).
     for (const [index, status] of [304, 204].entries()) {
       const pending = dob.fetch(
         new Request("https://do.internal/app.js", {
@@ -1574,7 +1773,6 @@ describe("TunnelDO response relay", () => {
       expect(res.status).toBe(status);
       expect(res.body).toBeNull();
       expect(res.headers.get("etag")).toBe('W/"abc"');
-      // Hop headers stay filtered on this path too.
       expect(res.headers.get("connection")).toBeNull();
     }
   });
@@ -1608,8 +1806,6 @@ describe("TunnelDO response relay", () => {
     const visitor = fakeTunnelSocket();
     state.addSocket(visitor, ["visitor:41"]);
 
-    // One request still awaiting resp-head, one mid-body (its resp-head
-    // timeout is already cleared — the state that used to hang forever).
     const pendingHead = dob.fetch(new Request("https://do.internal/pending"));
     const pendingBody = dob.fetch(new Request("https://do.internal/mid-body"));
     const bodyStreamId = openHttpStreamId(sent, 1);
@@ -1625,9 +1821,6 @@ describe("TunnelDO response relay", () => {
     const midBodyResponse = await pendingBody;
     expect(midBodyResponse.status).toBe(200);
 
-    // The client reconnects: acceptTunnel replaces the old socket. Node lacks
-    // WebSocketPair and rejects `new Response(null, {status: 101})`, so both
-    // are emulated for the accept call only.
     const RealResponse = globalThis.Response;
     class FakeWebSocketPair {
       0 = fakeTunnelSocket();
@@ -1678,18 +1871,9 @@ describe("TunnelDO response relay", () => {
     expect(await headResponse.text()).toContain(
       "tunnel reconnected mid-request",
     );
-    // The mid-body response's stream errors out instead of hanging forever.
     await expect(midBodyResponse.text()).rejects.toBeTruthy();
   });
 });
-
-// ── TunnelDO dead tunnel sockets ────────────────────────────────────────────
-//
-// A tunnel socket can die without webSocketClose ever being delivered, leaving
-// it tagged in getWebSockets() while send() throws "Can't call WebSocket
-// send() after close()". This took getbb.app down: every authenticated request
-// crashed with an uncaught exception (Cloudflare 1101) while the reconnected
-// client — heartbeat-acked on its own live socket — never re-dialed.
 
 describe("TunnelDO dead tunnel sockets", () => {
   const READY_STATE_CLOSED = 3;
@@ -1716,8 +1900,6 @@ describe("TunnelDO dead tunnel sockets", () => {
     const state = mockDoState({ protocolVersion: 1 });
     const dob = new TunnelDO(state.api, makeDoEnv());
     await state.restore;
-    // The dead socket was accepted first, so it sits ahead of the live one in
-    // getWebSockets() — the ordering that made [0] the outage.
     state.addSocket(deadTunnelSocket(), ["tunnel"]);
     state.addSocket(fakeTunnelSocket(captureSent(sent)), ["tunnel"]);
 
@@ -1727,8 +1909,6 @@ describe("TunnelDO dead tunnel sockets", () => {
   });
 
   it("answers 503 offline when send() throws despite an open readyState", async () => {
-    // The socket can close between the liveness check and send() — the throw
-    // must degrade to the offline response, not crash the request.
     const state = mockDoState({ protocolVersion: 1 });
     const dob = new TunnelDO(state.api, makeDoEnv());
     await state.restore;

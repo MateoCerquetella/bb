@@ -23,6 +23,7 @@ import {
 import { upsertHost } from "../../src/data/hosts.js";
 import { createProject } from "../../src/data/projects.js";
 import { createThread, markThreadDeleted } from "../../src/data/threads.js";
+import { createMigratedConnection } from "../helpers/migrated-connection.js";
 
 const TEST_INCREMENTAL_VACUUM_MAX_PAGES = 128;
 
@@ -49,8 +50,7 @@ const TEST_DEFERRED_LEGACY_TABLE_NAMES = [
 ];
 
 function setup() {
-  const db = createConnection(":memory:");
-  migrate(db);
+  const db = createMigratedConnection();
   const host = upsertHost(db, noopNotifier, {
     name: "maintenance-host",
     type: "persistent",
@@ -211,9 +211,6 @@ describe("database maintenance", () => {
     const { db } = setup();
     expect(getDatabaseAutoVacuumMode(db)).toBe("incremental");
 
-    // Build a freelist: insert several pages of data, then delete it. Under
-    // incremental auto-vacuum the freed pages stay in the file until an
-    // explicit incremental_vacuum, so the freelist is non-empty afterward.
     db.$client.exec(
       "CREATE TABLE scratch_blobs (id INTEGER PRIMARY KEY, blob TEXT)",
     );
@@ -267,7 +264,6 @@ describe("database maintenance", () => {
       before.freelistCount,
     );
     expect(preparedSql.some((source) => source.includes("dbstat"))).toBe(false);
-    // Reclaiming pages must not change the auto-vacuum mode.
     expect(getDatabaseAutoVacuumMode(db)).toBe("incremental");
   });
 

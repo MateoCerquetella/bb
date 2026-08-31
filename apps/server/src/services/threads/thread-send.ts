@@ -36,7 +36,6 @@ import { recoverThreadModelOverride } from "./thread-execution-override.js";
 import {
   ensureThreadCanStartRequest,
   prepareReadyThreadTurnCommand,
-  prepareReadyThreadTurnDispatch,
 } from "./thread-lifecycle.js";
 import { applyLoggedThreadLifecycleEventInTransaction } from "./lifecycle-outcome.js";
 import {
@@ -44,7 +43,10 @@ import {
   requireReadyThreadEnvironment,
 } from "./thread-turn-dispatch.js";
 import { resolvePermissionEscalation } from "./thread-runtime-config.js";
-import { resolveThreadRuntimeState } from "./thread-runtime-display.js";
+import {
+  buildThreadStatusChangeMetadata,
+  resolveThreadRuntimeState,
+} from "./thread-runtime-display.js";
 import { recordAcceptedPromptHistoryEntry } from "../prompt-history.js";
 import { ensureHostSessionReadyForWork } from "../hosts/host-lifecycle.js";
 import {
@@ -60,23 +62,23 @@ import {
 } from "../lib/lifecycle-api-errors.js";
 import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import { resolvePluginMentionContextInputs } from "../plugins/plugin-mentions.js";
+import {
+  prependDeferredFirstTurnContext,
+  requireDeferredFirstTurnContextCurrent,
+  resolveDeferredFirstTurnContext,
+} from "./deferred-first-turn-context.js";
 
 type SendThreadMessageMode = SendMessageRequest["mode"];
 type TextPromptInput = Extract<PromptInput, { type: "text" }>;
-export type SendThreadMessageTrigger = "auto-dispatch" | "user";
+type SendThreadMessageTrigger = "auto-dispatch" | "user";
 
 type SendThreadMessagePayload = SendMessageRequest & {
   inputGroups?: PromptInput[][];
 };
 
-export interface SendThreadMessageArgs {
+interface SendThreadMessageArgs {
   beforeAppendInTransaction?: SendThreadMessageTransactionPreflight;
   environment: Environment;
-  /**
-   * Internal edit-message path. Presence forces a new provider session;
-   * a string forks from a staged provider session and null starts fresh
-   * (which also makes the request a thread-start rather than a new turn).
-   */
   historyReplacement?: {
     forkSourceProviderThreadId: string | null;
     onCommandSettled?: () => void | Promise<void>;
@@ -86,12 +88,12 @@ export interface SendThreadMessageArgs {
   trigger: SendThreadMessageTrigger;
 }
 
-export interface ResolveMessageSenderArgs {
+interface ResolveMessageSenderArgs {
   senderThreadId?: string;
   targetThread: Thread;
 }
 
-export interface FormatAgentThreadInputArgs {
+interface FormatAgentThreadInputArgs {
   input: PromptInput[];
   senderThreadId: string;
 }
@@ -101,7 +103,7 @@ interface BuildAgentThreadMessageTextArgs {
   senderThreadId: string;
 }
 
-export interface SendThreadMessageTransactionPreflightArgs {
+interface SendThreadMessageTransactionPreflightArgs {
   tx: DbTransaction;
 }
 
@@ -111,10 +113,10 @@ interface SendThreadMessageQueueRequestArgs {
 }
 
 interface SendThreadMessageQueueRequestResult {
-  threadBecameActive: boolean;
+  activeThread: Thread | null;
 }
 
-export interface SendThreadMessageTransactionPreflight {
+interface SendThreadMessageTransactionPreflight {
   (args: SendThreadMessageTransactionPreflightArgs): void;
 }
 
@@ -140,8 +142,8 @@ interface AppendAndQueueSendThreadMessageArgs {
 }
 
 interface AppendAndQueueSendThreadMessageResult {
+  activeThread: Thread | null;
   request: AppendedClientTurnRequestWithNotification;
-  threadBecameActive: boolean;
 }
 
 export function ensureThreadIsNotAwaitingUserInteraction(
@@ -252,11 +254,6 @@ export function resolveMessageSenderThreadId(
   if (senderThread.deletedAt !== null) {
     throwSenderThreadInvalid("deleted");
   }
-  // Sender attribution is allowed across projects: the cross-thread message
-  // template tells the receiving agent to reply via
-  // `bb thread tell {{senderThreadId}}`, which is how coordinator/worker
-  // threads in different projects message each other. Existence and not-deleted
-  // are still required so the reply target is a live thread.
 
   return senderThread.id;
 }
@@ -300,7 +297,7 @@ export function formatAgentThreadInput(
   });
 }
 
-function groupedInputForRuntime(
+export function groupedInputForRuntime(
   inputGroups: readonly PromptInput[][],
 ): PromptInput[] {
   return inputGroups.flatMap((input, index) =>
@@ -338,7 +335,7 @@ function appendAndQueueSendThreadMessageInTransaction({
   target,
   thread,
 }: AppendAndQueueSendThreadMessageArgs): AppendAndQueueSendThreadMessageResult {
-  let threadBecameActive = false;
+  let activeThread: Thread | null = null;
   const request = db.transaction(
     (tx) => {
       beforeAppendInTransaction?.({ tx });
@@ -374,14 +371,14 @@ function appendAndQueueSendThreadMessageInTransaction({
         requestEventSequence: appended.sequence,
         tx,
       });
-      threadBecameActive = queueResult.threadBecameActive;
+      activeThread = queueResult.activeThread;
       return appended;
     },
     { behavior: "immediate" },
   );
   return {
+    activeThread,
     request,
-    threadBecameActive,
   };
 }
 
@@ -422,16 +419,10 @@ export async function sendThreadMessage(
             senderThreadId,
           })
         : payload.input;
-  // Plugin mentions resolve once at send time (plugin design §4.9): each
-  // unique mention becomes an agent-only context input appended after the
-  // user's message; a resolve failure throws a 422 before anything is
-  // persisted or dispatched.
   const pluginMentionContext = await resolvePluginMentionContextInputs(input);
   if (pluginMentionContext.length > 0) {
     input = [...input, ...pluginMentionContext];
     if (inputGroups !== undefined && inputGroups.length > 0) {
-      // Keep the grouped view aligned with the flat runtime input: the
-      // context rides the final group so a grouped send carries it too.
       const lastGroup = inputGroups[inputGroups.length - 1]!;
       inputGroups = [
         ...inputGroups.slice(0, -1),
@@ -439,13 +430,30 @@ export async function sendThreadMessage(
       ];
     }
   }
+  const deferredFirstTurnContext = resolveDeferredFirstTurnContext(
+    deps.db,
+    thread.id,
+  );
+  ({ input, inputGroups } = prependDeferredFirstTurnContext(
+    { input, ...(inputGroups !== undefined ? { inputGroups } : {}) },
+    deferredFirstTurnContext,
+  ));
+  const beforeAppendInTransaction: SendThreadMessageTransactionPreflight = ({
+    tx,
+  }) => {
+    args.beforeAppendInTransaction?.({ tx });
+    if (deferredFirstTurnContext) {
+      requireDeferredFirstTurnContextCurrent(tx, {
+        requestSequence: deferredFirstTurnContext.requestSequence,
+        threadId: thread.id,
+      });
+    }
+  };
   await validatePromptAttachmentReferences({
     dataDir: deps.config.dataDir,
     input,
     projectId: thread.projectId,
   });
-  // Agent-originated CLI sends still appear as normal turn requests in the
-  // timeline, while initiator lets policy distinguish the source.
   const initiator: ThreadTurnInitiator = senderThreadId ? "agent" : "user";
   const shouldCaptureUserMessageSent =
     args.trigger === "user" && initiator === "user" && input.length > 0;
@@ -463,22 +471,16 @@ export async function sendThreadMessage(
       thread,
     });
   }
-  const execution = await buildExecutionOptions(
-    deps,
-    payload,
-    {
-      threadId: thread.id,
-    },
-    "client/turn/requested",
-  );
+  const execution = await buildExecutionOptions(deps, payload, {
+    threadId: thread.id,
+  });
   const permissionEscalation = resolvePermissionEscalation({
-    thread,
     initiator,
   });
 
   if (
     await dispatchTurnDuringReprovision({
-      beforeRequestAppendInTransaction: args.beforeAppendInTransaction,
+      beforeRequestAppendInTransaction: beforeAppendInTransaction,
       deps,
       environment,
       execution,
@@ -518,8 +520,6 @@ export async function sendThreadMessage(
   if (mode === "start") {
     const commandArgs = {
       thread,
-      // Normal sends target the existing provider session. A history
-      // replacement deliberately starts from a staged provider fork instead.
       fork: null,
       input,
       ...(inputGroups !== undefined ? { inputGroups } : {}),
@@ -550,12 +550,11 @@ export async function sendThreadMessage(
                   },
           }),
           mode: "thread.start" as const,
-          sessionId: "history-replacement",
         }
       : await prepareReadyThreadTurnCommand(deps, commandArgs);
     const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
       beforeAppendInTransaction: ({ tx }) => {
-        args.beforeAppendInTransaction?.({ tx });
+        beforeAppendInTransaction({ tx });
         ensureThreadCanStartRequest(thread);
       },
       db: deps.db,
@@ -565,32 +564,23 @@ export async function sendThreadMessage(
       input,
       inputGroups,
       queueInTransaction: ({ tx }) => {
-        const dispatchKind = prepareReadyThreadTurnDispatch({
-          command,
-          thread,
-        });
+        const dispatchKind = command.mode;
         const currentThread = getThread(tx, thread.id);
-        // Dispatching a turn IS the thread becoming active. A warm
-        // `turn.submit` and a cold `thread.start` are the same event from the
-        // thread's view, so an `idle` cold-start activates exactly like an
-        // `error` cold-start — a failed start walks either back through
-        // `run.failed`. (Other statuses fall through unchanged: pre-start
-        // threads are already rejected by `ensureThreadCanStartRequest`, and a
-        // `stopping`/superseded thread must not be reactivated here.)
         if (
           dispatchKind === "turn.submit" ||
           currentThread?.status === "error" ||
           currentThread?.status === "idle"
         ) {
-          requireThreadLifecycleEventApplied(
-            applyLoggedThreadLifecycleEventInTransaction(
-              { db: tx, logger: deps.logger },
-              { event: { type: "run.started" }, threadId: thread.id },
+          return {
+            activeThread: requireThreadLifecycleEventApplied(
+              applyLoggedThreadLifecycleEventInTransaction(
+                { db: tx, logger: deps.logger },
+                { event: { type: "run.started" }, threadId: thread.id },
+              ),
             ),
-          );
-          return { threadBecameActive: true };
+          };
         }
-        return { threadBecameActive: false };
+        return { activeThread: null };
       },
       requestId,
       senderThreadId,
@@ -616,10 +606,12 @@ export async function sendThreadMessage(
         );
       },
     });
-    if (queuedRequest.threadBecameActive) {
-      deps.hub.notifyThread(thread.id, ["status-changed"], {
-        projectId: thread.projectId,
-      });
+    if (queuedRequest.activeThread) {
+      deps.hub.notifyThread(
+        thread.id,
+        ["status-changed"],
+        buildThreadStatusChangeMetadata(deps, queuedRequest.activeThread),
+      );
     }
     if (shouldCaptureUserMessageSent) {
       captureUserMessageSentTelemetry(deps, thread);
@@ -653,7 +645,7 @@ export async function sendThreadMessage(
     requestId,
   });
   const queuedRequest = appendAndQueueSendThreadMessageInTransaction({
-    beforeAppendInTransaction: args.beforeAppendInTransaction,
+    beforeAppendInTransaction,
     db: deps.db,
     environmentId: thread.environmentId,
     execution,
@@ -661,7 +653,7 @@ export async function sendThreadMessage(
     input,
     inputGroups,
     queueInTransaction: () => {
-      return { threadBecameActive: false };
+      return { activeThread: null };
     },
     requestId,
     senderThreadId,

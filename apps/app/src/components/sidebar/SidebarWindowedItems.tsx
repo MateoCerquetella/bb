@@ -8,46 +8,28 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useSidebarContentElementRef } from "@/components/ui/sidebar.js";
+import {
+  SIDEBAR_CONTENT_SELECTOR,
+  useSidebarContentElementRef,
+} from "@/components/ui/sidebar.js";
 import {
   encodeSidebarWindowedNavigationEntries,
   SIDEBAR_WINDOWED_NAV_ATTRIBUTE,
   type SidebarWindowedNavigationEntry,
 } from "./sidebarThreadShortcuts";
 
-// Items within this distance of the scrollport stay mounted, so scrolling
-// promotes rows before they become visible.
 const WINDOW_VIEWPORT_MARGIN_PX = 240;
-// Fallback placeholder row height until a real row height has been measured.
 const DEFAULT_ROW_HEIGHT_PX = 30;
 
 interface MeasuredItemHeight {
   height: number;
-  // The visible-row count the height was measured under. A collapse toggle
-  // inside a placeholder changes its row count, which invalidates the
-  // measurement — otherwise the stale height would misplace the scrollbar.
   rows: number;
 }
 
 interface SidebarWindowedItemsProps {
-  /** Stable per-item keys, aligned with `renderItem` indices. */
   itemKeys: readonly string[];
-  /**
-   * Rough visible-row count per item under the current collapse state. Only
-   * feeds placeholder-height estimates; measured heights take over once an
-   * item has been on screen.
-   */
   estimateRows: (index: number) => number;
-  /**
-   * Keys that must stay mounted regardless of visibility — the item holding
-   * the active thread, so DOM-driven keyboard navigation keeps a target.
-   */
   alwaysMountedKeys?: ReadonlySet<string>;
-  /**
-   * Threads an item's subtree renders, in visual order. Placeholders expose
-   * them via a data attribute so thread.next / thread.previous cover
-   * windowed-out rows too.
-   */
   getNavigationEntries?: (
     index: number,
   ) => readonly SidebarWindowedNavigationEntry[];
@@ -56,22 +38,6 @@ interface SidebarWindowedItemsProps {
 
 const EMPTY_KEY_SET: ReadonlySet<string> = new Set();
 
-/**
- * Windows a sidebar item list against the sidebar scroll container (#1261).
- *
- * Items near the scrollport render for real; the rest render as fixed-height
- * placeholder divs, so mounted rows scale with the viewport instead of the
- * thread count. Placeholders keep the item's measured (or estimated) height,
- * which keeps the scrollbar and scroll position stable without absolute
- * positioning — rows stay in normal flow, so the CSS sticky-header stack,
- * `space-y` gaps, and drag-and-drop DOM order all behave exactly as in the
- * unwindowed list.
- *
- * Promotion runs in two tiers: a pre-paint layout pass whenever the key list
- * changes (no placeholder flash on mount), then an IntersectionObserver with
- * a generous margin for scrolling. When no usable scrollport exists (jsdom,
- * detached previews), every item renders for real.
- */
 export function SidebarWindowedItems({
   itemKeys,
   estimateRows,
@@ -80,15 +46,10 @@ export function SidebarWindowedItems({
   renderItem,
 }: SidebarWindowedItemsProps) {
   const scrollElementRef = useSidebarContentElementRef();
-  // A sidebar can contain many short sibling lists. Rendering each short list
-  // in full makes their aggregate offscreen subtree large, so every non-empty
-  // list participates in the shared-scrollport window.
-  const windowingEnabled =
-    itemKeys.length > 0 && scrollElementRef !== null;
+  const windowingEnabled = itemKeys.length > 0 && scrollElementRef !== null;
 
-  const [realizedKeys, setRealizedKeys] = useState<ReadonlySet<string>>(
-    EMPTY_KEY_SET,
-  );
+  const [realizedKeys, setRealizedKeys] =
+    useState<ReadonlySet<string>>(EMPTY_KEY_SET);
   const measuredHeightsRef = useRef(new Map<string, MeasuredItemHeight>());
   const rowHeightRef = useRef(DEFAULT_ROW_HEIGHT_PX);
   const wrapperByKeyRef = useRef(new Map<string, HTMLDivElement>());
@@ -128,6 +89,17 @@ export function SidebarWindowedItems({
     return callback;
   }, []);
 
+  const resolveScrollElement = useCallback((): Element | null => {
+    const fromRef = scrollElementRef?.current ?? null;
+    if (fromRef) {
+      return fromRef;
+    }
+    const firstWrapper = wrapperByKeyRef.current.values().next();
+    return firstWrapper.done
+      ? null
+      : firstWrapper.value.closest(SIDEBAR_CONTENT_SELECTOR);
+  }, [scrollElementRef]);
+
   const recordMeasuredHeight = useCallback((key: string, height: number) => {
     if (height <= 0) {
       return;
@@ -135,8 +107,6 @@ export function SidebarWindowedItems({
     const rows = rowsByKeyRef.current.get(key) ?? 0;
     measuredHeightsRef.current.set(key, { height, rows });
     if (rows > 0) {
-      // Calibrate the per-row estimate from real rows so never-measured
-      // placeholders track coarse-pointer row heights too.
       const perRow = height / rows;
       if (perRow >= 20 && perRow <= 80) {
         rowHeightRef.current = perRow;
@@ -144,11 +114,6 @@ export function SidebarWindowedItems({
     }
   }, []);
 
-  // Pre-paint promotion whenever the item set changes: mount everything that
-  // sits inside the scrollport plus margin before the browser paints, so the
-  // initial view never flashes placeholders. Also prunes state for keys that
-  // left the list. With no usable viewport (jsdom, previews) it promotes
-  // everything.
   useLayoutEffect(() => {
     if (!windowingEnabled) {
       if (realizedKeys.size > 0) {
@@ -170,7 +135,7 @@ export function SidebarWindowedItems({
       }
     }
 
-    const scrollElement = scrollElementRef?.current ?? null;
+    const scrollElement = resolveScrollElement();
     const promoteAll =
       !scrollElement ||
       scrollElement.clientHeight === 0 ||
@@ -208,25 +173,20 @@ export function SidebarWindowedItems({
     ) {
       setRealizedKeys(next);
     }
-    // The pass re-runs only when the key list (or windowing mode) changes;
-    // scroll-driven changes are the observer's job.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [windowingEnabled, keySignature]);
 
   useEffect(() => {
     if (!windowingEnabled || typeof IntersectionObserver === "undefined") {
       return;
     }
-    const scrollElement = scrollElementRef?.current ?? null;
+    const scrollElement = resolveScrollElement();
     if (!scrollElement || scrollElement.clientHeight === 0) {
       return;
     }
 
     const observer = new IntersectionObserver(
       (entries) => {
-        // Scroll-driven promotion runs 240px ahead of the viewport, so it
-        // can afford to be interruptible: a transition lets React slice the
-        // row mounts across frames instead of blocking the scroll.
         startTransition(() =>
           setRealizedKeys((previous) => {
             let next: Set<string> | null = null;
@@ -266,7 +226,7 @@ export function SidebarWindowedItems({
       observerRef.current = null;
       observer.disconnect();
     };
-  }, [windowingEnabled, scrollElementRef, recordMeasuredHeight]);
+  }, [windowingEnabled, resolveScrollElement, recordMeasuredHeight]);
 
   if (!windowingEnabled) {
     return <>{itemKeys.map((_, index) => renderItem(index))}</>;
@@ -275,8 +235,7 @@ export function SidebarWindowedItems({
   return (
     <>
       {itemKeys.map((key, index) => {
-        const isRealized =
-          realizedKeys.has(key) || alwaysMountedKeys.has(key);
+        const isRealized = realizedKeys.has(key) || alwaysMountedKeys.has(key);
         const rows = Math.max(1, estimateRowsRef.current(index));
         rowsByKeyRef.current.set(key, rows);
         let placeholderHeight: number | undefined;

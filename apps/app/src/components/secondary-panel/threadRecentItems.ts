@@ -5,20 +5,12 @@ import { atomFamily } from "jotai-family";
 import { z } from "zod";
 import { createLocalStorageSyncStorage } from "@/lib/browser-storage";
 
-export const THREAD_RECENT_ITEMS_STORAGE_PREFIX = "bb.thread.recentItems";
-export const THREAD_RECENT_ITEMS_STORAGE_VERSION = 1;
-/** How many recent items we persist per thread before dropping the oldest. */
-export const THREAD_RECENT_ITEMS_MAX_STORED = 24;
-/** How many recent rows the launcher shows before the "Show more" toggle. */
+const THREAD_RECENT_ITEMS_STORAGE_PREFIX = "bb.thread.recentItems";
+const THREAD_RECENT_ITEMS_STORAGE_VERSION = 1;
+const THREAD_RECENT_ITEMS_MAX_STORED = 24;
 export const THREAD_RECENT_ITEMS_VISIBLE_LIMIT = 6;
 
-/**
- * The panel sources a recent item can be reopened from. This is the subset of
- * {@link import("./useThreadFileTabs").FileSearchSelection} sources that map to
- * a previewable file path, so a recent row reopens through the exact same
- * open-in-panel path as a file-search result.
- */
-export type RecentItemSource = "workspace" | "thread-storage";
+type RecentItemSource = "workspace" | "thread-storage";
 
 export interface ThreadRecentItem {
   source: RecentItemSource;
@@ -55,11 +47,6 @@ const recentItemsSchema = z.array(recentItemSchema);
 
 const EMPTY_RECENT_ITEMS: readonly ThreadRecentItem[] = [];
 
-/**
- * Prepends an opened file to the recency list: it dedupes by source+path so
- * reopening a file moves it to the front (with a fresh timestamp) rather than
- * duplicating it, then caps the list so storage cannot grow unbounded.
- */
 export function recordRecentItem({
   items,
   source,

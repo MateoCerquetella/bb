@@ -1,15 +1,7 @@
 import type { IconSvgElement } from "@hugeicons/react";
 
-/**
- * Names of the glyphs that live in the lazily loaded extended registry
- * (`./icon-extended`). Only this list of strings is on the boot path; the
- * artwork itself loads with the first route that renders one of these icons
- * or, as a fallback, on first request from `Icon`.
- *
- * `./icon-extended` must map every name here and nothing else; the compiler
- * enforces that through `Record<ExtendedIconName, IconSvgElement>`.
- */
 export const EXTENDED_ICON_NAMES = [
+  "AiBrowser",
   "AiContentGenerator01",
   "AlignLeft",
   "AppWindow",
@@ -34,6 +26,8 @@ export const EXTENDED_ICON_NAMES = [
   "CircleArrowShrink",
   "Clean",
   "Clock",
+  "Cloud",
+  "CloudOff",
   "Coffee",
   "Columns2",
   "CornerDownLeft",
@@ -55,6 +49,7 @@ export const EXTENDED_ICON_NAMES = [
   "FileQuestion",
   "FileText",
   "FolderOpen",
+  "FolderEdit",
   "FolderMinus",
   "Fork",
   "GitBranch",
@@ -89,11 +84,13 @@ export const EXTENDED_ICON_NAMES = [
   "Repeat",
   "RotateCcw",
   "Rows2",
+  "SecurityCheck",
   "Sent",
   "SideChat",
   "Smartphone",
   "Sort",
   "Square",
+  "SquareUnlock02",
   "Star",
   "TextWrap",
   "TimeSchedule",
@@ -111,24 +108,16 @@ export type ExtendedIconMap = Readonly<
 let extendedIcons: ExtendedIconMap | null = null;
 const listeners = new Set<() => void>();
 
-/**
- * Publishes the extended glyph map. Called by `./icon-extended` when it
- * evaluates, so any chunk that statically imports that module makes every
- * extended icon render synchronously; `Icon` instances that were showing a
- * placeholder re-render through {@link subscribeExtendedIcons}.
- */
 export function registerExtendedIcons(map: ExtendedIconMap): void {
   if (extendedIcons === map) return;
   extendedIcons = map;
   for (const listener of listeners) listener();
 }
 
-/** The extended glyph map, or null until `./icon-extended` has evaluated. */
 export function getExtendedIcons(): ExtendedIconMap | null {
   return extendedIcons;
 }
 
-/** `useSyncExternalStore`-shaped subscription to {@link getExtendedIcons}. */
 export function subscribeExtendedIcons(listener: () => void): () => void {
   listeners.add(listener);
   return () => {
