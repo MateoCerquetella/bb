@@ -1,12 +1,3 @@
-// Classification invariants shared by BB's no-argument built-in commands.
-//
-// These cases moved here from the legacy Codex adapter suite
-// (`plugins/provider-codex/src/adapter.test.ts`) when that adapter was
-// deleted. The function is shared with the canonical Codex bridge, which uses
-// it to route `/compact` to `thread/compact/start`; the server uses the same
-// rules for `/clear`. Their routing decisions are covered at those boundaries,
-// while these cases pin classification only.
-
 import { describe, expect, it } from "vitest";
 
 import {

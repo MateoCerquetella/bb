@@ -269,16 +269,12 @@ export interface ThreadPaneActionArgs {
 }
 
 export interface ThreadEventsListArgs {
-  /** Return only events with a sequence greater than this value. */
   afterSeq?: string;
-  /** Return only events with a sequence less than this value. */
   beforeSeq?: string;
   limit?: string;
-  /** Defaults to ascending sequence order. */
   order?: "asc" | "desc";
   signal?: AbortSignal;
   threadId: string;
-  /** Return only these event types. */
   types?: readonly [ThreadEventType, ...ThreadEventType[]];
 }
 
@@ -466,10 +462,6 @@ export interface ThreadsArea {
   search(args: ThreadSearchArgs): Promise<ThreadSearchResult>;
   send(args: ThreadSendArgs): Promise<ThreadSendResult>;
   spawn(args: ThreadSpawnArgs): Promise<ThreadSpawnResult>;
-  /**
-   * Stop active work and release the loaded agent runtime. This operation is
-   * idempotent and preserves thread history for a later resume.
-   */
   stop(args: ThreadActionArgs): Promise<ThreadStopResult>;
   tabs: ThreadTabsArea;
   timeline(args: ThreadTimelineArgs): Promise<ThreadTimelineResult>;
@@ -891,8 +883,6 @@ export function createThreadsArea(args: CreateSdkAreaArgs): ThreadsArea {
   };
   return {
     async archive(input) {
-      // Match the UI: archiving a parent also archives assigned children and
-      // source-derived side chats via the cascade archive-all route.
       return transport.readJson(
         transport.api.v1.threads[":id"]["archive-all"].$post({
           param: { id: input.threadId },

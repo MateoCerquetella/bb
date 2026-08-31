@@ -1,6 +1,5 @@
 import { ApiError } from "../../errors.js";
 
-// Positive values count overlapping sends; -1 is the exclusive clear owner.
 const inFlightByThreadId = new Map<string, number>();
 
 async function withThreadContextMutationGuard<T>(
