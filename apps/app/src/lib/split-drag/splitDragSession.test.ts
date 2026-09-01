@@ -126,6 +126,31 @@ describe("beginSplitDrag — sidebar gesture arbitration and fallback", () => {
     expect(onEnd).toHaveBeenCalledWith({ dropped: true });
   });
 
+  it("commits the drop before the release target stops propagation", () => {
+    const releaseTarget = document.createElement("button");
+    paneEl.append(releaseTarget);
+    releaseTarget.addEventListener("pointerup", (event) => {
+      event.stopPropagation();
+    });
+    const config = baseConfig();
+    beginSplitDrag(config);
+
+    fireWindowPointer("pointermove", 900, 400);
+    releaseTarget.dispatchEvent(
+      new MouseEvent("pointerup", {
+        clientX: 900,
+        clientY: 400,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+
+    expect(config.onDrop).toHaveBeenCalledWith({
+      paneId: "pane-1",
+      zone: "center",
+    });
+  });
+
   it("a vertical in-sidebar drag never engages: reorder is untouched, no drop", () => {
     const config = baseConfig();
     beginSplitDrag(config);

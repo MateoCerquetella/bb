@@ -80,7 +80,7 @@ interface RunPluginPanelActionArgs {
   threadId: string;
 }
 
-function runPluginPanelAction({
+export function runPluginPanelAction({
   action,
   openPluginPanel,
   threadId,

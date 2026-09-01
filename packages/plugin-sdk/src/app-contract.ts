@@ -1408,6 +1408,19 @@ export interface PluginAppComposer {
   customize(registration: ComposerCustomization): void;
 }
 
+export interface ExperimentalThreadActionSplitDragRequest {
+  /** Action id exposed by the thread's native New Tab launcher. */
+  readonly actionId: string;
+  /** Thread that owns the Action and supplies its execution context. */
+  readonly threadId: string;
+  /** Interactive element whose pointer gesture starts the drag. */
+  readonly source: HTMLElement;
+  /** Pointer position from the initiating pointerdown event. */
+  readonly startX: number;
+  /** Pointer position from the initiating pointerdown event. */
+  readonly startY: number;
+}
+
 /** Stable lifecycle values for one content-script instance in one bb client. */
 export interface PluginContentScriptContext {
   /** The id of the plugin that owns this script. */
@@ -1431,6 +1444,21 @@ export interface PluginContentScriptContext {
     threadId: string,
     status: PluginComposerThreadRowStatus | null,
   ) => void;
+  /**
+   * Start BB's host-owned pane-zone drag for one Action in a thread.
+   *
+   * Edge drops create a main-workspace split, center drops replace the target
+   * pane, an already-open Action focuses its pane, and the pane cap converts
+   * an edge drop into a replacement. The Action runs only after a valid drop.
+   * Returns false when the Action, thread, split workspace, or host support is
+   * unavailable.
+   *
+   * Optional so compatible 0.x clients can be feature-detected.
+   * Experimental: see docs/api_to_audit.md.
+   */
+  readonly experimental_beginThreadActionSplitDrag?: (
+    request: ExperimentalThreadActionSplitDragRequest,
+  ) => boolean;
 }
 
 /** Cleanup returned by a frontend content script. */

@@ -25,6 +25,7 @@ import {
 
 const FIRST_PANE_ID = "pane-1";
 const SPLITTABLE_THREAD_ROUTE_PATH = "/projects/:projectId/threads/:threadId";
+export const THREAD_ACTION_PANE_QUERY_KEY = "action-pane";
 
 export function threadPaneContent(thread: ThreadRoutePathArgs): PaneContent {
   return {
@@ -64,11 +65,52 @@ export function paneContentRoute(content: PaneContent): string {
   if (content.kind === "plugin-detail") {
     return getPluginDetailRoutePath({ pluginId: content.pluginId });
   }
+  if (content.kind === "thread-action") {
+    const search = new URLSearchParams();
+    search.set(THREAD_ACTION_PANE_QUERY_KEY, content.actionId);
+    return `${getThreadRoutePath(content)}?${search.toString()}`;
+  }
   return getPluginPanelRoutePath({
     pluginId: content.pluginId,
     path: content.panelPath,
     subPath: content.subPath,
   });
+}
+
+export function threadActionPaneContentForRoute({
+  actionId,
+  projectId,
+  threadId,
+}: {
+  actionId: string | null;
+  projectId: string | null;
+  threadId: string | null;
+}): PaneContent | null {
+  if (
+    actionId === null ||
+    actionId.length === 0 ||
+    actionId.length > 256 ||
+    (actionId !== "file-search-result-open-browser" &&
+      actionId !== "file-search-result-start-terminal" &&
+      !/^plugin-action:[^:]+:[^:]+$/u.test(actionId)) ||
+    projectId === null ||
+    threadId === null
+  ) {
+    return null;
+  }
+  return {
+    kind: "thread-action",
+    projectId,
+    threadId,
+    actionId,
+    title:
+      actionId === "file-search-result-open-browser"
+        ? "Browser"
+        : actionId === "file-search-result-start-terminal"
+          ? "Terminal"
+          : "Action",
+    paramsJson: null,
+  };
 }
 
 export function paneContentForPathname(pathname: string): PaneContent | null {

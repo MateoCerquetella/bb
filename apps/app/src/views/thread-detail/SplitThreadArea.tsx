@@ -16,7 +16,7 @@ import {
   type ReactNode,
   type SetStateAction,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { useRouteState } from "@/hooks/useRouteState";
 import {
   getThreadRoutePath,
@@ -36,11 +36,14 @@ import {
   countPanes,
   findPane,
   listPanes,
+  loadThreadSplitWorkspace,
   movePane,
   removePane,
   replacePaneContent,
   resizeSplit,
   setFocus,
+  saveThreadSplitWorkspaces,
+  splitLayoutContainsThread,
   swapPanes,
 } from "@/lib/split-layout";
 import { createSplitResizeSnapSession } from "@/lib/split-resize-snap";
@@ -71,6 +74,7 @@ import {
   type PaneSecondaryPanelRegistry,
 } from "./PaneContext";
 import { ThreadDetailView } from "./ThreadDetailView";
+import { ThreadActionPaneView } from "./ThreadActionPaneView";
 import { RootComposeView } from "@/views/RootComposeView";
 import { PluginPanelView } from "@/views/PluginPanelView";
 import {
@@ -95,6 +99,8 @@ import {
   createSinglePaneLayout,
   focusedPaneRoute,
   paneContentRoute,
+  THREAD_ACTION_PANE_QUERY_KEY,
+  threadActionPaneContentForRoute,
   reconcileLayoutForContent,
   threadPaneContent,
 } from "./splitThreadNavigation";
@@ -112,6 +118,7 @@ import {
 } from "@/components/ui/context-selection";
 import { PaneMaximizeButton } from "./PaneMaximizeButton";
 import { wsManager } from "@/lib/ws";
+import { usePluginThreadActionSplitDrag } from "@/lib/plugin-thread-action-split-drag";
 
 const LazyPluginPanelRightPanelHost = lazy(() =>
   import("@/components/plugin/PluginPanelRightPanelHost").then(
@@ -259,6 +266,7 @@ export function SplitThreadArea(props: SplitThreadAreaProps = {}) {
 
 function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
   const { projectId, threadId } = useRouteState();
+  const location = useLocation();
   const splitWorkspaceActive = useSplitWorkspaceActive();
   const navigate = useNavigate();
   const store = useStore();
@@ -270,24 +278,56 @@ function SplitThreadAreaContent({ routeContent }: SplitThreadAreaProps) {
     () => createPaneSecondaryPanelRegistry(),
     [],
   );
+  usePluginThreadActionSplitDrag();
 
   const routeThread = useMemo<ThreadRoutePathArgs | null>(
     () => (projectId && threadId ? { projectId, threadId } : null),
     [projectId, threadId],
   );
+  const routeThreadAction = useMemo(
+    () =>
+      threadActionPaneContentForRoute({
+        actionId: new URLSearchParams(location.search).get(
+          THREAD_ACTION_PANE_QUERY_KEY,
+        ),
+        projectId: projectId ?? null,
+        threadId: threadId ?? null,
+      }),
+    [location.search, projectId, threadId],
+  );
   const currentContent = useMemo<PaneContent | null>(
-    () => routeContent ?? (routeThread ? threadPaneContent(routeThread) : null),
-    [routeContent, routeThread],
+    () =>
+      routeContent ??
+      routeThreadAction ??
+      (routeThread ? threadPaneContent(routeThread) : null),
+    [routeContent, routeThread, routeThreadAction],
   );
 
   useEffect(() => {
     if (currentContent === null) {
       return;
     }
-    setLayout((previous) =>
-      reconcileLayoutForContent(previous, currentContent),
-    );
+    setLayout((previous) => {
+      const contentThreadId =
+        currentContent.kind === "thread" ||
+        currentContent.kind === "thread-action"
+          ? currentContent.threadId
+          : null;
+      if (contentThreadId === null) {
+        return reconcileLayoutForContent(previous, currentContent);
+      }
+      const workspace =
+        previous !== null &&
+        splitLayoutContainsThread(previous, contentThreadId)
+          ? previous
+          : loadThreadSplitWorkspace(contentThreadId);
+      return reconcileLayoutForContent(workspace, currentContent);
+    });
   }, [currentContent, setLayout]);
+
+  useEffect(() => {
+    if (storedLayout !== null) saveThreadSplitWorkspaces(storedLayout);
+  }, [storedLayout]);
 
   const layout: SplitLayout | null =
     storedLayout ??
@@ -751,7 +791,8 @@ function SplitTree(props: SplitTreeProps) {
         data-maximized={isMaximized ? "true" : undefined}
       >
         {}
-        {node.content.kind === "thread" ? (
+        {node.content.kind === "thread" ||
+        node.content.kind === "thread-action" ? (
           <PaneStaleWatcher
             threadId={node.content.threadId}
             onStale={() => props.onPruneStalePane(node.paneId)}
@@ -969,6 +1010,15 @@ function StandalonePaneContent({
   if (content.kind === "plugin-detail") {
     return <PluginDetailPaneView pluginId={content.pluginId} />;
   }
+  if (content.kind === "thread-action") {
+    return (
+      <ThreadActionPaneView
+        content={content}
+        isFocused
+        paneId={paneId ?? "pane-1"}
+      />
+    );
+  }
   const panelEntry = navPanelChrome.find(
     (candidate) =>
       candidate.chrome.pluginId === content.pluginId &&
@@ -1032,10 +1082,12 @@ function NonThreadPaneContent({
   const navPanelChrome = usePluginNavPanelChrome();
   const resourceRouteLabel = useAtomValue(resourceRouteLabelAtom);
   const dimsInactiveSplits = useAtomValue(dimInactiveSplitsAtom);
-  const { reservesWindowPanelToggle, isFocused } = useOptionalPaneContext() ?? {
-    reservesWindowPanelToggle: false,
-    isFocused: true,
-  };
+  const { reservesWindowPanelToggle, isFocused, paneId } =
+    useOptionalPaneContext() ?? {
+      reservesWindowPanelToggle: false,
+      isFocused: true,
+      paneId: "",
+    };
   const hostLayout = useContext(SecondaryPanelHostLayoutContext);
   const showsWindowPanelToggle = hostLayout?.pinsCornerToggle === true;
   const [desktopInfo] = useState(getBbDesktopInfo);
@@ -1059,7 +1111,11 @@ function NonThreadPaneContent({
       : null;
   const label =
     panelChrome?.title ??
-    (content.kind === "plugin-detail" ? "Extension" : "New thread");
+    (content.kind === "plugin-detail"
+      ? "Extension"
+      : content.kind === "thread-action"
+        ? content.title
+        : "New thread");
   const handlePointerDown = (event: ReactPointerEvent) => {
     if (
       event.target instanceof Element &&
@@ -1153,7 +1209,9 @@ function NonThreadPaneContent({
                 >
                   {content.kind === "plugin-detail"
                     ? "Extension"
-                    : "New thread"}
+                    : content.kind === "thread-action"
+                      ? content.title
+                      : "New thread"}
                 </p>
               )}
             </div>
@@ -1165,12 +1223,19 @@ function NonThreadPaneContent({
         className={cn(
           "flex min-h-0 min-w-0 flex-1 flex-col p-4 md:p-5",
           isBoundedPane && content.kind === "plugin-panel" && "isolate",
+          content.kind === "thread-action" && "p-0 md:p-0",
         )}
       >
         {content.kind === "new-thread" ? (
           <RootComposeView />
         ) : content.kind === "plugin-detail" ? (
           <PluginDetailPaneView pluginId={content.pluginId} />
+        ) : content.kind === "thread-action" ? (
+          <ThreadActionPaneView
+            content={content}
+            isFocused={isFocused}
+            paneId={paneId}
+          />
         ) : (
           <PluginPanelView
             pluginId={content.pluginId}

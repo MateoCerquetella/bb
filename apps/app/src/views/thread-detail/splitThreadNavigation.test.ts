@@ -12,7 +12,9 @@ import {
   applyThreadPaneActionToLayout,
   createSinglePaneLayout,
   focusedPaneRoute,
+  paneContentRoute,
   reconcileLayoutForContent,
+  threadActionPaneContentForRoute,
 } from "./splitThreadNavigation";
 
 function twoPaneLayout(): SplitLayout {
@@ -77,6 +79,53 @@ describe("mixed page navigation", () => {
       subPath: "work/today.md",
     });
     expect(focusedPaneRoute(after)).toBe("/plugins/notes/notes/work/today.md");
+  });
+
+  it("round-trips a thread Action route and preserves resolved pane state", () => {
+    const action = {
+      kind: "thread-action",
+      projectId: "p1",
+      threadId: "thread-1",
+      actionId: "plugin-action:tasks:taskboard",
+      title: "Taskboard",
+      paramsJson: `{"view":"today"}`,
+    } as const;
+    const before = splitPane(twoPaneLayout(), "pane-1", "bottom", action);
+    const route = paneContentRoute(action);
+    const parsed = threadActionPaneContentForRoute({
+      actionId: new URL(route, "https://bb.test").searchParams.get(
+        "action-pane",
+      ),
+      projectId: "p1",
+      threadId: "thread-1",
+    });
+    const after =
+      parsed === null ? before : reconcileLayoutForContent(before, parsed);
+
+    expect(route).toBe(
+      "/projects/p1/threads/thread-1?action-pane=plugin-action%3Atasks%3Ataskboard",
+    );
+    expect(findPaneByContent(after.root, action)?.content).toEqual(action);
+    expect(after.focusedPaneId).toBe(
+      findPaneByContent(after.root, action)?.paneId,
+    );
+  });
+
+  it("rejects unknown and unbounded thread Action routes", () => {
+    expect(
+      threadActionPaneContentForRoute({
+        actionId: "plugin-action:tasks",
+        projectId: "p1",
+        threadId: "thread-1",
+      }),
+    ).toBeNull();
+    expect(
+      threadActionPaneContentForRoute({
+        actionId: `plugin-action:tasks:${"x".repeat(300)}`,
+        projectId: "p1",
+        threadId: "thread-1",
+      }),
+    ).toBeNull();
   });
 });
 

@@ -16,6 +16,7 @@ Read `testing.md` for examples and fidelity limits.
 - `PluginAppSource`
 - `loadPluginApp`
 - `ContentScriptTestMountOptions`
+- `ExperimentalContentScriptThreadActionSplitDragCall`
 - `ContentScriptThreadRowStatusCall`
 - `MountedPluginContentScripts`
 - `mountPluginContentScripts`

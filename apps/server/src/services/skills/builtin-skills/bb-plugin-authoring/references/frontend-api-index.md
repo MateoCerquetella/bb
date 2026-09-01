@@ -117,6 +117,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginAppSlots`
 - `PluginAppComposer`
 - `PluginContentScriptContext`
+- `ExperimentalThreadActionSplitDragRequest`
 - `PluginContentScriptDisposer`
 - `PluginContentScriptRegistration`
 - `PluginAppContentScripts`

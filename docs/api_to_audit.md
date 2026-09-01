@@ -1025,6 +1025,26 @@ Before stabilization, audit:
   candidate rename. Nothing under `plugins/*` sets a status today, so the
   rename is free until the prefix drops.
 
+## `PluginContentScriptContext.experimental_beginThreadActionSplitDrag`
+
+Lets a trusted content script hand one native thread Action to BB's split-drag
+layer. The host resolves the Action, owns the drag ghost and pane zones, runs
+the Action only after a valid drop, and renders Browser, Terminal, or a
+registered thread-panel Action in a persistent main-workspace pane.
+
+Before stabilization, audit:
+
+- whether Action discovery should become a typed host directory instead of
+  accepting the stable ids exposed by the native New Tab launcher;
+- whether center replacement and edge splitting should be configurable;
+- how custom Actions that call `openPanel` more than once choose a pane;
+- persistence and recovery when a plugin Action disappears or its params
+  schema changes;
+- compact behavior, keyboard placement, pointer cancellation, and the pane
+  limit;
+- whether Browser and Terminal should share this Action contract or expose
+  separate typed targets.
+
 ## `bb.providers.register` (`experimental_bridgeOptions`, `experimental_visibility`, and the `experimental_providerBridge` artifact export)
 
 **Kept experimental (2026-08-22).** `bb.providers.register` and the declaration's target-state fields are stable. `experimental_bridgeOptions` and `experimental_visibility` have one consumer (the ACP plugin); docs/provider-plugin-api.md §1 lists both under "Still experimental on the declaration" — decide whether static options survive beside `deriveProviderOptions` before naming them. The `experimental_providerBridge` export name is an artifact contract read by the daemon bootstrap from every installed plugin; renaming it needs a dual-name acceptance window plus a protocol bump, so it stabilizes with the bridge kit once that deprecation policy exists.

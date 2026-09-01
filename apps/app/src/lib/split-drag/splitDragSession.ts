@@ -130,8 +130,8 @@ export function beginSplitDrag(config: SplitDragConfig): void {
 
   const teardown = (): void => {
     window.removeEventListener("pointermove", handleMove);
-    window.removeEventListener("pointerup", handleUp);
-    window.removeEventListener("pointercancel", handleCancel);
+    window.removeEventListener("pointerup", handleUp, true);
+    window.removeEventListener("pointercancel", handleCancel, true);
     window.removeEventListener("dragstart", preventNativeDrag);
     ghostEl?.remove();
     overlayEl?.remove();
@@ -166,8 +166,8 @@ export function beginSplitDrag(config: SplitDragConfig): void {
   }
 
   window.addEventListener("pointermove", handleMove);
-  window.addEventListener("pointerup", handleUp);
-  window.addEventListener("pointercancel", handleCancel);
+  window.addEventListener("pointerup", handleUp, { capture: true });
+  window.addEventListener("pointercancel", handleCancel, { capture: true });
 }
 
 function swallowNextClick(): void {

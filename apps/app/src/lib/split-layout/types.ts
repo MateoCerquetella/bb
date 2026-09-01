@@ -16,6 +16,14 @@ export type PaneContent =
   | {
       kind: "plugin-detail";
       pluginId: string;
+    }
+  | {
+      kind: "thread-action";
+      projectId: string;
+      threadId: string;
+      actionId: string;
+      title: string;
+      paramsJson: string | null;
     };
 
 export interface PaneNode {

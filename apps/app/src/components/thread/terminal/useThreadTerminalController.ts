@@ -42,6 +42,7 @@ export type ThreadTerminalTarget =
   | { kind: "host_path"; cwd: string | null; hostId: string };
 
 export interface ThreadTerminalControllerArgs {
+  autoCreate?: boolean;
   canCreateTerminal: boolean;
   isPanelOpen: boolean;
   isPanelPersistedOpen: boolean;
@@ -164,6 +165,7 @@ export function pickActiveTerminalId(
 }
 
 export function useThreadTerminalController({
+  autoCreate = false,
   canCreateTerminal,
   isPanelOpen,
   isPanelPersistedOpen,
@@ -200,6 +202,7 @@ export function useThreadTerminalController({
     syncThreadId,
   );
   const uiCreatedTerminalIdsRef = useRef<Set<string>>(new Set());
+  const autoCreateRequestedRef = useRef(false);
   const dirtyTerminalIdsRef = useRef<Set<string>>(new Set());
   const closingCleanTerminalIdsRef = useRef<Set<string>>(new Set());
   const closingDisconnectedTerminalIdsRef = useRef<Set<string>>(new Set());
@@ -410,6 +413,32 @@ export function useThreadTerminalController({
     isCreateTerminalPending,
     setActiveFixedTerminal,
     target,
+  ]);
+
+  useEffect(() => {
+    if (
+      !autoCreate ||
+      autoCreateRequestedRef.current ||
+      activeTerminalId !== null ||
+      !isPanelOpen ||
+      terminalsQuery.isLoading ||
+      terminalsQuery.error ||
+      !canCreateTerminal ||
+      isCreateTerminalPending
+    ) {
+      return;
+    }
+    autoCreateRequestedRef.current = true;
+    startTerminal();
+  }, [
+    autoCreate,
+    activeTerminalId,
+    canCreateTerminal,
+    isCreateTerminalPending,
+    isPanelOpen,
+    startTerminal,
+    terminalsQuery.error,
+    terminalsQuery.isLoading,
   ]);
 
   const closeTerminal = useCallback(

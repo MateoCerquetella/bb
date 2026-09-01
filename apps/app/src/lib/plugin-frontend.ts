@@ -30,6 +30,7 @@ import type {
   PluginContentScriptDisposer,
   PluginContentScriptRegistration,
   PluginSdkApp,
+  ExperimentalThreadActionSplitDragRequest,
 } from "@get-bb/plugin-sdk";
 import { normalizePluginThreadRowStatus } from "@get-bb/plugin-sdk/internal/composer-customization-validation";
 import { resetCrashedPluginSlots } from "@/components/plugin/PluginSlotMount";
@@ -54,6 +55,7 @@ import {
   clearPluginThreadRowStatusesByOwner,
   setPluginThreadRowStatus,
 } from "./plugin-thread-row-status";
+import { beginPluginThreadActionSplitDrag } from "./plugin-thread-action-split-drag";
 
 interface PluginFrontendBundle {
   jsUrl: string;
@@ -499,6 +501,36 @@ async function mountWithTimeout(
               normalizedStatus,
               statusOwner,
             );
+          },
+          experimental_beginThreadActionSplitDrag: (
+            request: ExperimentalThreadActionSplitDragRequest,
+          ) => {
+            if (controller.signal.aborted) return false;
+            if (
+              typeof request !== "object" ||
+              request === null ||
+              typeof request.actionId !== "string" ||
+              request.actionId.trim().length === 0 ||
+              request.actionId.trim().length > 256 ||
+              typeof request.threadId !== "string" ||
+              request.threadId.trim().length === 0 ||
+              request.threadId.trim().length > 128 ||
+              !(request.source instanceof HTMLElement) ||
+              !Number.isFinite(request.startX) ||
+              !Number.isFinite(request.startY)
+            ) {
+              deps.warn(
+                `bb plugin "${pluginId}": contentScript.experimental_beginThreadActionSplitDrag: invalid request`,
+              );
+              return false;
+            }
+            return beginPluginThreadActionSplitDrag({
+              actionId: request.actionId.trim(),
+              threadId: request.threadId.trim(),
+              source: request.source,
+              startX: request.startX,
+              startY: request.startY,
+            });
           },
         }),
       pluginId,

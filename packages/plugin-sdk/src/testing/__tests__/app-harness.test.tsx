@@ -717,6 +717,68 @@ describe("loadPluginApp", () => {
     await mounted.lifecycle.dispose();
   });
 
+  it("models the optional thread Action split-drag content-script API", async () => {
+    const source = document.createElement("button");
+    let accepted = false;
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        builder.contentScripts.register({
+          id: "action-drag",
+          mount({ experimental_beginThreadActionSplitDrag }) {
+            accepted =
+              experimental_beginThreadActionSplitDrag?.({
+                actionId: "plugin-action:tasks:taskboard",
+                threadId: "thr_1",
+                source,
+                startX: 120,
+                startY: 40,
+              }) ?? false;
+          },
+        });
+      }),
+    );
+
+    const mounted = await mountPluginContentScripts(captured, {
+      pluginId: "action-topbar",
+      experimental_beginThreadActionSplitDrag: () => true,
+    });
+    expect(accepted).toBe(true);
+    expect(mounted.inspection.experimental_threadActionSplitDragCalls).toEqual([
+      {
+        actionId: "plugin-action:tasks:taskboard",
+        threadId: "thr_1",
+        source,
+        startX: 120,
+        startY: 40,
+      },
+    ]);
+    await mounted.lifecycle.dispose();
+  });
+
+  it("can omit thread Action split drag for older compatible hosts", async () => {
+    let available = true;
+    const captured = await loadPluginApp(
+      definePluginApp((builder) => {
+        builder.contentScripts.register({
+          id: "action-drag-compatibility",
+          mount({ experimental_beginThreadActionSplitDrag }) {
+            available = experimental_beginThreadActionSplitDrag !== undefined;
+          },
+        });
+      }),
+    );
+
+    const mounted = await mountPluginContentScripts(captured, {
+      pluginId: "action-topbar",
+      omitExperimentalThreadActionSplitDrag: true,
+    });
+    expect(available).toBe(false);
+    expect(mounted.inspection.experimental_threadActionSplitDragCalls).toEqual(
+      [],
+    );
+    await mounted.lifecycle.dispose();
+  });
+
   it("rolls back earlier content scripts when a later mount rejects", async () => {
     const events: string[] = [];
     const captured = await loadPluginApp(

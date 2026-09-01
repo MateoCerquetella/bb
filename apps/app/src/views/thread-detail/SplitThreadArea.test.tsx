@@ -28,6 +28,7 @@ import { wsManager } from "@/lib/ws";
 import {
   listPanes,
   movePane,
+  saveThreadSplitWorkspaces,
   serializeSplitLayout,
   SPLIT_LAYOUT_STORAGE_KEY,
 } from "@/lib/split-layout";
@@ -614,6 +615,115 @@ afterEach(() => {
 });
 
 describe("SplitThreadArea", () => {
+  it("restores the workspace saved for the routed thread", async () => {
+    const saved: SplitLayout = {
+      root: {
+        type: "split",
+        dir: "row",
+        sizes: [0.35, 0.65],
+        children: [
+          { type: "pane", paneId: "pane-1", content: threadContent("thr-a") },
+          {
+            type: "pane",
+            paneId: "pane-2",
+            content: {
+              kind: "thread-action",
+              projectId: PERSONAL_PROJECT_ID,
+              threadId: "thr-a",
+              actionId: "file-search-result-start-terminal",
+              title: "Terminal",
+              paramsJson: null,
+            },
+          },
+        ],
+      },
+      focusedPaneId: "pane-2",
+    };
+    saveThreadSplitWorkspaces(saved, 100);
+    const store = renderSplitArea({
+      path: threadPath("thr-a"),
+      layout: {
+        root: {
+          type: "pane",
+          paneId: "pane-1",
+          content: threadContent("thr-b"),
+        },
+        focusedPaneId: "pane-1",
+      },
+    });
+
+    await waitFor(() => {
+      expect(store.get(splitLayoutAtom)).toEqual({
+        ...saved,
+        focusedPaneId: "pane-1",
+      });
+    });
+  });
+
+  it("switches from a populated workspace to another thread's workspace", async () => {
+    const saved: SplitLayout = {
+      root: {
+        type: "split",
+        dir: "col",
+        sizes: [0.55, 0.45],
+        children: [
+          { type: "pane", paneId: "pane-1", content: threadContent("thr-b") },
+          {
+            type: "pane",
+            paneId: "pane-2",
+            content: {
+              kind: "thread-action",
+              projectId: PERSONAL_PROJECT_ID,
+              threadId: "thr-b",
+              actionId: "file-search-result-open-browser",
+              title: "Browser",
+              paramsJson: null,
+            },
+          },
+        ],
+      },
+      focusedPaneId: "pane-2",
+    };
+    saveThreadSplitWorkspaces(saved, 100);
+    const store = renderSplitArea({
+      path: threadPath("thr-a"),
+      externalTo: threadPath("thr-b"),
+      layout: {
+        root: {
+          type: "split",
+          dir: "row",
+          sizes: [0.5, 0.5],
+          children: [
+            { type: "pane", paneId: "pane-1", content: threadContent("thr-a") },
+            {
+              type: "pane",
+              paneId: "pane-2",
+              content: {
+                kind: "thread-action",
+                projectId: PERSONAL_PROJECT_ID,
+                threadId: "thr-a",
+                actionId: "file-search-result-start-terminal",
+                title: "Terminal",
+                paramsJson: null,
+              },
+            },
+          ],
+        },
+        focusedPaneId: "pane-1",
+      },
+    });
+    await screen.findByTestId("pane-thr-a");
+
+    fireEvent.click(screen.getByTestId("external-nav"));
+
+    await waitFor(() => {
+      expect(store.get(splitLayoutAtom)).toEqual({
+        ...saved,
+        focusedPaneId: "pane-1",
+      });
+    });
+  });
+
   it("hosts Browser-tab navigation on compact plugin-panel routes", async () => {
     viewportState.compact = true;
 
@@ -1662,7 +1772,7 @@ describe("SplitThreadArea", () => {
     ).toBe("");
   });
 
-  it("replaces the focused pane's content on external navigation without dismantling the layout", async () => {
+  it("opens an unrelated thread in its own workspace", async () => {
     renderSplitArea({
       path: threadPath("thr-b"),
       layout: twoPaneLayout("pane-2"),
@@ -1681,15 +1791,9 @@ describe("SplitThreadArea", () => {
     fireEvent.click(screen.getByTestId("external-nav"));
 
     expect(await screen.findByTestId("pane-thr-c")).toBeTruthy();
-    expect(screen.getByTestId("pane-thr-a")).toBeTruthy();
+    expect(screen.queryByTestId("pane-thr-a")).toBeNull();
     expect(screen.queryByTestId("pane-thr-b")).toBeNull();
-    expect(
-      screen
-        .getAllByTestId(/^pane-thr-/)
-        .filter(
-          (pane) => pane.getAttribute("data-window-top-left-owner") === "true",
-        ),
-    ).toEqual([screen.getByTestId("pane-thr-a")]);
+    expect(screen.queryAllByTestId(/^pane-/)).toHaveLength(1);
   });
 
   it("focuses an already-open pane instead of duplicating on external navigation", async () => {

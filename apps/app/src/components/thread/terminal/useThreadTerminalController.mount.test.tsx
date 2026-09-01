@@ -10,9 +10,16 @@ import {
   useThreadTerminalController,
   type ThreadTerminalControllerArgs,
 } from "./useThreadTerminalController";
+import { resetFixedPanelTabsStateForTest } from "@/lib/fixed-panel-tabs";
+import {
+  createEmptyFixedPanelTabsState,
+  createTerminalFixedPanelTab,
+  getFixedPanelTabsStateStorageKey,
+  serializeFixedPanelTabsState,
+} from "@/lib/fixed-panel-tabs-state";
 
 vi.mock("@/lib/sdk", () => ({
-  sdk: { terminals: { list: vi.fn() } },
+  sdk: { terminals: { create: vi.fn(), list: vi.fn() } },
 }));
 
 const session: TerminalSession = {
@@ -52,6 +59,8 @@ function controllerArgs(
 afterEach(() => {
   cleanup();
   vi.clearAllMocks();
+  window.localStorage.clear();
+  resetFixedPanelTabsStateForTest();
 });
 
 describe("shouldMountTerminalViewForPanel", () => {
@@ -88,6 +97,72 @@ describe("shouldMountTerminalViewForPanel", () => {
 });
 
 describe("useThreadTerminalController terminal view mounting", () => {
+  it("creates one terminal when an Action pane requests automatic startup", async () => {
+    vi.mocked(sdk.terminals.list).mockResolvedValue({ sessions: [] });
+    vi.mocked(sdk.terminals.create).mockResolvedValue(session);
+    const { wrapper } = createQueryClientTestHarness();
+    renderHook(
+      () =>
+        useThreadTerminalController({
+          ...controllerArgs({
+            isPanelOpen: true,
+            isPanelPersistedOpen: true,
+          }),
+          autoCreate: true,
+        }),
+      { wrapper },
+    );
+
+    await waitFor(() => {
+      expect(sdk.terminals.create).toHaveBeenCalledTimes(1);
+    });
+    expect(sdk.terminals.create).toHaveBeenCalledWith({
+      cols: 100,
+      rows: 30,
+      scope: { kind: "thread", threadId: "thr_1" },
+    });
+  });
+
+  it("creates a terminal when a reused Action pane remembers a stale terminal", async () => {
+    const panelStateId = "thread-action:pane-2";
+    const staleTab = createTerminalFixedPanelTab({
+      terminalId: "term_stale",
+    });
+    window.localStorage.setItem(
+      getFixedPanelTabsStateStorageKey({ threadId: panelStateId }),
+      serializeFixedPanelTabsState({
+        state: createEmptyFixedPanelTabsState({
+          lastUsedAt: Date.now(),
+          secondary: {
+            activeTabId: staleTab.id,
+            isOpen: true,
+            tabs: [staleTab],
+          },
+        }),
+      }),
+    );
+    vi.mocked(sdk.terminals.list).mockResolvedValue({ sessions: [] });
+    vi.mocked(sdk.terminals.create).mockResolvedValue(session);
+    const { wrapper } = createQueryClientTestHarness();
+
+    renderHook(
+      () =>
+        useThreadTerminalController({
+          ...controllerArgs({
+            isPanelOpen: true,
+            isPanelPersistedOpen: true,
+          }),
+          autoCreate: true,
+          panelStateId,
+        }),
+      { wrapper },
+    );
+
+    await waitFor(() => {
+      expect(sdk.terminals.create).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("does not mount a persisted-open terminal the panel never showed", () => {
     vi.mocked(sdk.terminals.list).mockResolvedValue({ sessions: [session] });
     const { wrapper } = createQueryClientTestHarness();

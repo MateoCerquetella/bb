@@ -95,6 +95,50 @@ describe("split layout persistence", () => {
     expect(deserializeSplitLayout(serializeSplitLayout(mixed))).toEqual(mixed);
   });
 
+  it("round-trips a thread Action pane with its resolved plugin params", () => {
+    const actionLayout: SplitLayout = {
+      root: {
+        type: "pane",
+        paneId: "pane-1",
+        content: {
+          kind: "thread-action",
+          projectId: "project-1",
+          threadId: "thread-1",
+          actionId: "plugin-action:tasks:taskboard",
+          title: "Taskboard",
+          paramsJson: `{"view":"today"}`,
+        },
+      },
+      focusedPaneId: "pane-1",
+    };
+
+    expect(deserializeSplitLayout(serializeSplitLayout(actionLayout))).toEqual(
+      actionLayout,
+    );
+  });
+
+  it("rejects an unbounded persisted thread Action pane", () => {
+    const actionLayout: SplitLayout = {
+      root: {
+        type: "pane",
+        paneId: "pane-1",
+        content: {
+          kind: "thread-action",
+          projectId: "project-1",
+          threadId: "thread-1",
+          actionId: `plugin-action:tasks:${"x".repeat(300)}`,
+          title: "Taskboard",
+          paramsJson: null,
+        },
+      },
+      focusedPaneId: "pane-1",
+    };
+
+    expect(
+      deserializeSplitLayout(serializeSplitLayout(actionLayout)),
+    ).toBeNull();
+  });
+
   it("round-trips and restores all eight panes with focus and sizes intact", () => {
     const eightPanes = layoutWithPaneCount(8);
 

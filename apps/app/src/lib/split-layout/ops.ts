@@ -82,6 +82,14 @@ export function findPaneByContent(
           candidate.pluginId === content.pluginId
         );
       }
+      if (content.kind === "thread-action") {
+        return (
+          candidate.kind === "thread-action" &&
+          candidate.projectId === content.projectId &&
+          candidate.threadId === content.threadId &&
+          candidate.actionId === content.actionId
+        );
+      }
       return (
         candidate.kind === "plugin-panel" &&
         candidate.pluginId === content.pluginId &&

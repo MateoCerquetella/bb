@@ -12,7 +12,8 @@ compatible ESM bundle.
 
 The host mounts scripts in registration order after the bundle loads and
 `definePluginApp` setup validates. `mount` receives
-`{ pluginId, generation, signal, experimental_setThreadRowStatus? }`:
+`{ pluginId, generation, signal, experimental_setThreadRowStatus?,
+experimental_beginThreadActionSplitDrag? }`:
 `generation` is a monotonic per-window mount attempt number, and `signal`
 aborts before cleanup starts. The optional experimental setter targets an
 explicit thread row with `{ icon, label, tone? }` or clears it with `null`.
@@ -20,6 +21,14 @@ Use `tone: "running"` for the host's animated running treatment. The host
 scopes statuses to the calling plugin and automatically clears them when that
 frontend generation deactivates; feature-detect the setter for compatibility
 with older bb clients.
+
+`experimental_beginThreadActionSplitDrag` hands an Action-row pointer gesture
+to BB's pane-zone drag layer. Pass the Action id exposed by the native thread
+New Tab launcher, the owning thread id, the interactive source element, and
+the pointerdown coordinates. Edge drops split, center drops replace, an
+already-open Action focuses, and the pane cap replaces. Feature-detect it for
+older clients. Clicking the source remains plugin-owned; the host runs the
+Action only after a valid drop.
 
 A script may return nothing, a disposer, or a promise of either; async mount
 setup is time-boxed to 10 seconds. Keep long-running work outside the returned

@@ -7,6 +7,7 @@ import {
 import type { TerminalCreateTarget } from "@bb/server-contract";
 
 interface ThreadTerminalPanelProps {
+  autoCreate?: boolean;
   autoFocus?: boolean;
   canCreateTerminal: boolean;
   isPanelOpen: boolean;
@@ -23,6 +24,7 @@ interface ThreadTerminalPanelProps {
 }
 
 export function ThreadTerminalPanel({
+  autoCreate = false,
   autoFocus = false,
   canCreateTerminal,
   isPanelOpen,
@@ -38,6 +40,7 @@ export function ThreadTerminalPanel({
   target,
 }: ThreadTerminalPanelProps) {
   const terminalController = useThreadTerminalController({
+    autoCreate,
     canCreateTerminal,
     isPanelOpen,
     isPanelPersistedOpen,
@@ -53,6 +56,7 @@ export function ThreadTerminalPanel({
     <section
       aria-label="Terminal"
       data-app-terminal=""
+      data-terminal-id={terminalController.activeSession?.id}
       className="flex h-full min-h-0 min-w-0 flex-col bg-sidebar"
     >
       <div className="min-h-0 flex-1 overflow-hidden bg-sidebar">

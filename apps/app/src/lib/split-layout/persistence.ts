@@ -28,6 +28,16 @@ const paneContentSchema = z.discriminatedUnion("kind", [
       pluginId: z.string().min(1),
     })
     .strict(),
+  z
+    .object({
+      kind: z.literal("thread-action"),
+      projectId: z.string().min(1).max(128),
+      threadId: z.string().min(1).max(128),
+      actionId: z.string().min(1).max(256),
+      title: z.string().min(1).max(160),
+      paramsJson: z.string().max(65_536).nullable(),
+    })
+    .strict(),
 ]);
 
 const paneNodeSchema: z.ZodType<PaneNode> = z

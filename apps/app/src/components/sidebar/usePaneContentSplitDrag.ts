@@ -6,46 +6,29 @@ import {
 import { useStore } from "jotai";
 import { useNavigate } from "react-router-dom";
 import { useIsCompactViewport } from "@bb/shared-ui/hooks/use-compact-viewport";
-import {
-  getPluginPanelRoutePath,
-  getRootComposeRoutePath,
-  getThreadRoutePath,
-  getPluginDetailRoutePath,
-} from "@/lib/route-paths";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import { openPaneContentInSplit } from "@/lib/split-layout/openPaneContentInSplit";
 import {
   countPanes,
   findPaneByContent,
-  listPanes,
   MAX_PANES,
   replacePaneContent,
   setFocus,
   splitPane,
   type PaneContent,
-  type SplitLayout,
 } from "@/lib/split-layout";
 import {
   beginSplitDrag,
   decideThreadDrop,
+  resolveSinglePaneSplitDragFallback,
   shouldEngageSidebarSplitDrag,
-  type SplitDragFallbackTarget,
 } from "@/lib/split-drag";
+import { paneContentRoute } from "@/views/thread-detail/splitThreadNavigation";
 
 const SIDEBAR_SELECTOR = '[data-sidebar="sidebar"]';
-const MAIN_CONTENT_SELECTOR = "main";
 
 function routeForContent(content: PaneContent): string {
-  if (content.kind === "thread") return getThreadRoutePath(content);
-  if (content.kind === "new-thread") return getRootComposeRoutePath();
-  if (content.kind === "plugin-detail") {
-    return getPluginDetailRoutePath({ pluginId: content.pluginId });
-  }
-  return getPluginPanelRoutePath({
-    pluginId: content.pluginId,
-    path: content.panelPath,
-    subPath: content.subPath,
-  });
+  return paneContentRoute(content);
 }
 
 export function usePaneContentSplitDrag(options: PaneContentSplitOptions) {
@@ -106,7 +89,7 @@ export function usePaneContentSplitActions() {
       const startX = event.clientX;
       const startY = event.clientY;
       const startLayout = store.get(splitLayoutAtom);
-      const fallback = singlePaneFallback(startLayout);
+      const fallback = resolveSinglePaneSplitDragFallback(startLayout);
       beginSplitDrag({
         ghostLabel: label,
         sourceEl: rowEl,
@@ -155,17 +138,4 @@ export function usePaneContentSplitActions() {
     () => ({ beginDrag: onPointerDown, isCompact, openInSplit }),
     [isCompact, onPointerDown, openInSplit],
   );
-}
-
-function singlePaneFallback(
-  layout: SplitLayout | null,
-): SplitDragFallbackTarget | null {
-  if (layout === null) return null;
-  const panes = listPanes(layout.root);
-  const only = panes[0];
-  if (panes.length !== 1 || only === undefined) return null;
-  return {
-    paneId: only.paneId,
-    container: document.querySelector<HTMLElement>(MAIN_CONTENT_SELECTOR),
-  };
 }

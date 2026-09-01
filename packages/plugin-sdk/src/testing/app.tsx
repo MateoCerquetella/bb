@@ -54,6 +54,7 @@ import {
   type PluginThreadHeaderActionRegistration,
   type PluginThreadListRegistration,
   type PluginThreadPanelActionRegistration,
+  type ExperimentalThreadActionSplitDragRequest,
   type PluginRpcContract,
   type PluginRpcResult,
   type StandardSchemaV1InferInput,
@@ -952,6 +953,18 @@ export interface ContentScriptTestMountOptions {
    * thread-row status API. Current-host behavior is enabled by default.
    */
   omitExperimentalThreadRowStatus?: boolean;
+  omitExperimentalThreadActionSplitDrag?: boolean;
+  experimental_beginThreadActionSplitDrag?: (
+    request: ExperimentalThreadActionSplitDragRequest,
+  ) => boolean;
+}
+
+export interface ExperimentalContentScriptThreadActionSplitDragCall {
+  actionId: string;
+  threadId: string;
+  source: HTMLElement;
+  startX: number;
+  startY: number;
 }
 
 export interface ContentScriptThreadRowStatusCall {
@@ -965,6 +978,7 @@ export interface MountedPluginContentScripts {
     readonly signal: AbortSignal;
     readonly disposed: boolean;
     readonly threadRowStatusCalls: readonly ContentScriptThreadRowStatusCall[];
+    readonly experimental_threadActionSplitDragCalls: readonly ExperimentalContentScriptThreadActionSplitDragCall[];
     getThreadRowStatus(threadId: string): PluginComposerThreadRowStatus | null;
   };
   lifecycle: {
@@ -990,6 +1004,8 @@ export async function mountPluginContentScripts(
   }> = [];
   const threadRowStatuses = new Map<string, PluginComposerThreadRowStatus>();
   const threadRowStatusCalls: ContentScriptThreadRowStatusCall[] = [];
+  const threadActionSplitDragCalls: ExperimentalContentScriptThreadActionSplitDragCall[] =
+    [];
   let disposed = false;
   const setThreadRowStatus = (threadId: unknown, status: unknown): void => {
     if (controller.signal.aborted) return;
@@ -1043,6 +1059,19 @@ export async function mountPluginContentScripts(
         ...(!options.omitExperimentalThreadRowStatus
           ? { experimental_setThreadRowStatus: setThreadRowStatus }
           : {}),
+        ...(!options.omitExperimentalThreadActionSplitDrag
+          ? {
+              experimental_beginThreadActionSplitDrag: (
+                request: ExperimentalThreadActionSplitDragRequest,
+              ) => {
+                threadActionSplitDragCalls.push({ ...request });
+                return (
+                  options.experimental_beginThreadActionSplitDrag?.(request) ??
+                  false
+                );
+              },
+            }
+          : {}),
       });
       if (result !== undefined && typeof result !== "function") {
         throw new Error(
@@ -1070,6 +1099,9 @@ export async function mountPluginContentScripts(
           threadId,
           status: status === null ? null : { ...status },
         }));
+      },
+      get experimental_threadActionSplitDragCalls() {
+        return threadActionSplitDragCalls.map((request) => ({ ...request }));
       },
       getThreadRowStatus(threadId) {
         const status = threadRowStatuses.get(threadId);

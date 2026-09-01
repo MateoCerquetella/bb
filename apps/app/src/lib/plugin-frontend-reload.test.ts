@@ -38,6 +38,7 @@ import { PluginSlotMount } from "@/components/plugin/PluginSlotMount";
 import { PLUGIN_PANEL_ROUTE_PATH } from "./route-paths";
 import { applyAppThemeCss } from "./themes";
 import { PluginPanelView } from "@/views/PluginPanelView";
+import { setPluginThreadActionSplitDragHandler } from "./plugin-thread-action-split-drag";
 
 function candidate(
   pluginId: string,
@@ -584,6 +585,92 @@ describe("reconcilePluginFrontends", () => {
     deps.fetchCandidates.mockResolvedValue([]);
     await reconcilePluginFrontends(state, deps);
     expect(getPluginThreadRowStatus("thr_source")).toBeNull();
+  });
+
+  it("validates and delegates content-script thread Action split drags", async () => {
+    const state = createPluginFrontendReconcileState();
+    const deps = makeDeps([candidate("action-topbar", "v1")]);
+    const source = document.createElement("button");
+    let accepted = false;
+    let received: {
+      actionId: string;
+      threadId: string;
+      source: HTMLElement;
+      startX: number;
+      startY: number;
+    } | null = null;
+    const clear = setPluginThreadActionSplitDragHandler((request) => {
+      received = request;
+      return true;
+    });
+    deps.importModule.mockResolvedValue(
+      contentScriptModule((app) => {
+        app.contentScripts.register({
+          id: "action-drag",
+          mount({ experimental_beginThreadActionSplitDrag }) {
+            accepted =
+              experimental_beginThreadActionSplitDrag?.({
+                actionId: " plugin-action:tasks:taskboard ",
+                threadId: " thr_1 ",
+                source,
+                startX: 120,
+                startY: 40,
+              }) ?? false;
+          },
+        });
+      }),
+    );
+
+    try {
+      await reconcilePluginFrontends(state, deps);
+    } finally {
+      clear();
+    }
+    expect(accepted).toBe(true);
+    expect(received).toEqual({
+      actionId: "plugin-action:tasks:taskboard",
+      threadId: "thr_1",
+      source,
+      startX: 120,
+      startY: 40,
+    });
+  });
+
+  it("declines malformed content-script thread Action drag requests", async () => {
+    const state = createPluginFrontendReconcileState();
+    const deps = makeDeps([candidate("action-topbar", "v1")]);
+    const accepted: boolean[] = [];
+    deps.importModule.mockResolvedValue(
+      contentScriptModule((app) => {
+        app.contentScripts.register({
+          id: "invalid-action-drag",
+          mount({ experimental_beginThreadActionSplitDrag }) {
+            const begin = experimental_beginThreadActionSplitDrag as
+              | ((request: unknown) => boolean)
+              | undefined;
+            accepted.push(begin?.(null) ?? false);
+            accepted.push(
+              begin?.({
+                actionId: "",
+                threadId: "thr_1",
+                source: document.createElement("button"),
+                startX: Number.NaN,
+                startY: 40,
+              }) ?? false,
+            );
+          },
+        });
+      }),
+    );
+
+    await reconcilePluginFrontends(state, deps);
+    expect(accepted).toEqual([false, false]);
+    expect(deps.warn).toHaveBeenCalledTimes(2);
+    expect(deps.warn).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "contentScript.experimental_beginThreadActionSplitDrag: invalid request",
+      ),
+    );
   });
 
   it("rolls back a status from a partially mounted generation and rejects its retained setter", async () => {
