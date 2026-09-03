@@ -37,12 +37,19 @@ Read the installed SDK declarations for the exact current signatures.
 
 - `PluginHomepageSectionProps`
 - `PluginSettingsSectionProps`
+- `ExperimentalAppOverlayProps`
 - `PluginNavPanelProps`
 - `PluginThreadPanelProps`
 - `PluginNewThreadPanelProps`
 - `PluginPendingInteractionView`
 - `PluginPendingInteractionProps`
 - `PluginSidebarFooterActionProps`
+- `ExperimentalSidebarNavigationShortcut`
+- `ExperimentalSidebarNavigationAction`
+- `ExperimentalSidebarNavigationIcon`
+- `ExperimentalSidebarNavigationItem`
+- `ExperimentalSidebarNavigationActivationOptions`
+- `ExperimentalSidebarNavigationProps`
 - `PluginThreadListProps`
 - `PluginThreadHeaderActionProps`
 - `PluginFileOpenerSource`
@@ -61,6 +68,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginMessageDirectiveProps`
 - `PluginHomepageSectionRegistration`
 - `PluginSettingsSectionRegistration`
+- `ExperimentalAppOverlayRegistration`
 - `ExperimentalFixedTabTargetContract`
 - `ExperimentalPluginFixedTabReference`
 - `PluginFixedTabRegistration`
@@ -74,6 +82,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `PluginPendingInteractionRegistration`
 - `PluginSidebarFooterActionContext`
 - `PluginSidebarFooterActionRegistration`
+- `ExperimentalSidebarNavigationRegistration`
 - `PluginSidebarThreadIndicator`
 - `PluginSidebarWorkspaceKind`
 - `PluginSidebarThreadActivity`
@@ -123,6 +132,7 @@ Read the installed SDK declarations for the exact current signatures.
 - `ComposerCustomization`
 - `ComposerPlusMenuItem`
 - `ComposerView`
+- `ExperimentalComposerSubmitOptions`
 - `ComposerRichTextSpec`
 - `ComposerStructuredDraft`
 - `PluginComposerTextEffect`

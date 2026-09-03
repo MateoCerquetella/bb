@@ -1,10 +1,4 @@
-import {
-  useCallback,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from "react";
+import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   Environment,
   PermissionMode,
@@ -552,12 +546,18 @@ const environmentGoneContextBannerElement: ReactNode = (
 function makeStoryQueuedMessage(id: string, text: string): ThreadQueuedMessage {
   return {
     id,
+    threadId: "thr_prompt_pills",
     content: [{ type: "text", text, mentions: [] }],
     model: "gpt-5.5",
     reasoningLevel: "medium",
     permissionMode: "auto",
     serviceTier: "default",
     groupWithNext: false,
+    sendAt: null,
+    waitingOn: null,
+    failureReason: null,
+    payload: { kind: "inline" },
+    editable: true,
     createdAt: 0,
     updatedAt: 0,
   };
@@ -772,13 +772,15 @@ function Row({
   const queueElement =
     initialQueuedMessages === undefined ? null : (
       <QueuedMessagesList
+        attachedToComposer={true}
         queuedMessages={storyQueuedMessages}
         inlineEditor={inlineEditor}
+        sendAction="send-now"
         sendDisabled={false}
         actionDisabled={false}
         processingMessageId={null}
         processingAction={null}
-        onSendImmediately={(id) =>
+        onSend={(id) =>
           setStoryQueuedMessages((current) =>
             current.filter((message) => message.id !== id),
           )

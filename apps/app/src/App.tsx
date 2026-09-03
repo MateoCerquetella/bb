@@ -10,6 +10,7 @@ import { AppLayout } from "./components/layout/AppLayout";
 import { AuthCallbackView } from "./views/AuthCallbackView";
 import { QuickCreateProjectProvider } from "./hooks/useQuickCreateProject";
 import { RouteNavigationProvider } from "./components/ui/app-route-anchor";
+import { RouteNavigationIndicator } from "./components/ui/route-navigation-indicator";
 import { AppNavigationUrlHost } from "./lib/url-open-routing";
 import { NativeShellReporter } from "./lib/native-shell";
 import { AppFileExternalNavigationHost } from "./components/plugin/AppFileExternalNavigationHost";
@@ -294,7 +295,10 @@ function AppRoutes() {
             path={TOOLS_REGISTRY_SKILL_DETAIL_ROUTE_PATH}
             element={<ToolsView />}
           />
-          <Route path={TOOLS_PLUGINS_ROUTE_PATH} element={<ToolsView />} />
+          <Route
+            path={`${TOOLS_PLUGINS_ROUTE_PATH}/*`}
+            element={<ToolsPluginsRoute />}
+          />
           <Route
             path={TOOLS_PLUGIN_BROWSE_ROUTE_PATH}
             element={<ExtensionsLandingRedirect />}
@@ -327,6 +331,11 @@ function RouteContentPaintSignal() {
   return null;
 }
 
+function ToolsPluginsRoute() {
+  const { "*": pluginId } = useParams<"*">();
+  return <ToolsView pluginId={pluginId || undefined} />;
+}
+
 export function App() {
   useWebSocket();
   useDesktopThemeSync();
@@ -339,6 +348,7 @@ export function App() {
     <QuickCreateProjectProvider>
       <AppCommandProvider>
         <RouteNavigationProvider>
+          <RouteNavigationIndicator />
           <AppNavigationUrlHost>
             <AppFileExternalNavigationHost>
               <HashNavigationScroll />

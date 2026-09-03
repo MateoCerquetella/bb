@@ -421,7 +421,7 @@ function UserConversationMessage({
     <div className="w-full" data-message-column="">
       <div className="group/message ml-auto flex w-fit max-w-[70%] flex-col items-end">
         {requestLabel ? (
-          <div className="mb-1 flex justify-end">
+          <div className="mb-1 flex items-center justify-end gap-2">
             <TurnRequestLabel
               turnRequest={turnRequest}
               icon="ArrowTurnForward"
@@ -457,6 +457,7 @@ function UserConversationMessage({
             alignment="end"
             mobileActionDisplay={mobileActionDisplay}
             addToChatAttachments={addToChatAttachments}
+            copyImageUrl={attachmentItems.imageItems[0]?.src}
             onAddToChat={onAddToChat}
             onEdit={onEdit}
             pluginActions={pluginActions}
@@ -626,6 +627,7 @@ function AssistantConversationMessage({
           alignment="start"
           mobileActionDisplay={mobileActionDisplay}
           addToChatAttachments={addToChatAttachments}
+          copyImageUrl={attachmentItems.imageItems[0]?.src}
           onAddToChat={onAddToChat}
           onFork={onFork}
           onSendToMain={onSendToMain}

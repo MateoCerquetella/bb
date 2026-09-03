@@ -44,7 +44,6 @@ import {
 import {
   AUTOMATIONS_PLUGIN_ID,
   AUTOMATIONS_PLUGIN_PANEL_PATH,
-  getSkillsRoutePath,
 } from "@/lib/route-paths";
 import { splitLayoutAtom } from "@/lib/split-layout/atoms";
 import {
@@ -179,6 +178,7 @@ const loadedSidebarNavigation = {
           environmentId: "env_story_sidebar",
           environmentName: "Sidebar polish",
           environmentBranchName: BRANCH_NAMES.feature,
+          queuedWork: "none",
           environmentWorkspaceDisplayKind: "managed-worktree",
           title: "Tighten loading skeleton",
           titleFallback: "Tighten loading skeleton",
@@ -192,6 +192,7 @@ const loadedSidebarNavigation = {
           environmentId: "env_story_sidebar",
           environmentName: "Sidebar polish",
           environmentBranchName: BRANCH_NAMES.feature,
+          queuedWork: "none",
           environmentWorkspaceDisplayKind: "managed-worktree",
           title: "Audit sidebar stories",
           titleFallback: "Audit sidebar stories",
@@ -265,7 +266,7 @@ function SidebarFrame({ children }: SidebarFrameProps) {
             <ProjectListActionButtons onNewChat={noop} />
           </div>
           {}
-          <PluginNavSidebarItems toolsRoutePath={getSkillsRoutePath()} />
+          <PluginNavSidebarItems />
           <div className="min-h-0 flex-1 overflow-y-auto">{children}</div>
           <div className="shrink-0 border-t border-sidebar-border/70 px-2 py-2">
             <button

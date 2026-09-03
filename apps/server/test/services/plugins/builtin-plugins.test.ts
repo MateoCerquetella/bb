@@ -208,7 +208,13 @@ describe("builtin plugin reconciliation", () => {
 
   it("keeps official plugins bundled but out of the auto-install builtins", () => {
     const optionalNames = OFFICIAL_PLUGINS.map((plugin) => plugin.name);
-    expect(optionalNames).toEqual(["github", "docs", "memory", "tasks"]);
+    expect(optionalNames).toEqual([
+      "github",
+      "docs",
+      "memory",
+      "tasks",
+      "theme-preview",
+    ]);
     for (const name of optionalNames) {
       expect(BUILTIN_PLUGINS.map((plugin) => plugin.name)).not.toContain(name);
     }
@@ -219,6 +225,7 @@ describe("builtin plugin reconciliation", () => {
     const expectedIcons = new Map([
       ["ask-user-question", "MessageQuestion"],
       ["automations", "Clock"],
+      ["concurrency-limit", "Limitation"],
       ["connect", "Smartphone"],
       ["custom-instructions", "EditFile"],
       ["plugin-api-tester", "Beaker"],
@@ -232,6 +239,8 @@ describe("builtin plugin reconciliation", () => {
       ["provider-codex", "./icons/codex.svg"],
       ["provider-pi", "./icons/pi.svg"],
       ["provider-retry", "ArrowReloadHorizontal"],
+      ["push-notifications", "BellDot"],
+      ["scheduled-send", "Calendar"],
       ["secrets", "Lock"],
       ["side-chat", "SideChat"],
       ["workflows", "Workflow"],
@@ -517,6 +526,22 @@ describe("builtin plugin reconciliation", () => {
     ]);
   });
 
+  it("ships Concurrency limit enabled on a fresh database", () => {
+    const limiter = BUILTIN_PLUGINS.find(
+      (builtin) => builtin.name === "concurrency-limit",
+    );
+    expect(limiter).toBeDefined();
+    expect(limiter?.defaultEnabled).toBe(true);
+  });
+
+  it("ships Send later enabled on a fresh database", () => {
+    const scheduledSend = BUILTIN_PLUGINS.find(
+      (builtin) => builtin.name === "scheduled-send",
+    );
+    expect(scheduledSend).toBeDefined();
+    expect(scheduledSend?.defaultEnabled).toBe(true);
+  });
+
   it("ships Provider retry enabled on a fresh database", async () => {
     const providerRetry = BUILTIN_PLUGINS.find(
       (builtin) => builtin.name === "provider-retry",
@@ -540,6 +565,13 @@ describe("builtin plugin reconciliation", () => {
         status: "running",
       },
     ]);
+  });
+
+  it("ships Push notifications enabled on a fresh database", () => {
+    const pushPlugin = BUILTIN_PLUGINS.find(
+      (builtin) => builtin.name === "push-notifications",
+    );
+    expect(pushPlugin?.defaultEnabled).toBe(true);
   });
 
   it("loads the builtin connect plugin like other builtins", async () => {
@@ -1024,6 +1056,9 @@ describe("builtin plugin packaging", () => {
       stat(join(copiedRoot, "dist", "app.css")),
     ).resolves.toBeTruthy();
     await expect(stat(join(copiedRoot, "skills"))).resolves.toBeTruthy();
+    await expect(
+      readFile(join(targetRoot, "marketplace.json"), "utf8"),
+    ).resolves.toContain('"name": "bb-official"');
     await expect(
       readFile(join(copiedRoot, "assets", "icon.svg"), "utf8"),
     ).resolves.toBe("<svg/>\n");

@@ -237,7 +237,9 @@ function AddPluginDialogContent({
   const [sourceText, setSourceText] = useState("");
   const request = buildRequest(initial, sourceText);
   const thirdParty =
-    initial !== null && initial.marketplace !== CURATED_PLUGIN_MARKETPLACE_NAME;
+    initial !== null &&
+    initial.marketplace !== CURATED_PLUGIN_MARKETPLACE_NAME &&
+    !initial.source.startsWith("builtin:");
   const planQuery = useCatalogInstallPlan(
     thirdParty && initial !== null
       ? { entryId: initial.entryId, marketplace: initial.marketplace }
@@ -335,7 +337,7 @@ function AddPluginDialogContent({
             role="progressbar"
             aria-label="Installing plugin"
           >
-            <div className="h-full w-1/3 animate-plugin-install-progress rounded-full bg-muted-foreground" />
+            <div className="h-full w-1/3 animate-indeterminate-progress rounded-full bg-muted-foreground" />
           </div>
         ) : (
           <FullTrustWarning />

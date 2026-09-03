@@ -278,6 +278,7 @@ function renderPromptBox(
     mentionTriggers?: TypeaheadConfig["mention"]["triggers"];
     mentionSuggestions?: readonly PromptMentionSuggestion[];
     commandSuggestions?: TypeaheadConfig["command"]["suggestions"];
+    onAttachFiles?: (files: File[]) => Promise<void> | void;
   } = {},
 ) {
   const changes: PromptChange[] = [];
@@ -309,7 +310,7 @@ function renderPromptBox(
           onCommandQueryChange,
         })}
         mentionMenuPlacement="bottom"
-        attachments={{}}
+        attachments={{ onAttachFiles: options.onAttachFiles }}
         promptActions={promptActions}
         promptBoxRef={promptBoxRef}
       />
@@ -416,15 +417,20 @@ function pastePlainText(text: string) {
 }
 
 function pasteClipboard({
+  files = [],
   html = "",
   plainText = "",
 }: {
+  files?: File[];
   html?: string;
   plainText?: string;
 }) {
   fireEvent.paste(getPromptEditorElement(), {
     clipboardData: {
-      items: [],
+      items: files.map((file) => ({
+        kind: "file",
+        getAsFile: () => file,
+      })),
       getData: (type: string) => {
         if (type === "text/html") return html;
         if (type === "text/plain") return plainText;
@@ -1992,6 +1998,42 @@ describe("PromptBoxInternal plugin composer actions", () => {
 });
 
 describe("PromptBoxInternal compact layout", () => {
+  it("shows attachment upload progress on the submit button", () => {
+    const restoreMatchMedia = mockPointerCoarse(true);
+    try {
+      render(
+        <PromptBoxInternal
+          {...createPromptBoxProps({
+            attachments: { isAttaching: true },
+            compact: {
+              isCompact: true,
+              placeholder: "Ask a follow-up",
+            },
+            voice: {
+              state: "idle",
+              isSupported: true,
+              stream: null,
+              start: vi.fn(),
+              stop: vi.fn(),
+              cancel: vi.fn(),
+            },
+          })}
+        />,
+      );
+
+      const submit = screen.getByRole("button", {
+        name: "Uploading attachments...",
+      });
+      expect(submit.hasAttribute("disabled")).toBe(true);
+      expect(submit.querySelector('[data-icon="Spinner"]')).not.toBeNull();
+      expect(
+        screen.queryByRole("button", { name: "Start voice input" }),
+      ).toBeNull();
+    } finally {
+      restoreMatchMedia();
+    }
+  });
+
   it("publishes the container-compact placeholder for CSS", () => {
     const baseProps = createPromptBoxProps();
     const view = render(
@@ -3204,10 +3246,7 @@ describe("PromptBoxInternal mention triggers", () => {
 
     view.rerender(
       <Harness
-        mentionSuggestions={[
-          ...initialSuggestions,
-          delayedExactSuggestion,
-        ]}
+        mentionSuggestions={[...initialSuggestions, delayedExactSuggestion]}
       />,
     );
     await screen.findByRole("button", { name: "Atlas" });
@@ -3348,6 +3387,20 @@ describe("PromptBoxInternal prompt actions", () => {
       coordsAtPosSpy.mockRestore();
       scrollRectSpy.mockRestore();
     }
+  });
+
+  it("pastes clipboard text and attaches the clipboard image", async () => {
+    const onAttachFiles = vi.fn().mockResolvedValue(undefined);
+    const { changes, promptBoxRef } = renderPromptBox("Before ", {
+      onAttachFiles,
+    });
+    const image = new File(["image"], "photo.png", { type: "image/png" });
+
+    await focusPromptEnd(promptBoxRef);
+    pasteClipboard({ files: [image], plainText: "A photo" });
+
+    await waitFor(() => expect(latestValue(changes)).toBe("Before A photo"));
+    expect(onAttachFiles).toHaveBeenCalledWith([image]);
   });
 
   it("preserves blockquote structure when pasting copied blockquote html", async () => {

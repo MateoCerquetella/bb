@@ -272,6 +272,37 @@ const OPTIONAL_SERVER_FIELD_GROUPS: readonly OptionalServerFieldGroup[] = [
       "Uploaded attachments may omit mime type when the client could not determine one.",
     fields: ["uploadedPromptAttachmentSchema.mimeType"],
   },
+  {
+    reason:
+      "sendAt is present only when the caller is scheduling the dispatch; omission means attempt the dispatch now, which allocates no queued row at all when nothing blocks it.",
+    fields: [
+      "createThreadRequestSchema.sendAt",
+      "sendMessageRequestSchema.sendAt",
+    ],
+  },
+  {
+    reason:
+      "GET /threads/count filters are all genuinely absent by default: omitting one does not filter on it, and groups is present only when groupBy was asked for.",
+    fields: [
+      "threadCountQuerySchema.status",
+      "threadCountQuerySchema.hostId",
+      "threadCountQuerySchema.providerId",
+      "threadCountQuerySchema.projectId",
+      "threadCountQuerySchema.parentThreadId",
+      "threadCountQuerySchema.groupBy",
+      "threadCountQuerySchema.includeArchived",
+      "threadCountQuerySchema.includeHidden",
+      "threadCountResponseSchema.groups",
+    ],
+  },
+  {
+    reason:
+      "The cross-thread queue list is unfiltered by default: omitting threadId or waitHolder means every live queued row, which is what a workspace-wide pending view asks for.",
+    fields: [
+      "queuedMessageListQuerySchema.threadId",
+      "queuedMessageListQuerySchema.waitHolder",
+    ],
+  },
 ];
 
 function buildIntentionalOptionalServerFields(
@@ -483,30 +514,19 @@ describe("git branch name contract", () => {
     expect(
       contract.projectBranchesQuerySchema.safeParse({
         hostId: "host_123",
-        refresh: "blocking",
         selectedBranch: "upstream/main",
       }).success,
     ).toBe(true);
     expect(
       contract.projectBranchesQuerySchema.safeParse({
         hostId: "host_123",
-        refresh: "eager",
+        refresh: "blocking",
       }).success,
     ).toBe(false);
     expect(
       contract.projectBranchesQuerySchema.safeParse({
         hostId: "host_123",
         selectedBranch: "upstream/main lock",
-      }).success,
-    ).toBe(false);
-    expect(
-      contract.squashMergeOptionsSchema.safeParse({
-        mergeBaseBranch: "origin/main",
-      }).success,
-    ).toBe(true);
-    expect(
-      contract.squashMergeOptionsSchema.safeParse({
-        mergeBaseBranch: "origin/main lock",
       }).success,
     ).toBe(false);
     expect(
@@ -872,6 +892,7 @@ describe("server-contract canonical schemas", () => {
           environmentHostId: "host_123",
           environmentName: null,
           environmentBranchName: "bb/test",
+          queuedWork: "none",
           environmentWorkspaceDisplayKind: "managed-worktree",
         },
       ]),
@@ -882,6 +903,7 @@ describe("server-contract canonical schemas", () => {
         environmentHostId: "host_123",
         environmentName: null,
         environmentBranchName: "bb/test",
+        queuedWork: "none",
         environmentWorkspaceDisplayKind: "managed-worktree",
       },
     ]);
@@ -970,6 +992,13 @@ describe("server-contract canonical schemas", () => {
 
     expect(() =>
       environmentActionRequestSchema.parse({
+        action: "squash_merge",
+        options: { mergeBaseBranch: "main" },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      environmentActionRequestSchema.parse({
         action: "pull_request_merge",
         options: { method: "admin" },
       }),
@@ -998,7 +1027,7 @@ describe("server-contract canonical schemas", () => {
         commitSha: "sha",
         commitSubject: "subject",
         merged: true,
-        message: "",
+        message: "Squash merge completed",
         ok: true,
       }),
     ).toThrow();
@@ -1776,6 +1805,7 @@ describe("server-contract clients", () => {
       createQueuedMessageRequestSchema:
         contract.createQueuedMessageRequestSchema,
       createThreadRequestSchema: contract.createThreadRequestSchema,
+      queuedMessageListQuerySchema: contract.queuedMessageListQuerySchema,
       forkThreadRequestSchema: contract.forkThreadRequestSchema,
       environmentActionApiErrorSchema: contract.environmentActionApiErrorSchema,
       environmentStatusResponseSchema: contract.environmentStatusResponseSchema,
@@ -1789,11 +1819,12 @@ describe("server-contract clients", () => {
       sendQueuedMessageRequestSchema: contract.sendQueuedMessageRequestSchema,
       sendQueuedMessageResponseSchema: contract.sendQueuedMessageResponseSchema,
       sendMessageRequestSchema: contract.sendMessageRequestSchema,
-      squashMergeActionResponseSchema: contract.squashMergeActionResponseSchema,
       systemExecutionOptionsQuerySchema:
         contract.systemExecutionOptionsQuerySchema,
       systemProvidersQuerySchema: contract.systemProvidersQuerySchema,
       threadEventsQuerySchema: contract.threadEventsQuerySchema,
+      threadCountQuerySchema: contract.threadCountQuerySchema,
+      threadCountResponseSchema: contract.threadCountResponseSchema,
       threadListQuerySchema: contract.threadListQuerySchema,
       threadPendingInteractionsResponseSchema:
         contract.threadPendingInteractionsResponseSchema,

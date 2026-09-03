@@ -886,6 +886,8 @@ describe("thread runtime config", () => {
 
       const claudeCode = await build("claude-code");
       expect(claudeCode.options.providerOptions).toEqual({
+        chromeEnabled: false,
+        idleQueryReleaseEnabled: false,
         memoryEnabled: true,
         providerSubagentsEnabled: true,
         workflowsEnabled: true,
@@ -900,6 +902,7 @@ describe("thread runtime config", () => {
     await withTestHarness(async (harness) => {
       const pluginId = "provider-hooked";
       const registration = buildPluginProviderRegistration({
+        iconHash: null,
         available: true,
         pluginId,
         declaration: validatePluginProviderDeclaration({

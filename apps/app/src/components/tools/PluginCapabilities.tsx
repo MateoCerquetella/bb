@@ -216,9 +216,22 @@ function pluginAppSurfaceItems(
     ),
     ...namedSlotItems(
       pluginId,
+      slots.appOverlays,
+      "app-overlay",
+      "Renders app-wide floating interface content.",
+    ),
+    ...namedSlotItems(
+      pluginId,
       slots.threadLists,
       "thread-list",
       "Can replace the sidebar thread list; configured in Appearance.",
+      () => getSettingsRoutePath("appearance"),
+    ),
+    ...namedSlotItems(
+      pluginId,
+      slots.experimentalSidebarNavigations,
+      "sidebar-navigation",
+      "Can replace the sidebar navigation controls; configured in Appearance.",
       () => getSettingsRoutePath("appearance"),
     ),
     ...namedSlotItems(

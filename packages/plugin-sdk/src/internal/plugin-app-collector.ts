@@ -1,5 +1,6 @@
 import type {
   ComposerCustomization,
+  ExperimentalAppOverlayRegistration,
   PluginAppDefinition,
   PluginContentScriptRegistration,
   PluginDiffRendererRegistration,
@@ -14,6 +15,7 @@ import type {
   PluginProviderIconRegistration,
   PluginSettingsSectionRegistration,
   PluginSidebarFooterActionRegistration,
+  ExperimentalSidebarNavigationRegistration,
   PluginSourceCodeRendererRegistration,
   PluginThreadHeaderActionRegistration,
   PluginThreadListRegistration,
@@ -85,12 +87,14 @@ function rejectStaleNavPanelKeys(kind: string, registration: object): void {
 export interface CollectedPluginAppRegistrations {
   homepageSections: PluginHomepageSectionRegistration[];
   settingsSections: PluginSettingsSectionRegistration[];
+  appOverlays: ExperimentalAppOverlayRegistration[];
   navPanels: PluginNavPanelRegistration[];
   threadPanelActions: PluginThreadPanelActionRegistration[];
   newThreadPanelActions: PluginNewThreadPanelActionRegistration[];
   composerCustomizations: ComposerCustomization[];
   pendingInteractions: PluginPendingInteractionRegistration[];
   sidebarFooterActions: PluginSidebarFooterActionRegistration[];
+  experimentalSidebarNavigations: ExperimentalSidebarNavigationRegistration[];
   threadLists: PluginThreadListRegistration[];
   threadHeaderActions: PluginThreadHeaderActionRegistration[];
   fileOpeners: PluginFileOpenerRegistration[];
@@ -118,12 +122,14 @@ export function collectPluginAppRegistrations(
   const collected: CollectedPluginAppRegistrations = {
     homepageSections: [],
     settingsSections: [],
+    appOverlays: [],
     navPanels: [],
     threadPanelActions: [],
     newThreadPanelActions: [],
     composerCustomizations: [],
     pendingInteractions: [],
     sidebarFooterActions: [],
+    experimentalSidebarNavigations: [],
     threadLists: [],
     threadHeaderActions: [],
     fileOpeners: [],
@@ -139,12 +145,14 @@ export function collectPluginAppRegistrations(
   const seenIds = {
     homepageSection: new Set<string>(),
     settingsSection: new Set<string>(),
+    appOverlay: new Set<string>(),
     navPanel: new Set<string>(),
     threadPanelAction: new Set<string>(),
     newThreadPanelAction: new Set<string>(),
     composerCustomization: new Set<string>(),
     pendingInteraction: new Set<string>(),
     sidebarFooterAction: new Set<string>(),
+    sidebarNavigation: new Set<string>(),
     threadList: new Set<string>(),
     threadHeaderAction: new Set<string>(),
     fileOpener: new Set<string>(),
@@ -184,6 +192,15 @@ export function collectPluginAppRegistrations(
           id,
           ...(title !== undefined ? { title } : {}),
           ...(description !== undefined ? { description } : {}),
+          component: requireComponent(kind, registration.component),
+        });
+      },
+      experimental_appOverlay(registration) {
+        const kind = "slots.experimental_appOverlay";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.appOverlay, id);
+        collected.appOverlays.push({
+          id,
           component: requireComponent(kind, registration.component),
         });
       },
@@ -383,6 +400,22 @@ export function collectPluginAppRegistrations(
           title: requireNonEmptyString(kind, "title", registration.title),
           icon: requireNonEmptyString(kind, "icon", registration.icon),
           run: registration.run,
+        });
+      },
+      experimental_sidebarNavigation(registration) {
+        const kind = "slots.experimental_sidebarNavigation";
+        const id = requireSlotId(kind, registration?.id);
+        requireUniqueId(kind, seenIds.sidebarNavigation, id);
+        const description = requireOptionalString(
+          kind,
+          "description",
+          registration.description,
+        );
+        collected.experimentalSidebarNavigations.push({
+          id,
+          title: requireNonEmptyString(kind, "title", registration.title),
+          ...(description !== undefined ? { description } : {}),
+          component: requireComponent(kind, registration.component),
         });
       },
       experimental_threadList(registration) {

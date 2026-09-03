@@ -94,8 +94,9 @@ you need a live change.
 `BB_LOG_LEVEL` is the startup-only `bb-app config` key. The complete current
 set of startup-only server or launcher env entries is:
 
-- `BB_APP_SURFACE`, `BB_APP_URL`, `BB_DATA_DIR`, and `BB_DEV_APP_PORT`
-- `BB_EXTERNAL_URL`, `BB_HOST_DAEMON_PORT`, `BB_INFERENCE`,
+- `BB_APP_SURFACE`, `BB_APP_URL`, `BB_DATA_DIR`, `BB_DEV_APP_PORT`, and
+  `BB_EXTERNAL_URL`
+- `BB_HOST_DAEMON_PORT`, `BB_INFERENCE`,
   `BB_INFERENCE_FALLBACK`, and `BB_INHERITED_SKILLS_ROOTS`
 - `BB_LOG_LEVEL`, `BB_MANAGED_DEV_BUILTIN_PLUGIN_HOT_RELOAD`,
   `BB_MARKETPLACE_URL`, `BB_POSTHOG_API_KEY`, and `BB_TELEMETRY`
@@ -139,7 +140,7 @@ signal it, so a stale file left by a crash cannot stop an unrelated process.
 | `BB_INFERENCE`          | `bb-app config`                                    | Optional                | Primary server-side helper model in `<service>/<model>` format, where `<service>` is an AI service a loaded plugin registers (`bb settings ai-services` lists them; `codex` comes with the codex plugin and uses the codex CLI's credentials with no reasoning) or a pi-ai provider the server calls directly with its API key. Defaults to `codex/gpt-5.6-luna`.                                     |
 | `BB_INFERENCE_FALLBACK` | `bb-app config`                                    | Optional                | Helper model used after a transient primary timeout, rate limit, or service-unavailable failure. Defaults to `codex/gpt-5.4-mini`.                                                                                                                                                                                                                                                                    |
 | `BB_TRANSCRIPTION`      | `bb-app config`                                    | Optional                | Voice transcription model in `<service>/<model>` format: a plugin-registered AI service (`codex` with the codex plugin; audio up to 5MB) or `openai/<model>` with `OPENAI_API_KEY`. Defaults to `codex/gpt-transcribe`.                                                                                                                                                                               |
-| `BB_MARKETPLACE_URL`    | `bb-app env`, or environment                       | Startup-only testing    | Manifest URL of the reserved `bb-community` plugin marketplace, which lists as BB Community. Defaults to `https://getbb.app/marketplace/v1/marketplace.json`; point it at a local file server to test catalog refreshes. It sets only the reserved `bb-community` marketplace; other marketplaces are added at runtime with `bb marketplace add`. A full launcher or desktop app restart is required. |
+| `BB_MARKETPLACE_URL`    | `bb-app env`, or environment                       | Startup-only testing    | Manifest URL of the reserved `bb-community` plugin marketplace. It defaults to `https://getbb.app/marketplace/v2/marketplace.json`. If the default v2 request returns 404, the server requests v1. Set another URL to test catalog refreshes. The server requests that URL without fallback. It changes only `bb-community`. Add other marketplaces with `bb marketplace add`. Restart the app after a change.                         |
 | `BB_SERVER_URL`         | `bb-app config`                                    | Remote CLI/host use     | Server URL for standalone `bb` CLI and `host-daemon` commands on the current machine. The CLI defaults to `http://127.0.0.1:38886` when unset.                                                                                                                                                                                                                                                        |
 | `BB_SERVER_BIND_HOST`   | `bb-app env`, environment, or `--server-bind-host` | Startup-only            | Server listener host. Defaults to `127.0.0.1`; accepts only `127.0.0.1` or `0.0.0.0`. A full launcher or desktop app restart is required; until then, a previous `0.0.0.0` listener remains exposed. This is not a `bb-app config` key.                                                                                                                                                               |
 | `BB_SERVER_PORT`        | `bb-app env`, environment, or `--server-port`      | Startup-only            | HTTP listener port. Defaults to `38886`. A full launcher or desktop app restart is required after a persistent set or unset.                                                                                                                                                                                                                                                                          |
@@ -164,6 +165,11 @@ selected browser `MediaDevices` device id in localStorage as
 `bb.voiceInput.audioInputDeviceId`; it does not change `bb-app config` or the
 server-side transcription model.
 
+The built-in Push notifications plugin uses `expoPushUrl` for its relay URL.
+The default is `https://exp.host/--/api/v2/push/send`. Change it with
+`bb plugin config push-notifications set expoPushUrl <url>`. The plugin reads
+the value when it sends a message.
+
 The builtin Keep Awake plugin has one autosaving configuration page with an
 enable switch and an all-or-selected host picker. On selected macOS hosts it
 runs `/usr/bin/caffeinate -i -w <worker-pid>` while enabled, preventing system
@@ -179,6 +185,18 @@ bb keep-awake hosts all
 bb keep-awake hosts <host-id>...
 ```
 
+The builtin Concurrency limit plugin has an autosaving page under Extensions
+→ Plugins. Its overall limit is unlimited by default. Each host defaults to
+Auto: one thread per available processor. A blank host field restores
+Auto, and 0 pauses new work for that scope. Configure it from an agent or
+terminal with:
+
+```sh
+bb concurrency-limit status [--json]
+bb concurrency-limit global [unlimited|<limit>] [--json]
+bb concurrency-limit host <host-id> [auto|<limit>] [--json]
+```
+
 The "Show unhandled provider events" toggle in Settings → General exposes raw
 provider events that bb does not yet understand. It defaults to off in packaged
 builds because these diagnostic payloads are noisy. Development builds continue
@@ -189,9 +207,11 @@ agent or terminal with
 The "Default thread followup behavior" picker in Settings → General changes the
 active-thread composer shortcuts when no typeahead suggestion is active. A
 queued message waits and then runs when the agent stops. A steer message goes
-to the agent during the current run. The picker defaults to "Queue": Enter
-queues and Command+Enter steers. "Steer" swaps them: Enter steers and
-Command+Enter queues. Set it with
+to the agent during the current run. The picker defaults to "Steer" for a new
+install: Enter steers and Command+Enter queues. "Queue" swaps them: Enter
+queues and Command+Enter steers. An earlier install with saved settings or work
+keeps "Queue" because a one-time migration stamps the old default onto it. Set
+it with
 `bb settings general steerActiveThreadOnEnter <true|false>`, where `true` is
 "Steer".
 
@@ -207,6 +227,17 @@ and falls back to the provider default; the next send records that default, so
 select the custom model again after you turn streamer mode off. Set it with
 `bb settings general streamerMode <true|false>`.
 
+The "Worktree branch prefix" field in Settings → General sets the text bb puts
+in front of every branch name it creates for a managed worktree or a new
+checkout branch. It defaults to `bb/`, which produces
+`bb/fix-login-flow-thr_ab12cd34ef`. Change it to `sawyer/` to group your branches
+under your own namespace, or clear the field to create
+`fix-login-flow-thr_ab12cd34ef` with no prefix. bb rejects a prefix that cannot
+start a valid git branch name, such as one with a space or a leading `-`, and
+the prefix is at most 64 characters. The prefix applies to branches bb creates
+after you change it; it does not rename an existing branch or worktree. Set it
+with `bb settings general managedBranchPrefix <prefix>`.
+
 Settings → Providers lists every registered agent provider in picker order.
 Move a provider up or down to change the order and choose the default for new
 threads. Both are persisted preferences: `providerOrder` is the list of ids
@@ -219,9 +250,20 @@ provider new threads use when neither the caller nor the project chose one
 
 Each provider's own options live on its plugin: Codex memory and native
 subagents under the Codex provider plugin, Claude Code memory, native
-subagents and the Workflow tool under the Claude Code provider plugin. Read
-and set them like any plugin setting, for example
-`bb plugin config provider-claude-code set workflowsDisabled true`.
+subagents, the Workflow tool, and opt-in idle process release under the Claude
+Code provider plugin. Idle process release closes a quiescent Claude process
+after 30 seconds while keeping its bb thread resumable; it defaults off during
+its bake period and applies on the next start, resume, or turn command. Read and
+set provider options like any plugin setting, for example
+`bb plugin config provider-claude-code set idleQueryReleaseEnabled true`.
+
+Claude Code starts without its Claude in Chrome browser tools when bb runs it,
+even when the interactive `claude` CLI has Chrome enabled by default. Turn the
+tools on for bb threads with
+`bb plugin config provider-claude-code set chromeEnabled true`. bb then starts
+Claude Code with `--chrome`. The host needs the Claude in Chrome extension and a
+claude.ai login; API-key sessions keep Chrome off. A change restarts the thread's
+Claude process before its next turn and keeps the conversation.
 
 Outside an open typeahead menu, Shift+Enter inserts a newline. On
 coarse-pointer touch devices, the software-keyboard Return path inserts a
@@ -532,10 +574,14 @@ machine. The current value is readable through the host API and
 
 Machine installation and daemon protocol repair use the owning server as the
 distribution source: `/install/version` reports the server package/protocol and
-`/install/bb-app.tgz` serves its exact installable package. The installer falls
-back to the npm registry only when the package route returns 404. It installs
-the package under the machine's bb data directory rather than npm's system-wide
-prefix, so enrollment needs neither `sudo` nor a global npm configuration.
+`/install/bb-app.tgz` serves its exact host-only package with a SHA-256 digest
+and strong ETag. That package contains the daemon, its workers and native
+dependencies, and the bundled `bb` CLI; it omits the server and web app. The
+installer verifies the digest and skips the download and npm install when its
+recorded installed digest receives `304 Not Modified`. It falls back to the npm
+registry only when the package route returns 404. It installs the package under
+the machine's bb data directory rather than npm's system-wide prefix, so
+enrollment needs neither `sudo` nor a global npm configuration.
 Installed services enable `--auto-update`; remove that flag from the launchd
 plist or systemd user unit and reload the service to opt out. Updates only move
 to a newer server protocol, retry failures with a persisted exponential backoff
@@ -782,13 +828,23 @@ the plugin so it can be surfaced as needing attention.
 
 ### Provider retry plugin
 
-The builtin Provider retry plugin is enabled on fresh installations. It
-automatically waits for structured Codex and Claude Code subscription-window
-resets when the failed turn was accepted, the provider has stopped its own
-retries, and the original execution settings remain available. Prior output or
-tool activity does not block recovery. Recovery sends one agent-only
-`Please continue.` turn on the existing provider conversation. Disable it
-under Extensions → Plugins or with `bb plugin disable provider-retry`.
+The builtin Provider retry plugin is enabled on fresh installations. When a turn
+fails on a structured Codex or Claude Code subscription-window limit that
+reports a reset time, it queues that turn after the window opens. It also
+retries structured provider overloads with exponential backoff and jitter.
+Prior output or tool activity does not block recovery. If the provider accepted
+the failed input, core sends an agent-only continuation; if it rejected the
+input before starting, core re-sends the original message as agent-only. Disable
+the plugin under Extensions → Plugins or with
+`bb plugin disable provider-retry`.
+
+It never blocks a send. A remembered rate limit is a stale picture of the
+provider's state, so the plugin never refuses a dispatch on one — if you raised
+your plan or the window opened early, the next send simply works. The cost is
+that several threads on one exhausted subscription each fail once before each
+schedules its own retry; the retries are jittered so they do not all wake in the
+same instant. Overload retries start after 5–10 seconds, double their delay
+after each failure, and share the five-total-attempt cap with limit retries.
 The `maximumWait` setting defaults to `6 hours`; resets beyond that horizon are
 not scheduled. Choose `24 hours` or `No limit` under the plugin settings, or
 configure it from the CLI:
@@ -797,22 +853,21 @@ configure it from the CLI:
 bb plugin config provider-retry set maximumWait "24 hours"
 ```
 
-Pending waits are coordinated by machine/provider subscription and live only
-in the current server/plugin process. Restarting bb, reloading the plugin, or
-disabling it clears the timers without changing the original failed thread. A
-later 429 without a fresh provider rate-limit update can still inherit the last
-blocked window during that process.
-Inspect them with `bb provider-retry status`, or cancel one from its composer
-banner or with `bb provider-retry cancel <thread-id>`. Run
-`bb provider-retry retry <thread-id>` for a manual recovery, including credit
-or spend-control limits that do not report a reset time.
+A pending retry is a queued row on the thread, not an in-process timer, so it
+survives a restart and shows its reason and time on the queue card above the
+composer — the one surface that narrates the wait. Inspect them with
+`bb provider-retry status`, cancel one on that card or with
+`bb provider-retry cancel <thread-id>`, or run
+`bb provider-retry retry <thread-id>` to send it now instead of waiting. Limits
+that do not reset on a clock — credit and spend-control exhaustion — schedule
+nothing, because waiting does not fix them.
 
 ### Workflows plugin
 
 The builtin Workflows plugin is disabled on fresh installations. Enable it
 under Extensions → Plugins or with `bb plugin enable workflows`. Its six
-settings accept base-10 integer strings through Extensions → Plugins or
-`bb plugin config workflows set <key> <value>`:
+settings are bounded integers, edited with numeric inputs under Extensions →
+Plugins or with `bb plugin config workflows set <key> <value>`:
 
 | Key                    |    Default |       Allowed range | Behavior                                               |
 | ---------------------- | ---------: | ------------------: | ------------------------------------------------------ |

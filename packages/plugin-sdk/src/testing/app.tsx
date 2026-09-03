@@ -17,6 +17,7 @@ import {
   type BbNavigate,
   type ComposerCustomization,
   type ComposerView,
+  type ExperimentalAppOverlayRegistration,
   type PluginAppDefinition,
   type PluginAppSetup,
   type PluginCodeThemeState,
@@ -43,6 +44,7 @@ import {
   type PluginSettingsSectionRegistration,
   type PluginSettingsState,
   type PluginSidebarFooterActionRegistration,
+  type ExperimentalSidebarNavigationRegistration,
   type PluginSidebarPullRequest,
   type PluginSidebarThreadActions,
   type PluginSidebarThreadPullRequestState,
@@ -159,6 +161,12 @@ export interface ComposerLog {
   quotes: string[];
   mentions: PluginComposerMention[];
   focusCount: number;
+  /**
+   * Every `experimental_submit` the plugin ran, in order. The harness composer
+   * has no submit pipeline of its own, so it records the options and clears the
+   * draft — enough to assert what a picker scheduled and that it tidied up.
+   */
+  submits: Array<{ sendAt: number }>;
 }
 
 interface TestComposerStore {
@@ -888,12 +896,14 @@ export function installTestPluginRuntime(): void {
 export interface CapturedPluginApp {
   homepageSections: PluginHomepageSectionRegistration[];
   settingsSections: PluginSettingsSectionRegistration[];
+  appOverlays: ExperimentalAppOverlayRegistration[];
   navPanels: PluginNavPanelRegistration[];
   threadPanelActions: PluginThreadPanelActionRegistration[];
   newThreadPanelActions: PluginNewThreadPanelActionRegistration[];
   composerCustomizations: ComposerCustomization[];
   pendingInteractions: PluginPendingInteractionRegistration[];
   sidebarFooterActions: PluginSidebarFooterActionRegistration[];
+  experimentalSidebarNavigations: ExperimentalSidebarNavigationRegistration[];
   threadLists: PluginThreadListRegistration[];
   threadHeaderActions: PluginThreadHeaderActionRegistration[];
   fileOpeners: PluginFileOpenerRegistration[];
@@ -1095,7 +1105,7 @@ export interface RenderSlotOptions<
    */
   rpc?: PluginRpcTestHandlers<Contract>;
   /** `useSettings()` values; omitted → `{ values: undefined, isLoading: false }`. */
-  settings?: Record<string, string | boolean>;
+  settings?: Record<string, string | number | boolean>;
   /** `useBbContext()` selection; both default to null. */
   context?: { projectId?: string | null; threadId?: string | null };
   /** Initial `useRealtimeConnectionState()` value; defaults to `connected`. */
@@ -1492,6 +1502,7 @@ export function renderSlot<
     quotes: [],
     mentions: [],
     focusCount: 0,
+    submits: [],
   };
   const composerOwnership = { active: true };
   const composer: TestComposerStore = {
@@ -1547,6 +1558,19 @@ export function renderSlot<
       },
       focus() {
         composerLog.focusCount += 1;
+      },
+      async experimental_submit({ sendAt }) {
+        if (!composerOwnership.active) {
+          throw new Error("This composer is no longer active.");
+        }
+        if (composerText.trim() === "") {
+          throw new Error("Type a message before scheduling it.");
+        }
+        if (!Number.isFinite(sendAt) || sendAt <= Date.now()) {
+          throw new Error("Pick a time in the future.");
+        }
+        composerLog.submits.push({ sendAt });
+        commitComposerText("");
       },
     },
   };

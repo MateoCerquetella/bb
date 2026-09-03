@@ -72,6 +72,18 @@ Slot props contracts (versioned, additive-only):
   for data. Enabled plugins appear in the
   settings sidebar when they declare settings descriptors OR register
   settings sections.
+- `experimental_appOverlay` → `{}` (deliberately no props). An additive,
+  app-wide React owner for floating plugin UI. Registration:
+  `{ id, component }`. BB mounts every registration once per app window
+  through `PluginSlotMount`, outside route-owned layout regions. The component
+  can therefore call app-level SDK hooks, including the sidebar thread data and
+  action hooks, and keep their React contexts through a portal. Hooks whose
+  contract requires a particular surface, including `useComposer` and
+  `useComposerView`, remain limited to that surface. BB supplies no chrome,
+  positioning, visibility, focus, or responsive behavior; render fixed UI
+  directly or use the vendored responsive overlay primitives. A crash hides
+  only that overlay. Use a content script instead for DOM enhancement that does
+  not need React context. Experimental: see `docs/api_to_audit.md`.
 - `navPanel` → `{ subPath: string }` — owns the whole route at
   `/plugins/<pluginId>/<path>/*` and gets its own sidebar entry. `subPath`
   is the route remainder after the panel root (`""` at the root), so deep
@@ -212,6 +224,13 @@ target? })`. Inside the fixed-tab component,
   (sync or async) are contained and logged,
   never breaking the sidebar. `title` is the tooltip + accessible label;
   `icon` is a BB icon-name hint (unknown names fall back to a generic bolt).
+- `experimental_sidebarNavigation` → replaces the bounded navigation controls
+  above the thread list. Registration:
+  `{ id, title, description?, component }`. The component receives semantic
+  host items, the active item id, the compact-viewport state,
+  `experimental_activate`, and `experimental_Original`. Search activation opens
+  the quick palette. No inline search field or query state exists. BB keeps the
+  drawer, thread list, footer, resize handle, and shortcut ownership.
 - `fileOpener` → `{ path: string, source, Original }` — register as a viewer/editor
   for file extensions: `{ id, title, extensions: ["md"], component }`.
   Matching files use the first applicable opener in deterministic slot order

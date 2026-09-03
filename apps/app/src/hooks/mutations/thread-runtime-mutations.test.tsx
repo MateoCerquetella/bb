@@ -4,6 +4,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { ThreadQueuedMessage } from "@bb/domain";
 import type {
   ExistingThreadExecutionInputSources,
+  ThreadResponse,
   ThreadTimelineResponse,
 } from "@bb/server-contract";
 import { createDeferredPromise } from "@bb/test-helpers";
@@ -12,16 +13,19 @@ import { BbHttpError, sdk } from "@/lib/sdk";
 import { wsManager } from "@/lib/ws";
 import { createQueryClientTestHarness } from "@/test/queryClientTestHarness";
 import {
+  threadQueryKey,
   threadQueuedMessagesQueryKey,
   threadTimelineQueryKey,
 } from "../queries/query-keys";
 import {
   useCancelThreadPlan,
   useClearThreadGoal,
+  useCreateThread,
   useCreateThreadQueuedMessage,
   useDeleteThreadQueuedMessage,
   useEditThreadMessage,
   useSetThreadQueuedMessageGroupBoundary,
+  useSendThreadQueuedMessage,
   useSendThreadMessage,
 } from "./thread-runtime-mutations";
 
@@ -37,9 +41,12 @@ vi.mock("@/lib/sdk", async (importOriginal) => {
         queuedMessages: {
           create: vi.fn(),
           delete: vi.fn(),
+          list: vi.fn(),
+          send: vi.fn(),
           setGroupBoundary: vi.fn(),
         },
         send: vi.fn(),
+        spawn: vi.fn(),
       },
     },
   };
@@ -56,15 +63,56 @@ function makeQueuedMessage(
 ): ThreadQueuedMessage {
   return {
     id: "qmsg-1",
+    threadId: "thread-1",
     content: [{ type: "text", text: "Queued message", mentions: [] }],
     model: "codex-test",
     reasoningLevel: "medium",
     permissionMode: "auto",
     serviceTier: "default",
     groupWithNext: false,
+    sendAt: null,
+    waitingOn: null,
+    failureReason: null,
+    payload: { kind: "inline" },
+    editable: true,
     createdAt: 1,
     updatedAt: 1,
     ...message,
+  };
+}
+
+function makeThreadResponse(
+  thread: Partial<ThreadResponse> = {},
+): ThreadResponse {
+  return {
+    id: "thread-1",
+    projectId: "project-1",
+    providerId: "codex",
+    createdAt: 1,
+    status: "pending",
+    updatedAt: 1,
+    lastReadAt: null,
+    latestAttentionAt: 1,
+    environmentId: null,
+    title: null,
+    titleFallback: null,
+    sectionId: null,
+    parentThreadId: null,
+    sourceThreadId: null,
+    originKind: null,
+    originPluginId: null,
+    visibility: "visible",
+    archivedAt: null,
+    pinnedAt: null,
+    deletedAt: null,
+    runtime: {
+      displayStatus: "pending",
+      hostReconnectGraceExpiresAt: null,
+    },
+    activeBackgroundAgentCount: 0,
+    canSpawnChild: false,
+    queuedMessageCount: 1,
+    ...thread,
   };
 }
 
@@ -121,10 +169,18 @@ beforeEach(() => {
     ok: true,
     delivery: "sent",
   });
+  vi.mocked(sdk.threads.spawn).mockResolvedValue(makeThreadResponse());
   vi.mocked(sdk.threads.queuedMessages.create).mockResolvedValue(
     makeQueuedMessage(),
   );
   vi.mocked(sdk.threads.queuedMessages.delete).mockResolvedValue({ ok: true });
+  vi.mocked(sdk.threads.queuedMessages.list).mockResolvedValue([
+    makeQueuedMessage(),
+  ]);
+  vi.mocked(sdk.threads.queuedMessages.send).mockResolvedValue({
+    ok: true,
+    delivery: "sent",
+  });
   vi.mocked(sdk.threads.queuedMessages.setGroupBoundary).mockResolvedValue([]);
 });
 
@@ -134,6 +190,28 @@ afterEach(() => {
 });
 
 describe("thread runtime mutations", () => {
+  it("prefetches queued message detail as soon as a queued thread is created", async () => {
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    const { result } = renderHook(() => useCreateThread(), { wrapper });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        projectId: "project-1",
+        environment: { type: "project-default" },
+        input: [{ type: "text", text: "Queued work", mentions: [] }],
+      });
+    });
+
+    await waitFor(() =>
+      expect(sdk.threads.queuedMessages.list).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "thread-1" }),
+      ),
+    );
+    expect(
+      queryClient.getQueryData(threadQueuedMessagesQueryKey("thread-1")),
+    ).toEqual([makeQueuedMessage()]);
+  });
+
   it("keeps the existing timeline while an edit is pending and lets connected realtime own success", async () => {
     const { queryClient, wrapper } = createQueryClientTestHarness();
     const invalidateQueries = vi.spyOn(queryClient, "invalidateQueries");
@@ -291,10 +369,13 @@ describe("thread runtime mutations", () => {
     );
   });
 
-  it("returns the server's delivery so a held message is not treated as a started turn", async () => {
+  it("returns the server's delivery so a queued message is not treated as a started turn", async () => {
     vi.mocked(sdk.threads.send).mockResolvedValue({
       ok: true,
-      delivery: "deferred",
+      delivery: "queued",
+      queuedMessage: makeQueuedMessage({
+        waitingOn: { kind: "interaction" },
+      }),
     });
     const { wrapper } = createQueryClientTestHarness();
     const { result } = renderHook(() => useSendThreadMessage(), { wrapper });
@@ -311,7 +392,66 @@ describe("thread runtime mutations", () => {
       });
     });
 
-    expect(sendResult).toEqual({ ok: true, delivery: "deferred" });
+    expect(sendResult).toEqual({
+      ok: true,
+      delivery: "queued",
+      queuedMessage: makeQueuedMessage({
+        waitingOn: { kind: "interaction" },
+      }),
+    });
+  });
+
+  it("restores a queued-row steer when provisioning keeps it queued", async () => {
+    const queuedMessage = makeQueuedMessage({
+      waitingOn: { kind: "thread-busy" },
+    });
+    const provisioningQueuedMessage = makeQueuedMessage({
+      waitingOn: { kind: "provisioning" },
+      updatedAt: 2,
+    });
+    vi.mocked(sdk.threads.queuedMessages.send).mockResolvedValue({
+      ok: true,
+      delivery: "queued",
+      queuedMessage: provisioningQueuedMessage,
+    });
+    const { queryClient, wrapper } = createQueryClientTestHarness();
+    queryClient.setQueryData(threadQueuedMessagesQueryKey("thread-1"), [
+      queuedMessage,
+    ]);
+    queryClient.setQueryData(
+      threadQueryKey("thread-1"),
+      makeThreadResponse({
+        status: "starting",
+        runtime: {
+          displayStatus: "provisioning",
+          hostReconnectGraceExpiresAt: null,
+        },
+      }),
+    );
+    queryClient.setQueryData(
+      threadTimelineQueryKey("thread-1"),
+      makeBannerTimeline(),
+    );
+    const { result } = renderHook(() => useSendThreadQueuedMessage(), {
+      wrapper,
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({
+        id: "thread-1",
+        mode: "steer",
+        queuedMessageId: queuedMessage.id,
+      });
+    });
+
+    expect(
+      queryClient.getQueryData(threadQueuedMessagesQueryKey("thread-1")),
+    ).toEqual([provisioningQueuedMessage]);
+    expect(
+      queryClient.getQueryData<ThreadTimelineResponse>(
+        threadTimelineQueryKey("thread-1"),
+      )?.rows,
+    ).toEqual([]);
   });
 
   it("forwards execution input sources and sender thread when queueing a message", async () => {

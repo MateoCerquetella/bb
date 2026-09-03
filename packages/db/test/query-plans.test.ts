@@ -29,14 +29,21 @@ import {
 import {
   COMPLETED_EVENT_OUTPUT_TRUNCATION_THRESHOLD_CHARS,
   pruneClosedSessions,
+  pruneDestroyedEnvironments,
   truncateCompletedEventItemOutputs,
 } from "../src/data/sweeps.js";
 import { getDatabaseMaintenanceActivity } from "../src/data/maintenance.js";
 import { openSession } from "../src/data/sessions.js";
+import {
+  listDueScheduledQueuedThreadMessages,
+  listQueuedThreadMessagesByWaitHolder,
+} from "../src/data/queued-thread-messages.js";
 import { upsertHost } from "../src/data/hosts.js";
 import { createProject } from "../src/data/projects.js";
+import { createEnvironment } from "../src/data/environments.js";
 import {
   createThread,
+  listRunningThreads,
   listThreadsWithPendingInteractionState,
 } from "../src/data/threads.js";
 
@@ -74,6 +81,7 @@ interface TestDb {
   db: DbConnection;
   host: IdentifiedRow;
   logger: CapturingSlowQueryLogger;
+  project: IdentifiedRow;
   thread: IdentifiedRow;
 }
 
@@ -127,7 +135,7 @@ function setup(): TestDb {
     providerId: "codex",
   });
   logger.clear();
-  return { db, host, logger, thread };
+  return { db, host, logger, project, thread };
 }
 
 function closeSessionAt(args: CloseSessionAtArgs): void {
@@ -219,6 +227,70 @@ function assertEmittedQueryPlanUsesIndex(
 }
 
 describe("slow query index plans", () => {
+  // Both queue indexes are PARTIAL. A partial index is only usable when the
+  // query repeats its WHERE clause, so a refactor that drops one liveness
+  // predicate from the query — or adds one to the index — silently degrades
+  // the sweep to a full table scan. Nothing else would notice.
+  it("finds due scheduled queued messages through the partial due index", () => {
+    const { db } = setup();
+
+    const captured = captureStatements(db, () => {
+      expect(listDueScheduledQueuedThreadMessages(db, 1_000)).toEqual([]);
+    });
+    expect(captured).toHaveLength(1);
+    const details = queryPlanDetails({
+      db,
+      params: captured[0]!.params,
+      sql: captured[0]!.sql,
+    });
+    expect(details).toMatch(/USING INDEX queued_thread_messages_due_idx/u);
+    expect(details).not.toMatch(/SCAN queued_thread_messages/u);
+
+    db.$client.close();
+  });
+
+  it("finds a plugin's held queued messages through the partial holder index", () => {
+    const { db } = setup();
+
+    const captured = captureStatements(db, () => {
+      expect(
+        listQueuedThreadMessagesByWaitHolder(db, "plugin:limiter"),
+      ).toEqual([]);
+    });
+    expect(captured).toHaveLength(1);
+    const details = queryPlanDetails({
+      db,
+      params: captured[0]!.params,
+      sql: captured[0]!.sql,
+    });
+    expect(details).toMatch(
+      /USING INDEX queued_thread_messages_wait_holder_idx/u,
+    );
+    expect(details).not.toMatch(/SCAN queued_thread_messages/u);
+
+    db.$client.close();
+  });
+
+  it("finds the occupying threads through the archived/status index", () => {
+    // A dispatch gate calls this on every admission decision, so a plan that
+    // degraded to a table scan would put one on every send in the server.
+    const { db } = setup();
+
+    const captured = captureStatements(db, () => {
+      listRunningThreads(db);
+    });
+    expect(captured).toHaveLength(1);
+    const details = queryPlanDetails({
+      db,
+      params: captured[0]!.params,
+      sql: captured[0]!.sql,
+    });
+    expect(details).toMatch(/USING INDEX threads_archived_status_idx/u);
+    expect(details).not.toMatch(/SCAN threads/u);
+
+    db.$client.close();
+  });
+
   it("uses the thread/type/sequence index for filtered event pages", () => {
     const { db, thread } = setup();
 
@@ -438,6 +510,7 @@ describe("slow query index plans", () => {
       "item/backgroundTask/completed",
       "backgroundTask",
       "toolCall",
+      "item/started",
     ]);
     const details = queryPlanDetails({
       db,
@@ -450,6 +523,9 @@ describe("slow query index plans", () => {
     expect(
       details.match(/USING INDEX events_thread_type_item_kind_sequence_idx/gu),
     ).toHaveLength(2);
+    expect(details).toMatch(
+      /USING INDEX events_item_lifecycle_thread_item_sequence_idx/u,
+    );
     expect(details).toMatch(
       /USING COVERING INDEX events_background_task_thread_type_item_sequence_idx/u,
     );
@@ -551,6 +627,66 @@ describe("slow query index plans", () => {
       indexName: "host_daemon_sessions_closed_prune_idx",
       params: ["closed", closedBefore, 100],
     });
+    db.$client.close();
+  });
+
+  it("uses the environment index for bounded event detaches", () => {
+    const { db, host, logger, project, thread } = setup();
+    const now = Date.now();
+    const environment = createEnvironment(db, noopNotifier, {
+      hostId: host.id,
+      managed: true,
+      projectId: project.id,
+      status: "destroyed",
+      workspaceProvisionType: "managed-worktree",
+    });
+    insertEvents(db, noopNotifier, [
+      {
+        data: JSON.stringify({ text: "environment prune query plan" }),
+        environmentId: environment.id,
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        scope: threadScope(),
+        sequence: 1,
+        threadId: thread.id,
+        type: "system/manager/user_message",
+      },
+    ]);
+    const updatedBefore = now - 5_000;
+    db.$client
+      .prepare("UPDATE environments SET updated_at = ? WHERE id = ?")
+      .run(now - 10_000, environment.id);
+    logger.clear();
+
+    expect(
+      pruneDestroyedEnvironments(db, noopNotifier, {
+        eventBatchSize: 50,
+        limit: 1,
+        updatedBefore,
+      }),
+    ).toEqual({ deleted: 0, detachedEvents: 1 });
+
+    const debugLog = findOnlyDebugLog({
+      logger,
+      predicate: (fields) =>
+        fields.operation === "run" &&
+        fields.sql.startsWith("UPDATE events SET environment_id = NULL"),
+    });
+    assertEmittedQueryPlanUsesIndex({
+      db,
+      debugLog,
+      indexName: "events_environment_idx",
+      params: [environment.id, 50],
+    });
+    expect(
+      queryPlanDetails({
+        db,
+        params: [environment.id, 50],
+        sql: debugLog.fields.sql,
+      }),
+    ).not.toContain("USE TEMP B-TREE");
+
     db.$client.close();
   });
 

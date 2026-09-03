@@ -38,6 +38,7 @@ import {
 import {
   getCachedSidebarNavigationThreads,
   getCachedThreadListPlaceholder,
+  findSidebarNavigationThreadPlaceholder,
 } from "../cache-owners/query-cache";
 import { useSidebarNavigationThreadSelection } from "./sidebar-navigation-query";
 import {
@@ -630,7 +631,8 @@ export function useThread(id: string, options?: QueryOptions) {
     placeholderData: (previousData, previousQuery) =>
       resolveThreadPlaceholder(previousData, previousQuery?.queryKey, id) ??
       liftThreadListPlaceholder(
-        getCachedThreadListPlaceholder(queryClient, id),
+        getCachedThreadListPlaceholder(queryClient, id) ??
+          findSidebarNavigationThreadPlaceholder(queryClient, id),
       ),
   });
 }
@@ -645,6 +647,7 @@ function liftThreadListPlaceholder(
     ...thread,
     activeBackgroundAgentCount: thread.activity.activeBackgroundAgentCount,
     canSpawnChild: false,
+    queuedMessageCount: 0,
   };
 }
 
@@ -748,9 +751,13 @@ export function useThreadPendingInteractions(
         signal,
       }),
     enabled,
-    refetchOnMount: options?.refetchOnMount ?? true,
+    refetchOnMount:
+      options?.refetchOnMount ??
+      ((query) => (query.getObserversCount() === 1 ? "always" : true)),
     ...REALTIME_OWNED_NO_FOCUS_QUERY_POLICY,
-    staleTime: options?.staleTime,
+    ...(options?.staleTime === undefined
+      ? {}
+      : { staleTime: options.staleTime }),
   });
 }
 
@@ -1023,4 +1030,11 @@ export function getLatestPendingInteraction(
       interaction.createdAt > latest.createdAt ? interaction : latest,
     firstInteraction,
   );
+}
+
+export function isPendingInteractionStateUnknown(
+  interactions: readonly PendingInteraction[] | undefined,
+  isFetching: boolean,
+): boolean {
+  return getLatestPendingInteraction(interactions) === null && isFetching;
 }

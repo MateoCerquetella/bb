@@ -17,6 +17,7 @@ import {
   DialogDescription,
   DialogTitle,
 } from "@bb/shared-ui/dialog";
+import { Popover, PopoverContent } from "@bb/shared-ui/popover";
 import {
   PersistentResponsiveDrawerShell,
   ResponsiveDrawerShell,
@@ -146,6 +147,35 @@ describe("ResponsiveDrawerShell", () => {
     );
     act(() => vi.advanceTimersByTime(120));
     expect(screen.getByRole("button", { name: "Project option" })).toBeTruthy();
+  });
+});
+
+describe("responsive Popover", () => {
+  it.each([
+    ["compact viewports", true, false, false],
+    ["coarse pointers", false, true, false],
+    ["fine-pointer desktop", false, false, true],
+  ])("applies search focus policy on %s", (_, compact, coarse, focused) => {
+    vi.useFakeTimers();
+    mockPointerCoarse(coarse);
+    const focusRef = { current: null as HTMLInputElement | null };
+    const content = (ref?: typeof focusRef) => (
+      <CompactViewportOverrideProvider isCompactViewport={compact}>
+        <Popover defaultOpen>
+          <PopoverContent autoFocusRef={ref}>
+            {ref ? <input ref={ref} aria-label="Search" /> : null}
+          </PopoverContent>
+        </Popover>
+      </CompactViewportOverrideProvider>
+    );
+
+    const view = render(content(focusRef));
+    act(() => vi.advanceTimersByTime(120));
+    expect(document.activeElement === focusRef.current).toBe(focused);
+    view.rerender(content());
+    view.rerender(content(focusRef));
+    act(() => vi.advanceTimersByTime(120));
+    expect(document.activeElement === focusRef.current).toBe(focused);
   });
 });
 
@@ -432,6 +462,54 @@ describe("PersistentResponsiveDrawerShell", () => {
     expect(document.activeElement).toBe(trigger);
     expect(onAfterCloseAutoFocus).toHaveBeenCalledOnce();
     expect(onAfterCloseAutoFocus).toHaveBeenCalledWith(trigger);
+  });
+
+  it("retries focus restoration after closing chrome becomes visible", () => {
+    mockPointerCoarse(true);
+    const onAfterCloseAutoFocus = vi.fn();
+    let frameCallback: FrameRequestCallback | undefined;
+    vi.spyOn(window, "requestAnimationFrame").mockImplementation((callback) => {
+      frameCallback = callback;
+      return 1;
+    });
+    vi.spyOn(window, "cancelAnimationFrame").mockImplementation(() => {});
+
+    function FocusDrawer() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open details
+          </button>
+          <PersistentResponsiveDrawerShell
+            open={open}
+            onOpenChange={setOpen}
+            onAfterCloseAutoFocus={onAfterCloseAutoFocus}
+            srLabel="Details"
+          >
+            <button type="button">Panel action</button>
+          </PersistentResponsiveDrawerShell>
+        </>
+      );
+    }
+
+    render(<FocusDrawer />);
+    const trigger = screen.getByRole("button", { name: "Open details" });
+    trigger.focus();
+    fireEvent.click(trigger);
+    const nativeFocus = trigger.focus.bind(trigger);
+    let restoreAttempts = 0;
+    vi.spyOn(trigger, "focus").mockImplementation((options) => {
+      restoreAttempts += 1;
+      if (restoreAttempts > 1) nativeFocus(options);
+    });
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(document.activeElement).not.toBe(trigger);
+    expect(onAfterCloseAutoFocus).not.toHaveBeenCalled();
+    act(() => frameCallback?.(0));
+    expect(document.activeElement).toBe(trigger);
+    expect(onAfterCloseAutoFocus).toHaveBeenCalledOnce();
   });
 
   it("keeps panel focus and uses the latest close callback after a parent rerender", () => {

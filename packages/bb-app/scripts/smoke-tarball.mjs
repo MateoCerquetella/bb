@@ -24,17 +24,20 @@ const HOST_PLUGIN_WORKER_TIMEOUT_MS = 60_000;
 // every builtin unable to resolve @get-bb/plugin-sdk at import time).
 const EXPECTED_RUNNING_BUILTIN_PLUGINS = [
   "automations",
+  "concurrency-limit",
   // Providers whose bridge ships as a plugin artifact: if the plugin does not
   // load, its provider disappears from the install entirely.
   "provider-acp",
   "provider-claude-code",
   "provider-codex",
+  "push-notifications",
   "connect",
   "custom-instructions",
   "inline-vis",
   "keep-awake",
   "pdf-preview",
   "provider-retry",
+  "scheduled-send",
   "secrets",
 ];
 // The smoke drives every bridge as a canonical Provider Bridge Protocol

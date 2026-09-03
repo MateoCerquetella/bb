@@ -1064,12 +1064,12 @@ async function handleTurnStart(
     return;
   }
   const { text, images } = extractInput(params.input);
-  if (!text) {
+  if (!text && images.length === 0) {
     sendError(id, BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS, "Missing input text");
     return;
   }
   try {
-    await startPiPrompt(threadSession, params.threadId, text, images);
+    await startPiPrompt(threadSession, params.threadId, text ?? "", images);
     recordAcceptedTurnInput(params);
     sendResult(id, { threadId: params.threadId });
   } catch (error) {
@@ -1091,7 +1091,7 @@ async function handleTurnSteer(
     return;
   }
   const { text, images } = extractInput(params.input);
-  if (!text) {
+  if (!text && images.length === 0) {
     sendError(id, BRIDGE_JSON_RPC_ERRORS.INVALID_PARAMS, "Missing input text");
     return;
   }
@@ -1101,7 +1101,7 @@ async function handleTurnSteer(
   }
   try {
     await threadSession.session.steer(
-      text,
+      text ?? "",
       images.length > 0 ? images : undefined,
     );
     sendThreadDeltas(params.threadId, [
@@ -1180,6 +1180,8 @@ function extractInput(input: TurnStartParams["input"]): ExtractedInput {
         const mimeType = typed.mimeType ?? mimeTypeFromExtension(typed.path);
         images.push({ type: "image", data, mimeType });
       } catch {}
+    } else if (typed.type === "localFile" && typeof typed.path === "string") {
+      chunks.push(`[Attached file: ${typed.path}]`);
     }
   }
   return { text: chunks.length > 0 ? chunks.join("\n") : undefined, images };

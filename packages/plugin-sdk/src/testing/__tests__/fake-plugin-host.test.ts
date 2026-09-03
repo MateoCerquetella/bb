@@ -14,6 +14,20 @@ import {
 } from "../../internal/host-policy.js";
 import { createFakePluginHost, makeThreadResponse } from "../index.js";
 
+describe("server", () => {
+  it("serves the configured public app URL and defaults to null", () => {
+    const configured = createFakePluginHost({
+      appUrl: "https://bb.example.test",
+    });
+    const unset = createFakePluginHost();
+
+    expect(configured.bb.server.experimental_appUrl).toBe(
+      "https://bb.example.test",
+    );
+    expect(unset.bb.server.experimental_appUrl).toBeNull();
+  });
+});
+
 describe("ui.requestInput", () => {
   it("settles a blocking request through the harness", async () => {
     const { bb, harness } = createFakePluginHost();
@@ -259,6 +273,12 @@ describe("settings", () => {
         default: "fast",
       },
       enabled: { type: "boolean", label: "Enabled", default: true },
+      retries: {
+        type: "number",
+        label: "Retries",
+        experimental_schema: z.number().int().min(0).max(5),
+        default: 3,
+      },
     });
   }
 
@@ -271,6 +291,7 @@ describe("settings", () => {
       token: "xoxb-1",
       mode: "fast",
       enabled: false,
+      retries: 3,
     });
   });
 
@@ -287,11 +308,11 @@ describe("settings", () => {
       "must be one of: fast, slow",
     );
 
-    await harness.setSettings({ token: "xoxb-2", mode: "slow" });
+    await harness.setSettings({ token: "xoxb-2", mode: "slow", retries: 5 });
     expect(changes).toHaveLength(1);
     expect(changes[0]).toEqual({
-      next: { token: "xoxb-2", mode: "slow", enabled: true },
-      prev: { token: undefined, mode: "fast", enabled: true },
+      next: { token: "xoxb-2", mode: "slow", enabled: true, retries: 5 },
+      prev: { token: undefined, mode: "fast", enabled: true, retries: 3 },
     });
 
     await harness.setSettings({ mode: "slow" });
@@ -300,6 +321,65 @@ describe("settings", () => {
     await harness.setSettings({ mode: null });
     expect(changes).toHaveLength(2);
     expect(await handle.get()).toMatchObject({ mode: "fast" });
+
+    await expect(harness.setSettings({ retries: "4" })).rejects.toThrow(
+      "expects a finite number",
+    );
+    await expect(harness.setSettings({ retries: 6 })).rejects.toThrow(
+      "Too big",
+    );
+    await expect(harness.setSettings({ retries: Number.NaN })).rejects.toThrow(
+      "expects a finite number",
+    );
+  });
+
+  it("validates strings and lets plugin server code persist its own settings", async () => {
+    const { bb, harness } = createFakePluginHost();
+    const handle = bb.settings.define({
+      notes: {
+        type: "string",
+        label: "Notes",
+        experimental_schema: z
+          .string()
+          .max(4, "Notes must be at most 4 characters"),
+        default: "",
+      },
+      payload: {
+        type: "string",
+        label: "Payload",
+        experimental_schema: z.string().superRefine((value, context) => {
+          if (value.length === 0) return;
+          try {
+            if (!Array.isArray(JSON.parse(value))) {
+              context.addIssue({
+                code: "custom",
+                message: "Payload must be a JSON array",
+              });
+            }
+          } catch {
+            context.addIssue({
+              code: "custom",
+              message: "Payload must be valid JSON",
+            });
+          }
+        }),
+        default: "",
+      },
+    });
+    const changes: string[] = [];
+    handle.onChange((next) => changes.push(next.notes));
+
+    await expect(handle.experimental_set({ notes: "test" })).resolves.toEqual({
+      notes: "test",
+      payload: "",
+    });
+    expect(changes).toEqual(["test"]);
+    await expect(harness.setSettings({ notes: "longer" })).rejects.toThrow(
+      "at most 4 characters",
+    );
+    await expect(harness.setSettings({ payload: "{}" })).rejects.toThrow(
+      "must be a JSON array",
+    );
   });
 
   it("rejects duplicate and invalid descriptors at define time", () => {
@@ -330,6 +410,49 @@ describe("settings", () => {
         notes: { type: "string", label: "Notes", experimental_multiline: true },
       }),
     ).not.toThrow();
+    expect(() =>
+      bb.settings.define({
+        invalidRetries: {
+          type: "number",
+          label: "Retries",
+          default: Number.POSITIVE_INFINITY,
+        },
+      }),
+    ).toThrow('invalid descriptor for setting "invalidRetries"');
+    expect(() =>
+      bb.settings.define({
+        payload: {
+          type: "string",
+          label: "Payload",
+          experimental_schema: z
+            .string()
+            .regex(/^\{\}$/u, "Payload must be a JSON object"),
+          default: "[]",
+        },
+      }),
+    ).toThrow(
+      'invalid default for setting "payload": Payload must be a JSON object',
+    );
+    expect(() =>
+      bb.settings.define({
+        normalized: {
+          type: "string",
+          label: "Normalized",
+          experimental_schema: z.string().transform((value) => value.trim()),
+          default: " padded ",
+        },
+      }),
+    ).toThrow('schema for setting "normalized" must not transform its value');
+    expect(() =>
+      bb.settings.define({
+        remote: {
+          type: "string",
+          label: "Remote",
+          experimental_schema: z.string().refine(async () => true),
+          default: "value",
+        },
+      }),
+    ).toThrow(/schema for setting "remote".*synchron/u);
   });
 });
 
@@ -422,6 +545,12 @@ describe("rpc", () => {
     expect(() => bb.rpc.register(listContract, { list: () => [] })).toThrow(
       'rpc method "list" is already registered',
     );
+    const dottedContract = defineRpcContract({
+      "items.list": { input: z.null(), output: z.array(z.string()) },
+    });
+    expect(() =>
+      bb.rpc.register(dottedContract, { "items.list": () => [] }),
+    ).not.toThrow();
     const badContract = defineRpcContract({
       "bad name": { input: z.null(), output: z.array(z.string()) },
     });

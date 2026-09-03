@@ -3,7 +3,11 @@
 import { useEffect, type ReactNode } from "react";
 import { Provider } from "jotai";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { PERSONAL_PROJECT_ID, type ThreadListEntry } from "@bb/domain";
+import {
+  defaultAppSettings,
+  PERSONAL_PROJECT_ID,
+  type ThreadListEntry,
+} from "@bb/domain";
 import {
   act,
   cleanup,
@@ -128,10 +132,13 @@ vi.mock("@/hooks/queries/host-queries", () => ({
 }));
 
 vi.mock("@/hooks/queries/system-queries", () => ({
+  useSystemProviders: () => ({ data: undefined }),
   useSystemProviderStates: () => ({ data: undefined, isPending: false }),
   useKnownProviderModelCatalogScope: () => undefined,
   useHostProviderCliStatus: () => ({ data: undefined }),
-  useSystemConfig: () => ({ data: { primaryHostId: "host_1" } }),
+  useSystemConfig: () => ({
+    data: { primaryHostId: "host_1", generalSettings: defaultAppSettings },
+  }),
   useSystemExecutionOptions: () => ({
     data: {
       providers: [
@@ -420,6 +427,40 @@ describe("PluginNewThreadComposer seeding", () => {
     await waitFor(() => {
       expect(latestPromptBoxProps().value).toBe("");
     });
+  });
+
+  it("marks a provider picked in an unseeded plugin composer as explicit", async () => {
+    const submitted: NewThreadRequest[] = [];
+    render(
+      <MemoryRouter>
+        <PluginNewThreadComposer
+          draftKey="picked-provider"
+          defaultProjectId="proj_1"
+          initialPrompt="hello"
+          onSubmit={(request) => {
+            submitted.push(request);
+          }}
+        />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() => {
+      expect(latestPromptBoxProps().disabled).toBe(false);
+    });
+    await act(async () => {
+      latestPromptBoxProps().execution.provider.onChange("claude-code");
+    });
+    await waitFor(() => {
+      expect(latestPromptBoxProps().execution.provider.selectedId).toBe(
+        "claude-code",
+      );
+      expect(latestPromptBoxProps().disabled).toBe(false);
+    });
+    await submit();
+
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]?.providerId).toBe("claude-code");
+    expect(submitted[0]?.executionInputSources.providerId).toBe("explicit");
   });
 
   it("binds plugin draft actions to the hosted composer instance", async () => {
@@ -728,6 +769,7 @@ describe("PluginNewThreadComposer seeding", () => {
         environmentHostId: "host_1",
         environmentName: "source",
         environmentBranchName: "feature/source",
+        queuedWork: "none",
         environmentWorkspaceDisplayKind: "managed-worktree",
       }),
     ];
@@ -843,6 +885,7 @@ describe("PluginNewThreadComposer seeding", () => {
         environmentHostId: "host_1",
         environmentName: "source",
         environmentBranchName: "feature/source",
+        queuedWork: "none",
         environmentWorkspaceDisplayKind: "managed-worktree",
       }),
     ];
