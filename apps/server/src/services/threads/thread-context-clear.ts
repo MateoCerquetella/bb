@@ -10,6 +10,7 @@ import type { LoggedPendingInteractionWorkSessionDeps } from "../../types.js";
 import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js";
 import { appendThreadEvent } from "./thread-events.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
+import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
 
 export async function clearThreadContext(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -64,8 +65,13 @@ export async function clearThreadContext(
         operationId: createEventId(),
         status: "completed",
         message:
-          "New prompts won’t include messages above. Thread history and workspace are unchanged.",
+          "Earlier chat is hidden from the active timeline. Durable history and workspace are unchanged.",
       },
     });
+    deps.hub.notifyThread(
+      releasedThread.id,
+      ["history-rewritten", "status-changed"],
+      buildThreadStatusChangeMetadata(deps, releasedThread),
+    );
   });
 }

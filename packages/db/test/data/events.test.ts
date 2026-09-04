@@ -22,6 +22,8 @@ import {
   getActiveStoredTurnId,
   getHighWaterMarks,
   getLastStoredProviderThreadId,
+  getLatestCompletedThreadContextClearSequence,
+  getLatestStoredConversationOutlineSequence,
   getLastStoredTurnRequestEvent,
   getLatestThreadOutputEventRow,
   getLatestThreadSequence,
@@ -1204,12 +1206,14 @@ describe("events", () => {
       listRecentStoredEventRows(db, {
         excludedTypes: ["system/error"],
         maxInlineOutputChars: null,
+        sequenceStart: 0,
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([2, 3]);
 
     expect(
       listContextWindowUsageRows(db, {
+        sequenceStart: 0,
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([2, 3]);
@@ -1268,6 +1272,7 @@ describe("events", () => {
 
     expect(
       listContextWindowUsageRows(db, {
+        sequenceStart: 0,
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([2, 5]);
@@ -1402,6 +1407,7 @@ describe("events", () => {
     expect(
       listTimelineSegmentAnchorsDescending(db, {
         limit: 8,
+        sequenceStart: 0,
         threadId: thread.id,
       }),
     ).toEqual([
@@ -1418,6 +1424,7 @@ describe("events", () => {
     expect(
       listTimelineSegmentAnchorsDescending(db, {
         limit: 3,
+        sequenceStart: 0,
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([11, 10, 9]);
@@ -1425,6 +1432,7 @@ describe("events", () => {
       listTimelineSegmentAnchorsDescending(db, {
         beforeSequence: 8,
         limit: 3,
+        sequenceStart: 0,
         threadId: thread.id,
       }),
     ).toEqual([
@@ -1593,6 +1601,7 @@ describe("events", () => {
     expect(
       listRecentStoredEventRows(db, {
         maxInlineOutputChars: null,
+        sequenceStart: 0,
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([1, 2, 6, 7]);
@@ -1628,6 +1637,7 @@ describe("events", () => {
       findTimelineWindowBudgetFloorSequence(db, {
         eventBudget: 2,
         excludedTypes: [],
+        sequenceStart: 0,
         threadId: thread.id,
       }),
     ).toBe(2);
@@ -1635,11 +1645,13 @@ describe("events", () => {
       findTimelineWindowBudgetFloorSequence(db, {
         eventBudget: 1,
         excludedTypes: [],
+        sequenceStart: 0,
         threadId: thread.id,
       }),
     ).toBe(6);
     expect(
       listStoredConversationOutlineEventRows(db, {
+        sequenceStart: 0,
         threadId: thread.id,
       }).map((row) => row.sequence),
     ).toEqual([1, 2, 6]);
@@ -1742,6 +1754,7 @@ describe("events", () => {
     ]);
 
     const rows = listStoredConversationOutlineEventRows(db, {
+      sequenceStart: 0,
       threadId: thread.id,
     });
 
@@ -2476,6 +2489,72 @@ describe("events", () => {
         threadId: thread.id,
       },
     ]);
+  });
+
+  it("uses only the latest completed clear as the visible epoch boundary", () => {
+    const { db, thread } = setup();
+    appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
+      providerThreadId: "provider_old",
+      type: "thread/identity",
+      data: { providerThreadId: "provider_old" },
+    });
+    const failedSequence = appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
+      type: "system/operation",
+      data: {
+        operation: THREAD_CONTEXT_CLEAR_OPERATION,
+        operationId: "failed_context_clear",
+        status: "failed",
+        message: "Clear failed",
+      },
+    });
+
+    expect(getLastStoredProviderThreadId(db, thread.id)).toBe("provider_old");
+    expect(
+      getLatestCompletedThreadContextClearSequence(db, {
+        threadId: thread.id,
+      }),
+    ).toBeNull();
+
+    const completedSequence = appendStoredThreadEvent(db, noopNotifier, {
+      threadId: thread.id,
+      scope: threadScope(),
+      type: "system/operation",
+      data: {
+        operation: THREAD_CONTEXT_CLEAR_OPERATION,
+        operationId: "completed_context_clear",
+        status: "completed",
+        message: "Context cleared",
+      },
+    });
+
+    expect(
+      getLatestCompletedThreadContextClearSequence(db, {
+        atOrBeforeSequence: failedSequence,
+        threadId: thread.id,
+      }),
+    ).toBeNull();
+    expect(
+      getLatestCompletedThreadContextClearSequence(db, {
+        threadId: thread.id,
+      }),
+    ).toBe(completedSequence);
+    expect(
+      getLatestStoredConversationOutlineSequence(db, {
+        threadId: thread.id,
+      }),
+    ).toBe(completedSequence);
+    expect(
+      listRecentStoredEventRows(db, {
+        maxInlineOutputChars: null,
+        sequenceStart: completedSequence,
+        threadId: thread.id,
+      }).map((row) => row.sequence),
+    ).toEqual([completedSequence]);
+    expect(listEvents(db, { threadId: thread.id })).toHaveLength(3);
   });
 
   it("ignores delegated child turn starts when reconstructing the active stored turn", () => {

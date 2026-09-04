@@ -244,8 +244,10 @@ Messaging:
 
   `thread compact` enqueues the same structured /compact turn used by the
   composer. Follow the thread timeline for the eventual compaction result.
-  `thread clear` keeps the BB thread, timeline, workspace, and sticky execution
-  settings. Its next prompt starts a fresh provider conversation.
+  `thread clear` keeps the BB thread, workspace, durable event history, and
+  sticky execution settings. Its active timeline starts at one visible
+  `Context cleared` boundary, and its next prompt starts a fresh provider
+  conversation in the same thread.
 
 Ownership:
 

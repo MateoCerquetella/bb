@@ -630,11 +630,10 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     },
   );
   const pendingInteractions = pendingInteractionsQuery.data ?? [];
-  const pendingInteractionsInitialLoading =
-    isPendingInteractionStateUnknown(
-      pendingInteractionsQuery.data,
-      pendingInteractionsQuery.isFetching,
-    );
+  const pendingInteractionsInitialLoading = isPendingInteractionStateUnknown(
+    pendingInteractionsQuery.data,
+    pendingInteractionsQuery.isFetching,
+  );
   const hasPendingInteraction =
     getLatestPendingInteraction(pendingInteractions) !== null;
   const { data: queuedMessagesForEditEligibility = [] } =
@@ -848,6 +847,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
     activeThinking,
     activeWorkflows,
     activeBackgroundCommands,
+    contextBoundarySeq,
     contextWindowUsage,
     goal,
     hasOlderTimelineRows,
@@ -2909,6 +2909,7 @@ function ThreadDetailViewInternal(props: ThreadRoutePathArgs) {
             timeline={{
               activeThinking,
               canSpawnChild: thread.canSpawnChild,
+              contextBoundarySeq,
               threadOriginKind,
               hasOlderTimelineRows,
               hostConnectionNotice,
