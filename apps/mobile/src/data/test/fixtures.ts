@@ -173,6 +173,7 @@ export function timelineResponse(
     },
     maxSeq: rows.reduce((max, row) => Math.max(max, row.sourceSeqEnd), 0),
     ...overrides,
+    contextBoundarySeq: overrides.contextBoundarySeq ?? null,
   };
 }
 
