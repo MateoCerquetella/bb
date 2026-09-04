@@ -11,6 +11,7 @@ import { withThreadContextClearGuard } from "./thread-context-mutation-guard.js"
 import { appendThreadEvent } from "./thread-events.js";
 import { stopThreadForCurrentState } from "./thread-lifecycle.js";
 import { buildThreadStatusChangeMetadata } from "./thread-runtime-display.js";
+import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
 
 export async function clearThreadContext(
   deps: LoggedPendingInteractionWorkSessionDeps,
@@ -19,7 +20,7 @@ export async function clearThreadContext(
     thread: Thread;
   },
 ): Promise<void> {
-  return withThreadContextClearGuard(args.thread.id, async () => {
+  await withThreadContextClearGuard(args.thread.id, async () => {
     const thread = getThread(deps.db, args.thread.id);
     if (!thread) {
       throw new ApiError(404, "invalid_request", "Thread not found");
@@ -73,5 +74,9 @@ export async function clearThreadContext(
       ["history-rewritten", "status-changed"],
       buildThreadStatusChangeMetadata(deps, releasedThread),
     );
+  });
+  requestQueuedMessageDispatch(deps, {
+    kind: "thread-ready",
+    threadId: args.thread.id,
   });
 }

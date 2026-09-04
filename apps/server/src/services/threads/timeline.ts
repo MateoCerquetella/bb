@@ -1066,12 +1066,13 @@ function resolveTimelineWindowBounds(
       effectiveSegmentLimit: segmentLimit,
       knownHasOlderSegments: null,
       sequenceWindowStart: null,
-      sequenceStart: 0,
+      sequenceStart: minimumSequenceStart,
     };
   }
 
   const segmentCount = Math.max(1, affordable);
-  const sequenceStart = anchors[segmentCount - 1]?.sequence ?? 0;
+  const sequenceStart =
+    anchors[segmentCount - 1]?.sequence ?? minimumSequenceStart;
   const budgetHasOlderRows =
     budgetFloorSequence !== undefined &&
     (budgetFloorSequence < sequenceStart ||
@@ -1113,6 +1114,13 @@ function resolveTimelineSegmentWindow(
 
   if (page.kind === "older") {
     const cursor = page.beforeCursor;
+    if (cursor.anchorSeq < sequenceStart) {
+      throw new ApiError(
+        400,
+        "invalid_request",
+        "Timeline pagination cursor is before the context boundary",
+      );
+    }
     const sequenceCursor = readSequenceCursor(cursor, threadId);
     if (sequenceCursor === null) {
       const cursorAnchor = getTimelineSegmentAnchorAtSequence(db, {

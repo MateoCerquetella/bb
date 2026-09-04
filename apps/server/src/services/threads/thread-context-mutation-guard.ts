@@ -2,6 +2,12 @@ import { ApiError } from "../../errors.js";
 
 const inFlightByThreadId = new Map<string, number>();
 
+export class ThreadContextClearInProgressError extends ApiError {
+  constructor() {
+    super(409, "invalid_request", "Thread context is being cleared");
+  }
+}
+
 async function withThreadContextMutationGuard<T>(
   threadId: string,
   mode: "clear" | "send",
@@ -9,12 +15,11 @@ async function withThreadContextMutationGuard<T>(
 ): Promise<T> {
   const inFlight = inFlightByThreadId.get(threadId) ?? 0;
   if (inFlight !== 0 && (mode === "clear" || inFlight < 0)) {
+    if (mode === "send") throw new ThreadContextClearInProgressError();
     throw new ApiError(
       409,
       "invalid_request",
-      mode === "send"
-        ? "Thread context is being cleared"
-        : "Thread is processing another request",
+      "Thread is processing another request",
     );
   }
   inFlightByThreadId.set(threadId, mode === "clear" ? -1 : inFlight + 1);

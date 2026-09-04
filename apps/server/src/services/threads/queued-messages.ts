@@ -85,6 +85,10 @@ import {
 } from "../lib/lifecycle-api-errors.js";
 import { validatePromptAttachmentReferences } from "../projects/attachments.js";
 import { requestQueuedMessageDispatch } from "./queued-message-dispatch.js";
+import {
+  ThreadContextClearInProgressError,
+  withThreadSendGuard,
+} from "./thread-context-mutation-guard.js";
 
 interface SendQueuedMessageArgs {
   claimPolicy: QueuedThreadMessageGroupClaimPolicy;
@@ -692,7 +696,9 @@ async function sendClaimedQueuedMessageForThread(
   if (notice) {
     return notice;
   }
-  const sent = await sendClaimedQueuedMessageForIdleProviderThread(deps, args);
+  const sent = await withThreadSendGuard(args.thread.id, () =>
+    sendClaimedQueuedMessageForIdleProviderThread(deps, args),
+  );
   if (sent) {
     return sent;
   }
@@ -803,7 +809,10 @@ export async function sendQueuedMessage(
     );
   } catch (error) {
     releaseQueuedMessageClaims(deps, queuedMessages);
-    if (isQueuedMessageAutoSendPausedError(error)) {
+    if (
+      isQueuedMessageAutoSendPausedError(error) ||
+      error instanceof ThreadContextClearInProgressError
+    ) {
       return toThreadQueuedMessage(queuedMessages[0]!);
     }
     throw error;
@@ -883,7 +892,8 @@ export async function sendNextQueuedMessageIfPresent(
     releaseQueuedMessageClaims(deps, nextQueuedMessages);
     if (
       isQueuedMessageClaimLostError(error) ||
-      isQueuedMessageAutoSendPausedError(error)
+      isQueuedMessageAutoSendPausedError(error) ||
+      error instanceof ThreadContextClearInProgressError
     ) {
       return false;
     }
