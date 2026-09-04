@@ -5,7 +5,7 @@ import {
   turnScope,
   type PromptInput,
 } from "@bb/domain";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { registerHostRpcResponder } from "../helpers/host-rpc.js";
 import { readJson } from "../helpers/json.js";
 import {
@@ -260,6 +260,63 @@ describe("public thread banner actions", () => {
       expect(
         listEvents(harness.db, { threadId: fixture.threadId }),
       ).toHaveLength(0);
+    });
+  });
+
+  it("rejects a send while an in-place context clear is in flight", async () => {
+    await withTestHarness(async (harness) => {
+      const fixture = seedBannerFixture(harness, { status: "idle" });
+      seedThreadRuntimeState(harness.deps, {
+        environmentId: fixture.environmentId,
+        providerThreadId: "provider-thread-1",
+        threadId: fixture.threadId,
+      });
+      let finishStop: () => void = () => {};
+      const stopPending = new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+      const responder = registerHostRpcResponder(harness, {
+        hostId: fixture.hostId,
+        sessionId: fixture.sessionId,
+        handle: async ({ command }) => {
+          expect(command).toMatchObject({
+            type: "thread.stop",
+            threadId: fixture.threadId,
+          });
+          await stopPending;
+          return { ok: true, result: { providerCheckpointId: null } };
+        },
+      });
+
+      const clearResponsePending = harness.app.request(
+        `/api/v1/threads/${fixture.threadId}/context/clear`,
+        { method: "POST" },
+      );
+      await vi.waitFor(() => {
+        expect(responder.requests).toHaveLength(1);
+      });
+
+      const sendResponse = await harness.app.request(
+        `/api/v1/threads/${fixture.threadId}/send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "start",
+            input: [{ type: "text", text: "race the clear", mentions: [] }],
+          }),
+        },
+      );
+      expect(sendResponse.status).toBe(409);
+      expect(await readJson(sendResponse)).toMatchObject({
+        message: "Thread context is being cleared",
+      });
+
+      finishStop();
+      expect((await clearResponsePending).status).toBe(200);
+      expect(
+        getLastStoredProviderThreadId(harness.db, fixture.threadId),
+      ).toBeNull();
     });
   });
 

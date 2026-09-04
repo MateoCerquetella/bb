@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  encodeClientTurnRequestIdNumber,
   THREAD_CONTEXT_CLEAR_OPERATION,
   threadScope,
   turnScope,
@@ -150,6 +151,121 @@ describe("timeline context-clear epochs", () => {
       ),
     ).toEqual(["Newest response"]);
     expect(listEvents(db, { threadId: thread.id })).toHaveLength(6);
+    db.$client.close();
+  });
+
+  it("never paginates older rows across the completed context boundary", () => {
+    const { db, thread } = setup();
+    const requestEvent = (sequence: number, value: number, text: string) => ({
+      threadId: thread.id,
+      sequence,
+      type: "client/turn/requested" as const,
+      scope: threadScope(),
+      itemId: null,
+      itemKind: null,
+      parentToolCallId: null,
+      data: JSON.stringify({
+        direction: "outbound",
+        source: "tell",
+        initiator: "user",
+        request: { method: "turn/start", params: {} },
+        requestId: encodeClientTurnRequestIdNumber({ value }),
+        senderThreadId: null,
+        input: [{ type: "text", text, mentions: [] }],
+        target: { kind: "new-turn" },
+        execution: {
+          model: "gpt-5",
+          serviceTier: "default",
+          reasoningLevel: "medium",
+          permissionMode: "full",
+          source: "client/turn/requested",
+        },
+      }),
+    });
+    insertEvents(db, noopNotifier, [
+      {
+        threadId: thread.id,
+        sequence: 1,
+        type: "system/manager/user_message",
+        scope: threadScope(),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ text: "Old chat must stay hidden" }),
+      },
+      {
+        threadId: thread.id,
+        sequence: 2,
+        type: "system/operation",
+        scope: threadScope(),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({
+          operation: THREAD_CONTEXT_CLEAR_OPERATION,
+          operationId: "completed-clear",
+          status: "completed",
+          message: "Fresh context",
+        }),
+      },
+      requestEvent(3, 1, "First fresh message"),
+      {
+        threadId: thread.id,
+        sequence: 4,
+        type: "system/manager/user_message",
+        scope: threadScope(),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ text: "First fresh response" }),
+      },
+      requestEvent(5, 2, "Second fresh message"),
+      {
+        threadId: thread.id,
+        sequence: 6,
+        type: "system/manager/user_message",
+        scope: threadScope(),
+        itemId: null,
+        itemKind: null,
+        parentToolCallId: null,
+        data: JSON.stringify({ text: "Second fresh response" }),
+      },
+    ]);
+
+    let page = buildThreadTimeline(db, thread, {
+      eventBudget: 1_000,
+      includeNestedRows: true,
+      includeProviderUnhandledOperations: false,
+      maxInlineOutputChars: null,
+      maxSeq: 6,
+      page: { kind: "latest", segmentLimit: 1 },
+    });
+    const rowSequences: number[] = [];
+
+    for (;;) {
+      expect(page.contextBoundarySeq).toBe(2);
+      rowSequences.push(...page.rows.map((row) => row.sourceSeqStart));
+      expect(page.rows.every((row) => row.sourceSeqStart >= 2)).toBe(true);
+      if (!page.timelinePage.hasOlderRows) break;
+      const cursor = page.timelinePage.olderCursor;
+      if (cursor === null) throw new Error("expected an older cursor");
+      expect(cursor.anchorSeq).toBeGreaterThanOrEqual(2);
+      page = buildThreadTimeline(db, thread, {
+        eventBudget: 1_000,
+        includeNestedRows: true,
+        includeProviderUnhandledOperations: false,
+        maxInlineOutputChars: null,
+        maxSeq: 6,
+        page: { kind: "older", segmentLimit: 1, beforeCursor: cursor },
+      });
+    }
+
+    expect(rowSequences).toContain(2);
+    expect(rowSequences).not.toContain(1);
+    expect(page.timelinePage).toMatchObject({
+      hasOlderRows: false,
+      olderCursor: null,
+    });
     db.$client.close();
   });
 });
