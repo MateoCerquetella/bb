@@ -113,7 +113,10 @@ export function refineTurnRequestRetryMarker(
   data: Pick<TurnRequestEventData, "retryOfRequestId" | "retryAttempt">,
   ctx: z.RefinementCtx,
 ): void {
-  if ((data.retryOfRequestId === undefined) !== (data.retryAttempt === undefined)) {
+  if (
+    (data.retryOfRequestId === undefined) !==
+    (data.retryAttempt === undefined)
+  ) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message:

@@ -196,6 +196,7 @@ interface CommandCompletedArgs extends ProviderTurnEventOptions {
   cwd?: string;
   exitCode?: number;
   itemId?: string;
+  presentation?: ThreadEventItemPresentation;
   status?: "pending" | "completed" | "failed" | "interrupted";
 }
 
@@ -676,6 +677,7 @@ export function createTimelineEventFactory(
             exitCode: args.exitCode,
             status: args.status ?? "completed",
             approvalStatus: args.approvalStatus ?? null,
+            ...(args.presentation ? { presentation: args.presentation } : {}),
           },
         },
       };
@@ -709,6 +711,7 @@ export function createTimelineEventFactory(
             exitCode: args.exitCode,
             status: args.status ?? "pending",
             approvalStatus: args.approvalStatus ?? null,
+            ...(args.presentation ? { presentation: args.presentation } : {}),
           },
         },
       };

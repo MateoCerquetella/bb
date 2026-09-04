@@ -1,6 +1,7 @@
-# Marketplace entry, icon, and screenshots
+# Marketplace entry, icon, screenshots, and overview file
 
-Read this file before you create a marketplace entry, icon, or screenshots.
+Read this file before you create a marketplace entry, icon, screenshots, or
+overview file.
 Confirm every field against schema/marketplace-v2.schema.json in the
 marketplace repository.
 
@@ -10,10 +11,11 @@ Create entries/<plugin-id>.json. The filename, entry ID, and plugin manifest ID
 must match.
 
 The schema rejects an unknown field. The permitted fields are id, displayName,
-description, icon, tags, author, source, category, and screenshots. The schema
-requires id, displayName, description, icon, author, and source. The build
-writes publishedAt itself, so do not author it. The entry has no engines field
-and no version field. Read the plugin manifest for compatibility data instead.
+description, icon, tags, author, source, category, screenshots, and overview. The
+schema requires id, displayName, description, icon, author, and source. The
+build writes publishedAt itself, so do not author it.
+The entry has no engines field and no version field. Read the plugin manifest
+for compatibility data instead.
 
 ### Write the display name
 
@@ -93,6 +95,7 @@ Use this shape only as a guide:
   "description": "Keeps project notes beside each BB thread.",
   "icon": { "url": "./icons/notes-1234abcd.svg" },
   "screenshots": ["./screenshots/notes/overview.png"],
+  "overview": "./overview/notes.md",
   "tags": ["notes", "interface"],
   "author": {
     "name": "Acme",
@@ -206,6 +209,48 @@ Delete a file you do not reference. The build changes each local path to a CDN
 URL. Do not write a CDN URL yourself. An absolute URL must use HTTPS on
 getbb.app, so use a local path for a submission.
 
+## Add the overview file
+
+The plugin author can keep a long-form description in a PLUGIN_OVERVIEW.md
+file beside the plugin package.json. The store detail page shows the short
+description as a lead paragraph under the plugin name, then an Overview
+section with this file. It is optional. Do not write one for the author. Copy
+the file only when the plugin repository holds it.
+
+Copy the file to overview/<plugin-id>.md in the marketplace repository. Reference
+it from the entry with the exact relative path:
+
+```json
+"overview": "./overview/notes.md"
+```
+
+The marketplace build folds the file text into the published document. It
+rejects a file in overview/ that no entry references.
+
+### Follow the content rules
+
+The file must be UTF-8 text with a maximum of 4000 characters. The build
+rejects a longer file.
+
+The file can use headings, paragraphs, emphasis, strong text, strikethrough,
+inline code, code blocks, blockquotes, ordered lists, unordered lists,
+thematic breaks, and links. Each link must be an absolute https URL. The store
+opens each link in the browser.
+
+The build rejects raw HTML, images, tables, footnotes, task lists, and control
+characters. The store also removes such content at render time. Put images in
+screenshots instead.
+
+The store renders each heading in the file as a small uppercase label, so use
+`##` headings for sections such as What you get, How it works, and
+Requirements. Do not start the file with a `#` title. The page already shows
+the plugin name. Do not repeat the short description as the first sentence.
+The page shows it directly above.
+
+Read the file before you copy it. Confirm every claim against the behavior you
+observed. Remove private data, a local path, or an internal URL. Ask the user
+before you change the author's text.
+
 ## Check the entry quality
 
 Read the finished entry as a user who has never seen the plugin. Confirm each
@@ -220,6 +265,8 @@ statement below before you open the pull request.
 - The tags hold words a user would search for.
 - The icon reads clearly at 40 pixels.
 - The first screenshot shows the main surface with real content.
+- The overview file, when present, uses only the permitted markdown and https
+  links.
 - No field holds private data, a local path, or an internal URL.
 
 Fix the entry when one statement fails. Do not submit an entry you cannot
