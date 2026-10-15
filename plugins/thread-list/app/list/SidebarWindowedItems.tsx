@@ -18,7 +18,7 @@ import {
   type SidebarWindowedNavigationEntry,
 } from "./sidebarThreadShortcuts.js";
 
-const WINDOW_VIEWPORT_MARGIN_PX = 240;
+const WINDOW_VIEWPORT_MARGIN_PX = 90;
 const DEFAULT_ROW_HEIGHT_PX = 30;
 
 interface MeasuredItemHeight {

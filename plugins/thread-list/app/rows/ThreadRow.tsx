@@ -1,6 +1,8 @@
 import {
   memo,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -43,7 +45,6 @@ import {
   experimental_THREAD_ACTION_GROUPS,
   experimental_useThreadActions,
   experimental_useSidebarThreadSplit,
-  experimental_useProviders,
   experimental_ProviderIcon as ProviderIcon,
   ThreadTitle,
   useSidebarSplitLayout,
@@ -55,6 +56,7 @@ import {
   type PluginThreadActionsInlineItem,
   type PluginThreadActionsTriggerProps,
   type PluginSidebarThreadRowStatus,
+  type PluginProvidersState,
 } from "@get-bb/plugin-sdk/app";
 import type { SidebarThread } from "../model/sidebar-thread.js";
 import {
@@ -114,6 +116,10 @@ import {
 } from "../list/ThreadRowActionsCustomize.js";
 
 const SIDEBAR_TITLE_DOUBLE_CLICK_MS = 400;
+
+export const SidebarProvidersContext = createContext<
+  PluginProvidersState["providers"]
+>([]);
 
 let lastSidebarTitleClick: { at: number; threadId: string } | null = null;
 
@@ -426,7 +432,7 @@ function ThreadRowComponent({
   const sdk = useSdk();
   const openThreadInSplit = useOpenThreadInSplit();
   const showProviderIcons = useAtomValue(sidebarShowProviderIconsAtom);
-  const { providers } = experimental_useProviders();
+  const providers = useContext(SidebarProvidersContext);
   const provider = showProviderIcons
     ? providers.find((candidate) => candidate.id === thread.providerId)
     : undefined;

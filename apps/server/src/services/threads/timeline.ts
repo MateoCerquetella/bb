@@ -413,6 +413,9 @@ function tryReadClientTurnRequestedRequestId(
   row: StoredEventRow,
   decode: StoredEventDecoder = parseStoredEvent,
 ): ClientTurnRequestId | null {
+  if (row.type !== "client/turn/requested") {
+    return null;
+  }
   const event = decode(row);
   if (event.type !== "client/turn/requested") {
     return null;
@@ -2191,13 +2194,23 @@ function buildTimelineTurnSummaryDetailsPage(
     beforeSequence: contextSequenceCutoff + 1,
     types: ["turn/started", "turn/completed"],
   });
-  const wholeItemEventRows = ensureSequenceWindowWholeItemRows(db, {
-    beforeSequence: detailsWindow.beforeSequence,
-    maxInlineOutputChars: detailsInlineOutputLimit,
-    rows: mergeStoredEventRowsById([...turnContextRows, ...turnLifecycleRows]),
-    sequenceStart: detailsWindow.sequenceStart,
-    threadId: thread.id,
-  });
+  const turnRows = mergeStoredEventRowsById([
+    ...turnContextRows,
+    ...turnLifecycleRows,
+  ]);
+  const wholeItemEventRows =
+    hasCurrentStartedRow &&
+    turnRows.every(
+      (row) => row.itemId === null || row.turnId === options.turnId,
+    )
+      ? turnRows
+      : ensureSequenceWindowWholeItemRows(db, {
+          beforeSequence: detailsWindow.beforeSequence,
+          maxInlineOutputChars: detailsInlineOutputLimit,
+          rows: turnRows,
+          sequenceStart: detailsWindow.sequenceStart,
+          threadId: thread.id,
+        });
   const eventRowsWithParentedChildren = ensureTimelineWindowParentedRows(db, {
     excludeDiagnosticEvents: !includeDiagnosticOperations,
     maxInlineOutputChars: detailsInlineOutputLimit,
